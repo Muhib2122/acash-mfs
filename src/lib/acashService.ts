@@ -33,6 +33,7 @@ import {
 import {
   AcashBooth,
   AcashDirectoryEntry,
+  AcashIdentityLock,
   AcashMapLocation,
   AcashTransaction,
   AcashUser,
@@ -45,6 +46,7 @@ import {
   CreatorMapRole,
   FeeBreakdown,
   FeeConfig,
+  IdentityLockType,
   KycInfo,
   MainAdminCredentialConfig,
   MainTreasuryVault,
@@ -59,6 +61,7 @@ import {
 
 const USERS_COL = 'acash_users';
 const DIRECTORY_COL = 'acash_directory';
+const LOCKS_COL = 'acash_identity_locks';
 const TX_COL = 'acash_transactions';
 const BOOTHS_COL = 'acash_booths';
 const MAP_LOCATIONS_COL = 'acash_map_locations';
@@ -254,6 +257,199 @@ export function normalizeBdPhone(input: string): string {
     return digits.slice(2);
   }
   return digits;
+}
+
+function normalizeNidForLock(input: string): string {
+  return input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeTaxForLock(input: string): string {
+  return input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+async function sha256Hex(raw: string): Promise<string> {
+  try {
+    if (typeof window !== 'undefined' && window.crypto?.subtle) {
+      const encoded = new TextEncoder().encode(raw);
+      const digest = await window.crypto.subtle.digest('SHA-256', encoded);
+      return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  } catch {
+    // fallback below
+  }
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch + i;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+async function buildIdentityLockId(lockType: IdentityLockType, rawValue: string): Promise<string> {
+  if (lockType === 'phone') {
+    return `phone_${normalizeBdPhone(rawValue)}`;
+  }
+  if (lockType === 'email') {
+    const hash = await sha256Hex(`acash_lock_email_${rawValue.trim().toLowerCase()}`);
+    return `email_${hash}`;
+  }
+  if (lockType === 'nid') {
+    const hash = await sha256Hex(`acash_lock_nid_${normalizeNidForLock(rawValue)}`);
+    return `nid_${hash}`;
+  }
+  const hash = await sha256Hex(`acash_lock_tax_${normalizeTaxForLock(rawValue)}`);
+  return `tax_${hash}`;
+}
+
+function identityConflictMessage(lockType: IdentityLockType): string {
+  switch (lockType) {
+    case 'email':
+      return 'An Acash account already exists with this Gmail address. One Gmail can only create one Acash account.';
+    case 'phone':
+      return 'An Acash account already exists with this mobile number. One mobile number can only create one Acash account.';
+    case 'nid':
+      return 'This NID / Passport number is already registered with another Acash account. Same KYC info cannot be used on multiple accounts.';
+    case 'tax':
+      return 'This Tax Certificate (TIN / BIN) number is already registered with another Acash Merchant account.';
+  }
+}
+
+async function checkIdentityLockAvailable(
+  lockType: IdentityLockType,
+  rawValue: string,
+  excludeAccountId?: string
+): Promise<void> {
+  const lockId = await buildIdentityLockId(lockType, rawValue);
+  if (!/^[a-zA-Z0-9_-]{6,128}$/.test(lockId)) return;
+  try {
+    const snap = await getDoc(doc(db, LOCKS_COL, lockId));
+    if (snap.exists()) {
+      const existing = snap.data() as AcashIdentityLock;
+      if (!excludeAccountId || existing.accountId !== excludeAccountId) {
+        throw new Error(identityConflictMessage(lockType));
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('already')) {
+      throw err;
+    }
+  }
+}
+
+async function claimIdentityLock(
+  lockType: IdentityLockType,
+  rawValue: string,
+  accountId: string,
+  createdAt: number
+): Promise<void> {
+  const lockId = await buildIdentityLockId(lockType, rawValue);
+  if (!/^[a-zA-Z0-9_-]{6,128}$/.test(lockId)) return;
+  const ref = doc(db, LOCKS_COL, lockId);
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const existing = snap.data() as AcashIdentityLock;
+      if (existing.accountId === accountId) {
+        return;
+      }
+      throw new Error(identityConflictMessage(lockType));
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('already')) {
+      throw err;
+    }
+  }
+  const lockDoc: AcashIdentityLock = {
+    lockId,
+    lockType,
+    accountId,
+    createdAt,
+  };
+  await setDoc(ref, lockDoc);
+}
+
+async function backfillUserIdentityLocks(user: AcashUser): Promise<void> {
+  if (!user?.accountId) return;
+  const created = user.createdAt || Date.now();
+  if (user.email) {
+    await claimIdentityLock('email', user.email, user.accountId, created).catch(() => {});
+  }
+  if (user.phone) {
+    await claimIdentityLock('phone', user.phone, user.accountId, created).catch(() => {});
+  }
+  if (user.kyc?.nidNumber) {
+    await claimIdentityLock('nid', user.kyc.nidNumber, user.accountId, created).catch(() => {});
+  }
+  if (user.kyc?.taxCertificateNumber) {
+    await claimIdentityLock('tax', user.kyc.taxCertificateNumber, user.accountId, created).catch(
+      () => {}
+    );
+  }
+}
+
+export async function checkRegistrationIdentityAvailability(params: {
+  phone: string;
+  email: string;
+}): Promise<void> {
+  const phone = normalizeBdPhone(params.phone);
+  const email = params.email.trim().toLowerCase();
+
+  // 1. Check local synchronized store for both phone and Gmail
+  const store = readLocalStore();
+  for (const u of Object.values(store.users)) {
+    if (phone && normalizeBdPhone(u.phone) === phone) {
+      throw new Error(identityConflictMessage('phone'));
+    }
+    if (email && u.email && u.email.trim().toLowerCase() === email) {
+      throw new Error(identityConflictMessage('email'));
+    }
+  }
+
+  // 2. Check Firestore public routing directory for phone
+  if (phone) {
+    try {
+      const dupDirSnap = await getDocs(
+        query(collection(db, DIRECTORY_COL), where('phone', '==', phone), limit(1))
+      );
+      if (!dupDirSnap.empty) {
+        throw new Error(identityConflictMessage('phone'));
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('already')) {
+        throw err;
+      }
+    }
+  }
+
+  // 3. Check Firestore acash_users if caller has read permission (e.g., matching Google email or Admin)
+  if (email) {
+    try {
+      const dupEmailSnap = await getDocs(
+        query(collection(db, USERS_COL), where('email', '==', email), limit(1))
+      );
+      if (!dupEmailSnap.empty) {
+        throw new Error(identityConflictMessage('email'));
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('already')) {
+        throw err;
+      }
+    }
+  }
+
+  // 4. Check zero-PII global deterministic identity locks across all portals & devices
+  if (phone) {
+    await checkIdentityLockAvailable('phone', phone);
+  }
+  if (email) {
+    await checkIdentityLockAvailable('email', email);
+  }
 }
 
 function normalizeAccountIdInput(input: string): string {
@@ -1318,6 +1514,7 @@ export async function ensureDefaultPlatformData(): Promise<void> {
         if (!dirSnap.exists()) {
           await setDoc(dirRef, toDirectoryEntry(u));
         }
+        void backfillUserIdentityLocks(u);
       }
 
       const seedBooths = Object.values(buildSeedBooths());
@@ -1710,23 +1907,8 @@ export async function registerAcashUser(params: {
     );
   }
 
-  // Check duplicate in local store & Firestore directory
-  const existingLocal = findInLocalStore(phone);
-  if (existingLocal) {
-    throw new Error('An Acash account with this mobile number already exists.');
-  }
-  try {
-    const dupDirSnap = await getDocs(
-      query(collection(db, DIRECTORY_COL), where('phone', '==', phone), limit(1))
-    );
-    if (!dupDirSnap.empty) {
-      throw new Error('An Acash account with this mobile number already exists.');
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('already exists')) {
-      throw err;
-    }
-  }
+  // Enforce strict 1-to-1 Gmail and Mobile Number uniqueness across local store, directory, & global identity locks
+  await checkRegistrationIdentityAvailability({ phone, email });
 
   const referredByType: ReferralSource = params.referredByType === 'agent' ? 'agent' : 'own_app';
   let referredByAgentId: string | undefined;
@@ -1832,6 +2014,19 @@ export async function registerAcashUser(params: {
   };
   store.notifications[regNotif.id] = regNotif;
   writeLocalStore(store, true);
+
+  // Claim global 1-to-1 zero-PII identity locks for Gmail and Phone before/during cloud user creation
+  try {
+    await claimIdentityLock('email', email, accountId, now);
+    await claimIdentityLock('phone', phone, accountId, now);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('already')) {
+      delete store.users[accountId];
+      delete store.notifications[regNotif.id];
+      writeLocalStore(store, true);
+      throw err;
+    }
+  }
 
   let cloudUserWritten = false;
   let cloudDirWritten = false;
@@ -2090,13 +2285,43 @@ export function subscribeToUserTransactions(
     unsubSenderFs();
     unsubReceiverFs();
     try {
-      const mergeSnap = (docs: Array<{ data: () => unknown }>) => {
-        const fsTxs = docs.map((d) => d.data() as AcashTransaction);
+      const mergeSnap = (
+        snap: {
+          docs: Array<{ data: () => unknown }>;
+          docChanges: () => Array<{ type: string; doc: { id: string } }>;
+          metadata: { fromCache: boolean };
+        },
+        roleField: 'senderUid' | 'receiverUid'
+      ) => {
+        const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
+        const store = readLocalStore();
+        let mutated = false;
+
+        for (const change of snap.docChanges()) {
+          if (change.type === 'removed' && store.transactions[change.doc.id]) {
+            delete store.transactions[change.doc.id];
+            mutated = true;
+          }
+        }
+
+        if (!snap.metadata.fromCache && fsTxs.length < 150) {
+          const serverIds = new Set(fsTxs.map((t) => t.txId));
+          for (const [id, existingTx] of Object.entries(store.transactions)) {
+            if (existingTx[roleField] === uid && !serverIds.has(id)) {
+              delete store.transactions[id];
+              mutated = true;
+            }
+          }
+        }
+
         if (fsTxs.length > 0) {
-          const store = readLocalStore();
           for (const tx of fsTxs) {
             store.transactions[tx.txId] = tx;
+            mutated = true;
           }
+        }
+
+        if (mutated) {
           writeLocalStore(store, false);
         }
         emitLocal();
@@ -2104,12 +2329,12 @@ export function subscribeToUserTransactions(
 
       unsubSenderFs = onSnapshot(
         query(collection(db, TX_COL), where('senderUid', '==', uid), limit(150)),
-        (snap) => mergeSnap(snap.docs),
+        (snap) => mergeSnap(snap, 'senderUid'),
         () => emitLocal()
       );
       unsubReceiverFs = onSnapshot(
         query(collection(db, TX_COL), where('receiverUid', '==', uid), limit(150)),
-        (snap) => mergeSnap(snap.docs),
+        (snap) => mergeSnap(snap, 'receiverUid'),
         () => emitLocal()
       );
     } catch {
@@ -2155,12 +2380,13 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
             store.users[u.accountId] = u;
           }
           writeLocalStore(store, false);
-          // Backfill directory entries for existing accounts when signed in as Admin
+          // Backfill directory entries and identity locks for existing accounts when signed in as Admin
           if (auth.currentUser?.emailVerified && isMainAdminEmail(auth.currentUser.email)) {
             for (const u of fsUsers) {
               void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), {
                 merge: true,
               }).catch(() => {});
+              void backfillUserIdentityLocks(u);
             }
           }
         }
@@ -2241,11 +2467,43 @@ export function subscribeToAllTransactions(
       q,
       (snap) => {
         const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
+        const store = readLocalStore();
+        let mutated = false;
+
+        for (const change of snap.docChanges()) {
+          if (change.type === 'removed' && store.transactions[change.doc.id]) {
+            delete store.transactions[change.doc.id];
+            mutated = true;
+          }
+        }
+
+        if (!snap.metadata.fromCache) {
+          const serverIds = new Set(fsTxs.map((t) => t.txId));
+          const oldestServerTs =
+            fsTxs.length >= 300 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
+          for (const [id, existingTx] of Object.entries(store.transactions)) {
+            const isCloudTx = Boolean(
+              existingTx.senderUid ||
+                existingTx.receiverUid ||
+                existingTx.type === 'admin_credit' ||
+                existingTx.type === 'admin_transfer' ||
+                existingTx.approvedBy
+            );
+            if (isCloudTx && existingTx.createdAt >= oldestServerTs && !serverIds.has(id)) {
+              delete store.transactions[id];
+              mutated = true;
+            }
+          }
+        }
+
         if (fsTxs.length > 0) {
-          const store = readLocalStore();
           for (const tx of fsTxs) {
             store.transactions[tx.txId] = tx;
+            mutated = true;
           }
+        }
+
+        if (mutated) {
           writeLocalStore(store, false);
         }
         emitLocal();
@@ -3204,47 +3462,63 @@ export async function adminTransferBetweenAccounts(params: {
 export async function adminApproveTransaction(txId: string, adminEmail: string): Promise<void> {
   const now = Date.now();
   const store = readLocalStore();
-  const tx = store.transactions[txId];
+  let tx = store.transactions[txId];
+  if (!tx) {
+    try {
+      const snap = await getDoc(doc(db, TX_COL, txId));
+      if (snap.exists()) {
+        tx = snap.data() as AcashTransaction;
+      }
+    } catch {
+      // ignore
+    }
+  }
   if (!tx) throw new Error('Transaction not found.');
   if (tx.status !== 'pending_admin_approval') {
     throw new Error('Transaction is no longer pending approval.');
   }
 
-  if (tx.receiverRole === 'U' || tx.receiverRole === 'A' || tx.receiverRole === 'M') {
-    const receiver = store.users[tx.receiverId];
-    if (receiver) {
-      const getsCashOutCommission =
-        tx.type === 'cash_out' || (tx.type === 'merchant_cash_out' && tx.receiverRole === 'A');
-      const creditAmount = getsCashOutCommission
-        ? Number((tx.amount + tx.feeBreakdown.agentAmount).toFixed(2))
-        : tx.amount;
-      const commInc = getsCashOutCommission ? tx.feeBreakdown.agentAmount : 0;
-      store.users[tx.receiverId] = {
-        ...receiver,
-        balance: Number((receiver.balance + creditAmount).toFixed(2)),
-        commissionBalance: Number(((receiver.commissionBalance || 0) + commInc).toFixed(2)),
-        lastActiveAt: now,
-      };
+  // Only credit receiver & agent commission if this transaction was NOT already settled earlier.
+  const shouldCreditBalances = !tx.settledOnce;
+  if (shouldCreditBalances) {
+    if (tx.receiverRole === 'U' || tx.receiverRole === 'A' || tx.receiverRole === 'M') {
+      const receiver = store.users[tx.receiverId];
+      if (receiver) {
+        const getsCashOutCommission =
+          tx.type === 'cash_out' || (tx.type === 'merchant_cash_out' && tx.receiverRole === 'A');
+        const creditAmount = getsCashOutCommission
+          ? Number((tx.amount + tx.feeBreakdown.agentAmount).toFixed(2))
+          : tx.amount;
+        const commInc = getsCashOutCommission ? tx.feeBreakdown.agentAmount : 0;
+        store.users[tx.receiverId] = {
+          ...receiver,
+          balance: Number((receiver.balance + creditAmount).toFixed(2)),
+          commissionBalance: Number(((receiver.commissionBalance || 0) + commInc).toFixed(2)),
+          lastActiveAt: now,
+        };
+      }
     }
-  }
 
-  if (tx.type === 'cash_in') {
-    const sender = store.users[tx.senderId];
-    if (sender) {
-      store.users[tx.senderId] = {
-        ...sender,
-        balance: Number((sender.balance + tx.feeBreakdown.agentAmount).toFixed(2)),
-        commissionBalance: Number(
-          ((sender.commissionBalance || 0) + tx.feeBreakdown.agentAmount).toFixed(2)
-        ),
-      };
+    if (tx.type === 'cash_in') {
+      const sender = store.users[tx.senderId];
+      if (sender) {
+        store.users[tx.senderId] = {
+          ...sender,
+          balance: Number((sender.balance + tx.feeBreakdown.agentAmount).toFixed(2)),
+          commissionBalance: Number(
+            ((sender.commissionBalance || 0) + tx.feeBreakdown.agentAmount).toFixed(2)
+          ),
+        };
+      }
     }
   }
 
   const decisionNotif: AdminNotification = {
     id: `NTF-APR-${txId}`,
-    title: `50K+ Approved: ${tx.txHash}`,
-    message: `Admin ${adminEmail} approved ৳${tx.amount.toLocaleString()} (${tx.senderId} → ${tx.receiverId}). Emails sent.`,
+    title: `${shouldCreditBalances ? '50K+ Approved' : 'Re-Approved (No New Credit)'}: ${tx.txHash}`,
+    message: shouldCreditBalances
+      ? `Admin ${adminEmail} approved ৳${tx.amount.toLocaleString()} (${tx.senderId} → ${tx.receiverId}). Emails sent.`
+      : `Admin ${adminEmail} restored ${tx.txHash} (৳${tx.amount.toLocaleString()}) to completed without duplicate account credit.`,
     category: 'aml_pending',
     severity: 'info',
     createdAt: now,
@@ -3256,8 +3530,8 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
   const approveActivity = makeActivityEntry({
     idPrefix: 'ACT-APR',
     actionType: 'aml_decision',
-    title: `High-Value Approved (৳${tx.amount.toLocaleString()})`,
-    details: `Approved ${tx.type.replace(/_/g, ' ').toUpperCase()} of ৳${tx.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${tx.senderId} to ${tx.receiverId}. Tx Hash: ${tx.txHash}.`,
+    title: `${shouldCreditBalances ? 'High-Value Approved' : 'Restored to Completed'} (৳${tx.amount.toLocaleString()})`,
+    details: `${shouldCreditBalances ? 'Approved' : 'Restored without duplicate credit'} ${tx.type.replace(/_/g, ' ').toUpperCase()} of ৳${tx.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${tx.senderId} to ${tx.receiverId}. Tx Hash: ${tx.txHash}.`,
     actorEmail: adminEmail,
     targetIds: [tx.senderId, tx.receiverId],
     amount: tx.amount,
@@ -3268,6 +3542,7 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
   store.transactions[txId] = {
     ...tx,
     status: 'completed',
+    settledOnce: true,
     approvedBy: adminEmail,
     approvedAt: now,
   };
@@ -3275,11 +3550,13 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
 
   try {
     await runTransaction(db, async (transaction) => {
-      if (store.users[tx.receiverId]) {
-        transaction.set(doc(db, USERS_COL, tx.receiverId), store.users[tx.receiverId]);
-      }
-      if (tx.type === 'cash_in' && store.users[tx.senderId]) {
-        transaction.set(doc(db, USERS_COL, tx.senderId), store.users[tx.senderId]);
+      if (shouldCreditBalances) {
+        if (store.users[tx.receiverId]) {
+          transaction.set(doc(db, USERS_COL, tx.receiverId), store.users[tx.receiverId]);
+        }
+        if (tx.type === 'cash_in' && store.users[tx.senderId]) {
+          transaction.set(doc(db, USERS_COL, tx.senderId), store.users[tx.senderId]);
+        }
       }
       transaction.set(doc(db, TX_COL, txId), store.transactions[txId]);
       transaction.set(doc(db, ADMIN_NOTIF_COL, decisionNotif.id), decisionNotif);
@@ -3316,14 +3593,25 @@ export async function adminRejectTransaction(
 ): Promise<void> {
   const now = Date.now();
   const store = readLocalStore();
-  const tx = store.transactions[txId];
+  let tx = store.transactions[txId];
+  if (!tx) {
+    try {
+      const snap = await getDoc(doc(db, TX_COL, txId));
+      if (snap.exists()) {
+        tx = snap.data() as AcashTransaction;
+      }
+    } catch {
+      // ignore
+    }
+  }
   if (!tx) throw new Error('Transaction not found.');
   if (tx.status !== 'pending_admin_approval') {
     throw new Error('Transaction is no longer pending approval.');
   }
 
+  const shouldRefundEscrow = !tx.settledOnce;
   const sender = store.users[tx.senderId];
-  if (sender) {
+  if (shouldRefundEscrow && sender) {
     store.users[tx.senderId] = {
       ...sender,
       balance: Number((sender.balance + tx.totalDebited).toFixed(2)),
@@ -3334,8 +3622,10 @@ export async function adminRejectTransaction(
   const rejectReason = reason || 'Rejected by Admin AML Security Review';
   const decisionNotif: AdminNotification = {
     id: `NTF-REJ-${txId}`,
-    title: `50K+ Rejected & Refunded: ${tx.txHash}`,
-    message: `Admin ${adminEmail} rejected ৳${tx.amount.toLocaleString()} from ${tx.senderId}. Funds refunded & emails sent.`,
+    title: `${shouldRefundEscrow ? '50K+ Rejected & Refunded' : 'Transaction Rejected (No New Credit)'}: ${tx.txHash}`,
+    message: shouldRefundEscrow
+      ? `Admin ${adminEmail} rejected ৳${tx.amount.toLocaleString()} from ${tx.senderId}. Funds refunded & emails sent.`
+      : `Admin ${adminEmail} marked ${tx.txHash} rejected without issuing any new account credit.`,
     category: 'aml_pending',
     severity: 'warning',
     createdAt: now,
@@ -3347,7 +3637,7 @@ export async function adminRejectTransaction(
   const rejectActivity = makeActivityEntry({
     idPrefix: 'ACT-REJ',
     actionType: 'aml_decision',
-    title: `High-Value Rejected & Refunded (৳${tx.amount.toLocaleString()})`,
+    title: `${shouldRefundEscrow ? 'High-Value Rejected & Refunded' : 'Transaction Rejected'} (৳${tx.amount.toLocaleString()})`,
     details: `Rejected ${tx.type.replace(/_/g, ' ').toUpperCase()} of ৳${tx.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${tx.senderId} to ${tx.receiverId} (Tx Hash: ${tx.txHash}). Reason: ${rejectReason}.`,
     actorEmail: adminEmail,
     targetIds: [tx.senderId, tx.receiverId],
@@ -3367,7 +3657,7 @@ export async function adminRejectTransaction(
 
   try {
     await runTransaction(db, async (transaction) => {
-      if (store.users[tx.senderId]) {
+      if (shouldRefundEscrow && store.users[tx.senderId]) {
         transaction.set(doc(db, USERS_COL, tx.senderId), store.users[tx.senderId]);
       }
       transaction.set(doc(db, TX_COL, txId), store.transactions[txId]);
@@ -3396,6 +3686,142 @@ export async function adminRejectTransaction(
     txHash: tx.txHash,
     reason: rejectReason,
   });
+}
+
+export async function adminMarkTransactionPending(
+  txId: string,
+  adminEmail: string,
+  reason?: string
+): Promise<AcashTransaction> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let tx = store.transactions[txId];
+  if (!tx) {
+    try {
+      const snap = await getDoc(doc(db, TX_COL, txId));
+      if (snap.exists()) {
+        tx = snap.data() as AcashTransaction;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!tx) throw new Error('Transaction not found.');
+  if (tx.status === 'pending_admin_approval') {
+    throw new Error('Transaction is already in Pending Admin Approval status.');
+  }
+
+  // Strictly preserve settledOnce so moving any completed/settled tx to pending NEVER credits any account anew.
+  const wasAlreadySettled = Boolean(
+    tx.settledOnce ||
+      tx.status === 'completed' ||
+      tx.status === 'refunded' ||
+      tx.status === 'partially_refunded'
+  );
+  const cleanReason = (reason || '').trim();
+  const nextNote = cleanReason
+    ? (tx.note ? `${tx.note} · [Pending: ${cleanReason}]` : `[Pending: ${cleanReason}]`).slice(0, 300)
+    : tx.note;
+
+  const updatedTx: AcashTransaction = {
+    ...tx,
+    status: 'pending_admin_approval',
+    settledOnce: wasAlreadySettled,
+    ...(nextNote ? { note: nextNote } : {}),
+    approvedBy: adminEmail,
+    approvedAt: now,
+  };
+
+  const pendingNotif: AdminNotification = {
+    id: `NTF-PND-${txId}-${now.toString(36).toUpperCase()}`,
+    title: `Marked Pending: ${tx.txHash}`,
+    message: `Admin ${adminEmail} moved ৳${tx.amount.toLocaleString()} (${tx.senderId} → ${tx.receiverId}) to Pending Review with zero new account credit.`,
+    category: 'aml_pending',
+    severity: 'warning',
+    createdAt: now,
+    read: false,
+    targetSection: 'approvals',
+  };
+
+  const pendingActivity = makeActivityEntry({
+    idPrefix: 'ACT-PND',
+    actionType: 'aml_decision',
+    title: `Transaction Marked Pending (৳${tx.amount.toLocaleString()})`,
+    details: `Moved ${tx.type.replace(/_/g, ' ').toUpperCase()} (${tx.txHash}) between ${tx.senderId} and ${tx.receiverId} to pending_admin_approval with NO new credit to any account.${cleanReason ? ` Note: ${cleanReason}` : ''}`,
+    actorEmail: adminEmail,
+    targetIds: [tx.senderId, tx.receiverId],
+    amount: tx.amount,
+    timestamp: now,
+  });
+
+  store.transactions[txId] = updatedTx;
+  store.notifications[pendingNotif.id] = pendingNotif;
+  store.activityLogs[pendingActivity.id] = pendingActivity;
+  writeLocalStore(store, true);
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      transaction.set(doc(db, TX_COL, txId), updatedTx);
+      transaction.set(doc(db, ADMIN_NOTIF_COL, pendingNotif.id), pendingNotif);
+      transaction.set(doc(db, ADMIN_ACTIVITY_COL, pendingActivity.id), pendingActivity);
+    });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (auth.currentUser && isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.UPDATE, `${TX_COL}/${txId}`);
+    }
+  }
+
+  return updatedTx;
+}
+
+export async function adminDeleteTransaction(
+  txId: string,
+  adminEmail: string,
+  reason?: string
+): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let tx: AcashTransaction | undefined = store.transactions[txId];
+  if (!tx) {
+    try {
+      const snap = await getDoc(doc(db, TX_COL, txId));
+      if (snap.exists()) {
+        tx = snap.data() as AcashTransaction;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!tx) throw new Error('Transaction not found.');
+
+  const cleanReason = (reason || '').trim();
+  const deleteActivity = makeActivityEntry({
+    idPrefix: 'ACT-DELTX',
+    actionType: 'aml_decision',
+    title: `Transaction Deleted (৳${tx.amount.toLocaleString()})`,
+    details: `Permanently deleted ${tx.type.replace(/_/g, ' ').toUpperCase()} (${tx.txId} / ${tx.txHash}) of ৳${tx.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} between ${tx.senderId} and ${tx.receiverId} from all statements.${cleanReason ? ` Reason: ${cleanReason}` : ''}`,
+    actorEmail: adminEmail,
+    targetIds: [tx.senderId, tx.receiverId],
+    amount: tx.amount,
+    timestamp: now,
+  });
+
+  delete store.transactions[txId];
+  store.activityLogs[deleteActivity.id] = deleteActivity;
+  writeLocalStore(store, true);
+
+  try {
+    await deleteDoc(doc(db, TX_COL, txId));
+    await setDoc(doc(db, ADMIN_ACTIVITY_COL, deleteActivity.id), deleteActivity);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (auth.currentUser && isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.DELETE, `${TX_COL}/${txId}`);
+    }
+  }
 }
 
 export async function adminToggleUserStatus(
@@ -3755,6 +4181,27 @@ export async function updateUserKyc(params: {
     throw new Error('TIN / Tax Certificate number is required for Merchant KYC.');
   }
 
+  // Enforce strict 1-to-1 KYC uniqueness (NID/Passport and TIN/Tax Certificate) across all accounts
+  const normNid = normalizeNidForLock(cleanNid);
+  const normTax = cleanTaxCertNo ? normalizeTaxForLock(cleanTaxCertNo) : '';
+  for (const other of Object.values(store.users)) {
+    if (other.accountId === params.accountId) continue;
+    if (other.kyc?.nidNumber && normalizeNidForLock(other.kyc.nidNumber) === normNid) {
+      throw new Error(identityConflictMessage('nid'));
+    }
+    if (
+      normTax &&
+      other.kyc?.taxCertificateNumber &&
+      normalizeTaxForLock(other.kyc.taxCertificateNumber) === normTax
+    ) {
+      throw new Error(identityConflictMessage('tax'));
+    }
+  }
+  await checkIdentityLockAvailable('nid', cleanNid, params.accountId);
+  if (cleanTaxCertNo) {
+    await checkIdentityLockAvailable('tax', cleanTaxCertNo, params.accountId);
+  }
+
   const nextKyc: KycInfo = {
     nidNumber: cleanNid,
     dateOfBirth: params.kyc.dateOfBirth.trim(),
@@ -3779,6 +4226,18 @@ export async function updateUserKyc(params: {
     verified: true,
     lastActiveAt: now,
   };
+
+  // Claim global KYC uniqueness locks before committing
+  try {
+    await claimIdentityLock('nid', cleanNid, params.accountId, now);
+    if (cleanTaxCertNo) {
+      await claimIdentityLock('tax', cleanTaxCertNo, params.accountId, now);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('already')) {
+      throw err;
+    }
+  }
 
   store.users[params.accountId] = updated;
 

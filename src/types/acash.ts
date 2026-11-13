@@ -222,6 +222,16 @@ export interface AcashTransaction {
   approvedBy?: string;
   approvedAt?: number;
   rejectionReason?: string;
+  settledOnce?: boolean;
+}
+
+export type IdentityLockType = 'email' | 'phone' | 'nid' | 'tax';
+
+export interface AcashIdentityLock {
+  lockId: string;
+  lockType: IdentityLockType;
+  accountId: string;
+  createdAt: number;
 }
 
 export type BoothType = 'agent_booth' | 'support_booth';

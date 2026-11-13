@@ -93,7 +93,7 @@ service cloud.firestore {
           'amount', 'fee', 'totalDebited', 'feeBreakdown', 'status', 'refundedAmount',
           'parentTxHash', 'operator', 'rechargeNumber', 'rechargeType',
           'biller', 'billAccountNumber', 'billMonth', 'note',
-          'createdAt', 'approvedBy', 'approvedAt', 'rejectionReason'
+          'createdAt', 'approvedBy', 'approvedAt', 'rejectionReason', 'settledOnce'
         ])
         && data.txId is string && data.txId.size() > 0 && data.txId.size() <= 64
         && data.txHash is string && data.txHash.size() > 0 && data.txHash.size() <= 64
@@ -129,7 +129,8 @@ service cloud.firestore {
         && data.createdAt is number
         && (!('approvedBy' in data) || (data.approvedBy is string && data.approvedBy.size() <= 160))
         && (!('approvedAt' in data) || data.approvedAt is number)
-        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 300));
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 300))
+        && (!('settledOnce' in data) || data.settledOnce is bool);
     }
 
     function isValidAcashBooth(data) {
@@ -262,6 +263,16 @@ service cloud.firestore {
         && data.updatedAt is number;
     }
 
+    function isValidIdentityLock(data) {
+      return data.keys().hasAll(['lockId', 'lockType', 'accountId', 'createdAt'])
+        && data.keys().hasOnly(['lockId', 'lockType', 'accountId', 'createdAt'])
+        && data.lockId is string && data.lockId.size() >= 6 && data.lockId.size() <= 128
+        && data.lockId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.lockType in ['email', 'phone', 'nid', 'tax']
+        && data.accountId is string && data.accountId.size() <= 12 && data.accountId.matches('^[UAM]-\\d{6}$')
+        && data.createdAt is number;
+    }
+
     // ---------- Boot Connection Health Check ----------
     match /test/connection {
       allow get: if true;
@@ -354,6 +365,14 @@ service cloud.firestore {
         );
     }
 
+    // ---------- Zero-PII Deterministic Identity & KYC Uniqueness Locks ----------
+    match /acash_identity_locks/{lockId} {
+      allow get: if isValidId(lockId);
+      allow create: if isValidId(lockId) && isValidIdentityLock(incoming()) && incoming().lockId == lockId;
+      allow update: if isAdmin() && isValidId(lockId) && isValidIdentityLock(incoming()) && incoming().lockId == lockId;
+      allow delete: if isAdmin() && isValidId(lockId);
+    }
+
     // ---------- Acash Financial Transactions ----------
     match /acash_transactions/{txId} {
       allow get: if isVerifiedUser() && isValidId(txId) && (
@@ -372,6 +391,7 @@ service cloud.firestore {
       allow update: if isVerifiedUser() && isValidId(txId) && isValidAcashTransaction(incoming()) && isAdmin()
         && incoming().txId == existing().txId
         && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(txId);
     }
 
     // ---------- Acash Agent Booths & Customer Support Booths (Public Non-PII Map Directory) ----------

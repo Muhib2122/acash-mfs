@@ -75,6 +75,8 @@ import {
   adminCreateSecondAdmin,
   adminCreditAccount,
   adminDeleteBooth,
+  adminDeleteTransaction,
+  adminMarkTransactionPending,
   adminRejectTransaction,
   adminSaveBooth,
   adminToggleBoothStatus,
@@ -299,6 +301,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkDisableOpen, setBulkDisableOpen] = useState(false);
   const [bulkDisableCause, setBulkDisableCause] = useState('');
+
+  // Transaction Set Pending / Delete confirmation modal state
+  const [txActionModal, setTxActionModal] = useState<{
+    mode: 'pending' | 'delete';
+    tx: AcashTransaction;
+  } | null>(null);
+  const [txActionReason, setTxActionReason] = useState('');
+  const [txActionSubmitting, setTxActionSubmitting] = useState(false);
 
   // Activity Log filter & search state
   const [activityFilter, setActivityFilter] = useState<'ALL' | AdminActivityType>('ALL');
@@ -1026,6 +1036,44 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     } catch (err) {
       setFeedbackMsg(err instanceof Error ? err.message : 'Rejection error.');
     } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const openTxActionModal = (mode: 'pending' | 'delete', tx: AcashTransaction) => {
+    setTxActionReason('');
+    setTxActionModal({ mode, tx });
+  };
+
+  const handleConfirmTxAction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminSession || !txActionModal) return;
+    const { mode, tx } = txActionModal;
+    setTxActionSubmitting(true);
+    setActionBusyId(tx.txId);
+    setFeedbackMsg('');
+    try {
+      if (mode === 'pending') {
+        await adminMarkTransactionPending(tx.txId, adminSession.adminEmail, txActionReason);
+        setFeedbackMsg(
+          lang === 'bn'
+            ? `লেনদেন ${tx.txHash} পেন্ডিং (Pending Admin Approval) করা হয়েছে — কোনো অ্যাকাউন্টে নতুন করে টাকা ক্রেডিট হয়নি।`
+            : `Transaction ${tx.txHash} marked as Pending Admin Approval. Zero new credit issued to any account.`
+        );
+      } else {
+        await adminDeleteTransaction(tx.txId, adminSession.adminEmail, txActionReason);
+        setFeedbackMsg(
+          lang === 'bn'
+            ? `লেনদেন ${tx.txHash} অ্যাডমিন, ইউজার, এজেন্ট ও মার্চেন্টের সকল স্টেটমেন্ট থেকে স্থায়ীভাবে ডিলিট করা হয়েছে।`
+            : `Transaction ${tx.txHash} permanently deleted from all statements (User, Agent, Merchant & Admin).`
+        );
+      }
+      setTxActionModal(null);
+      setTxActionReason('');
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Transaction action failed.');
+    } finally {
+      setTxActionSubmitting(false);
       setActionBusyId(null);
     }
   };
@@ -2009,7 +2057,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            disabled={actionBusyId === tx.txId}
+                            onClick={() => openTxActionModal('delete', tx)}
+                            className="px-2.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-rose-400 hover:text-rose-600 dark:hover:text-rose-300 text-xs font-semibold text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 transition-colors"
+                            title={lang === 'bn' ? 'সব স্টেটমেন্ট থেকে ডিলিট করুন' : 'Delete from all statements'}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{lang === 'bn' ? 'ডিলিট' : 'Delete'}</span>
+                          </button>
                           <button
                             type="button"
                             disabled={actionBusyId === tx.txId}
@@ -3014,7 +3072,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3 shrink-0">
+                      <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={actionBusyId === tx.txId}
+                          onClick={() => openTxActionModal('delete', tx)}
+                          className="px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-rose-400 hover:text-rose-600 dark:hover:text-rose-300 text-xs font-semibold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1.5 transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          <span>{lang === 'bn' ? 'ডিলিট' : 'Delete'}</span>
+                        </button>
                         <button
                           type="button"
                           disabled={actionBusyId === tx.txId}
@@ -4122,13 +4189,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         <th className="py-3 px-4 font-semibold">Recipient</th>
                         <th className="py-3 px-4 font-semibold text-right">Amount</th>
                         <th className="py-3 px-4 font-semibold text-right">Fee</th>
-                        <th className="py-3 px-5 font-semibold">Status</th>
+                        <th className="py-3 px-4 font-semibold">Status</th>
+                        <th className="py-3 px-5 font-semibold text-right">
+                          {lang === 'bn' ? 'অ্যাকশন' : 'Actions'}
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {filteredLedgerTransactions.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-10 px-6 text-center text-slate-500 dark:text-slate-400">
+                          <td colSpan={9} className="py-10 px-6 text-center text-slate-500 dark:text-slate-400">
                             <div className="max-w-sm mx-auto space-y-2">
                               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
                                 {lang === 'bn'
@@ -4176,7 +4246,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                             <td className="py-3 px-4 text-right font-mono-tabular text-slate-600 dark:text-slate-300 whitespace-nowrap">
                               {formatBdt(tx.fee, lang)}
                             </td>
-                            <td className="py-3 px-5 whitespace-nowrap">
+                            <td className="py-3 px-4 whitespace-nowrap">
                               <span
                                 className={`font-semibold ${
                                   tx.status === 'completed'
@@ -4190,6 +4260,40 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               >
                                 {tx.status.replace(/_/g, ' ')}
                               </span>
+                            </td>
+                            <td className="py-3 px-5 whitespace-nowrap text-right">
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                {tx.status !== 'pending_admin_approval' && (
+                                  <button
+                                    type="button"
+                                    disabled={actionBusyId === tx.txId}
+                                    onClick={() => openTxActionModal('pending', tx)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/35 hover:bg-amber-100 dark:hover:bg-amber-500/25 text-[11px] font-semibold text-amber-700 dark:text-amber-300 inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                                    title={
+                                      lang === 'bn'
+                                        ? 'পেন্ডিং করুন (কোনো অ্যাকাউন্টে নতুন ক্রেডিট হবে না)'
+                                        : 'Set Pending (Zero new account credit)'
+                                    }
+                                  >
+                                    <Clock className="w-3 h-3" />
+                                    <span>{lang === 'bn' ? 'পেন্ডিং' : 'Set Pending'}</span>
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={actionBusyId === tx.txId}
+                                  onClick={() => openTxActionModal('delete', tx)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-[11px] font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                                  title={
+                                    lang === 'bn'
+                                      ? 'সব স্টেটমেন্ট থেকে স্থায়ীভাবে ডিলিট করুন'
+                                      : 'Delete from all statements'
+                                  }
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>{lang === 'bn' ? 'ডিলিট' : 'Delete'}</span>
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -5143,6 +5247,119 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {bulkBusy
                   ? 'Disabling & Sending Emails...'
                   : `Disable ${selectedActiveUsers.length} & Notify`}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Transaction Delete / Set Pending Confirmation Modal */}
+      {txActionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handleConfirmTxAction}
+            className={`w-full max-w-md rounded-3xl bg-white dark:bg-[#121622] border p-6 space-y-4 shadow-2xl ${
+              txActionModal.mode === 'delete'
+                ? 'border-rose-200 dark:border-rose-500/40'
+                : 'border-amber-200 dark:border-amber-500/40'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                  {txActionModal.mode === 'delete'
+                    ? lang === 'bn'
+                      ? 'লেনদেন স্থায়ীভাবে ডিলিট করুন'
+                      : 'Delete Transaction Permanently'
+                    : lang === 'bn'
+                      ? 'লেনদেন পেন্ডিং (Pending) করুন'
+                      : 'Set Transaction to Pending'}
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 font-mono-tabular">
+                  {txActionModal.tx.txHash} · {formatBdt(txActionModal.tx.amount, lang)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTxActionModal(null)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-3 text-xs text-slate-700 dark:text-slate-300 space-y-1">
+              <div>
+                <span className="font-semibold">{txActionModal.tx.senderName}</span> (
+                {txActionModal.tx.senderId}) →{' '}
+                <span className="font-semibold">{txActionModal.tx.receiverName}</span> (
+                {txActionModal.tx.receiverId})
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                {txActionModal.tx.type.replace(/_/g, ' ').toUpperCase()} · Current status:{' '}
+                <span className="font-semibold">{txActionModal.tx.status}</span>
+              </div>
+            </div>
+
+            <div
+              className={`rounded-xl border p-3 text-xs leading-relaxed ${
+                txActionModal.mode === 'delete'
+                  ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-200 dark:border-rose-500/35 text-rose-800 dark:text-rose-200'
+                  : 'bg-amber-50 dark:bg-amber-500/15 border-amber-200 dark:border-amber-500/35 text-amber-800 dark:text-amber-200'
+              }`}
+            >
+              {txActionModal.mode === 'delete'
+                ? lang === 'bn'
+                  ? 'এই লেনদেন ডিলিট করলে অ্যাডমিন, গ্রাহক, এজেন্ট এবং মার্চেন্টের সব স্টেটমেন্ট ও PDF রেকর্ড থেকে স্থায়ীভাবে মুছে যাবে।'
+                  : 'Deleting removes this transaction permanently from Admin Global Ledger and ALL User, Agent, and Merchant statements & PDFs.'
+                : lang === 'bn'
+                  ? 'পেন্ডিং করলে লেনদেনটি Pending Admin Approval-এ যাবে এবং কোনো অ্যাকাউন্টে নতুন করে কোনো টাকা ক্রেডিট হবে না (পুনরায় অ্যাপ্রুভ করলেও ডাবল ক্রেডিট হবে না)।'
+                  : 'Marking as Pending moves this transaction to Pending Admin Approval with ZERO new credits to any account (re-approving later will also never double-credit).'}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                {lang === 'bn' ? 'নোট / কারণ (ঐচ্ছিক)' : 'Audit Note / Reason (Optional)'}
+              </label>
+              <input
+                type="text"
+                value={txActionReason}
+                onChange={(e) => setTxActionReason(e.target.value)}
+                placeholder={
+                  txActionModal.mode === 'delete'
+                    ? 'e.g. Duplicate test entry or admin removal'
+                    : 'e.g. Manual compliance re-check'
+                }
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setTxActionModal(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+              </button>
+              <button
+                type="submit"
+                disabled={txActionSubmitting}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-semibold text-white disabled:opacity-50 transition-colors ${
+                  txActionModal.mode === 'delete'
+                    ? 'bg-rose-600 hover:bg-rose-500'
+                    : 'bg-amber-600 hover:bg-amber-500'
+                }`}
+              >
+                {txActionSubmitting
+                  ? 'Processing...'
+                  : txActionModal.mode === 'delete'
+                    ? lang === 'bn'
+                      ? 'সব স্টেটমেন্ট থেকে ডিলিট'
+                      : 'Confirm Delete'
+                    : lang === 'bn'
+                      ? 'পেন্ডিং নিশ্চিত করুন'
+                      : 'Confirm Set Pending'}
               </button>
             </div>
           </form>

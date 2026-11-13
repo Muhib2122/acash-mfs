@@ -197,6 +197,9 @@
           "type": "string",
           "maxLength": 300
         },
+        "settledOnce": {
+          "type": "boolean"
+        },
         "createdAt": {
           "type": "number"
         }
@@ -536,6 +539,31 @@
         }
       },
       "required": ["accountId", "role", "name", "phone", "status", "verified", "createdAt", "updatedAt"]
+    },
+    "AcashIdentityLock": {
+      "title": "AcashIdentityLock",
+      "description": "Zero-PII deterministic hash lock enforcing 1-to-1 uniqueness for Gmail, mobile phone, NID/Passport, and Merchant TIN across portals and devices.",
+      "type": "object",
+      "properties": {
+        "lockId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "lockType": {
+          "type": "string",
+          "enum": ["email", "phone", "nid", "tax"]
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[UAM]-\\d{6}$",
+          "maxLength": 12
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["lockId", "lockType", "accountId", "createdAt"]
     }
   },
   "firestore": {
@@ -546,6 +574,10 @@
     "/acash_directory/{accountId}": {
       "schema": { "$ref": "#/entities/AcashDirectoryEntry" },
       "description": "Public non-PII recipient lookup directory for resolving Acash IDs and phone numbers across portals."
+    },
+    "/acash_identity_locks/{lockId}": {
+      "schema": { "$ref": "#/entities/AcashIdentityLock" },
+      "description": "Zero-PII deterministic identity locks preventing duplicate Gmail, phone, NID, or TIN registrations."
     },
     "/acash_transactions/{txId}": {
       "schema": { "$ref": "#/entities/AcashTransaction" },

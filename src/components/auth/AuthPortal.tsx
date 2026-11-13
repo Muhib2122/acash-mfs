@@ -31,6 +31,7 @@ import {
 } from '../../lib/firebase';
 import {
   authenticateAcashUser,
+  checkRegistrationIdentityAvailability,
   findUserByIdentifier,
   formatUserReferralSource,
   getBackendSyncMode,
@@ -335,6 +336,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setLoading(true);
     try {
+      // Strictly block duplicate Gmail or Phone before OTP or account creation
+      await checkRegistrationIdentityAvailability({
+        phone,
+        email: isDirectGoogleVerified && googleIdentity ? googleIdentity.email : normalizedEmail,
+      });
+
       // Path 1: Direct Gmail via Google Firebase Auth (already email-verified by Google)
       if (isDirectGoogleVerified && googleIdentity) {
         const created = await registerAcashUser({
