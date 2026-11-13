@@ -1,0 +1,6 @@
+{
+  "name": "Acash — Mobile Financial Service & Admin Platform",
+  "description": "Bilingual (EN/বাংলা) Mobile Financial Service platform for Customers, Agents, Merchants, and Platform Administrators powered by Firebase and EmailJS.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

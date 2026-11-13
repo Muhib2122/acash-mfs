@@ -1,0 +1,533 @@
+{
+  "entities": {
+    "AcashUser": {
+      "title": "AcashUser",
+      "description": "Acash platform account for Customers (U-), Agents (A-), and Merchants (M-) linked to Firebase Auth Google Identity.",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "pattern": "^[UAM]-\\d{6}$",
+          "maxLength": 12,
+          "description": "Role-prefixed Acash Account ID."
+        },
+        "firebaseUid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Authenticated Firebase Auth user UID."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["U", "A", "M"],
+          "description": "Account role code."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "businessName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "gender": {
+          "type": "string",
+          "enum": ["male", "female"]
+        },
+        "termsAcceptedAt": {
+          "type": "number"
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "pinHash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "staffPinHash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "profilePhotoUrl": {
+          "type": "string",
+          "maxLength": 500000
+        },
+        "balance": {
+          "type": "number"
+        },
+        "commissionBalance": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "disabled"]
+        },
+        "disableReason": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "disabledAt": {
+          "type": "number"
+        },
+        "disabledBy": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "referredByType": {
+          "type": "string",
+          "enum": ["own_app", "agent"]
+        },
+        "referredByAgentId": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "referredByAgentPhone": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "referredByAgentName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "lastActiveAt": {
+          "type": "number"
+        }
+      },
+      "required": ["accountId", "role", "name", "phone", "email", "pinHash", "balance", "commissionBalance", "status", "verified", "createdAt", "lastActiveAt"]
+    },
+    "AcashTransaction": {
+      "title": "AcashTransaction",
+      "description": "Immutable financial transaction ledger entry.",
+      "type": "object",
+      "properties": {
+        "txId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "txHash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "send_money",
+            "cash_out",
+            "cash_in",
+            "agent_cash_out",
+            "merchant_cash_out",
+            "mobile_recharge",
+            "bill_pay",
+            "merchant_payment",
+            "b2b_transfer",
+            "refund",
+            "admin_credit",
+            "admin_transfer"
+          ]
+        },
+        "senderId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "senderUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "senderName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "senderPhone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "senderRole": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "receiverId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "receiverUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "receiverName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "receiverPhone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "receiverRole": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "amount": {
+          "type": "number"
+        },
+        "fee": {
+          "type": "number"
+        },
+        "totalDebited": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "pending_admin_approval", "rejected", "refunded", "partially_refunded"]
+        },
+        "refundedAmount": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["txId", "txHash", "type", "senderId", "receiverId", "amount", "fee", "totalDebited", "status", "refundedAmount", "createdAt"]
+    },
+    "AcashBooth": {
+      "title": "AcashBooth",
+      "description": "Physical Agent Booth or Customer Support Booth location for the interactive booth locator map.",
+      "type": "object",
+      "properties": {
+        "boothId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "boothType": {
+          "type": "string",
+          "enum": ["agent_booth", "support_booth"]
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "agentAccountId": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "hours": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "busy", "closed"]
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "queueWaitMinutes": {
+          "type": "number"
+        },
+        "cashLiquidityLevel": {
+          "type": "string",
+          "enum": ["high", "medium", "low"]
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["boothId", "boothType", "name", "area", "city", "address", "phone", "hours", "status", "lat", "lng", "createdAt", "updatedAt"]
+    },
+    "AcashSetting": {
+      "title": "AcashSetting",
+      "description": "Platform fee engine configuration and admin alert settings.",
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "number"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 160
+        }
+      },
+      "required": ["updatedAt"]
+    },
+    "AdminNotification": {
+      "title": "AdminNotification",
+      "description": "Real-time admin dashboard alerts.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "category": {
+          "type": "string",
+          "enum": ["aml_pending", "account_status", "treasury", "fee_update", "registration", "kyc_update"]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "warning", "info"]
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "read": {
+          "type": "boolean"
+        }
+      },
+      "required": ["id", "title", "message", "category", "severity", "createdAt", "read"]
+    },
+    "AdminActivityLog": {
+      "title": "AdminActivityLog",
+      "description": "Audit trail of critical Admin actions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "actionType": {
+          "type": "string",
+          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "aml_decision", "alert_settings", "security_update"]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 800
+        },
+        "actorEmail": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "timestamp": {
+          "type": "number"
+        }
+      },
+      "required": ["id", "actionType", "title", "details", "actorEmail", "timestamp"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted Admin UID registry for RBAC verification.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "AcashMapLocation": {
+      "title": "AcashMapLocation",
+      "description": "Public non-email map directory entry published by Agents, Merchants, and 2nd Admins with name, profile picture, creator ID, phone number, and real GPS coordinates.",
+      "type": "object",
+      "properties": {
+        "creatorId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "creatorUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "creatorRole": {
+          "type": "string",
+          "enum": ["agent", "merchant", "second_admin"]
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "businessName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "profilePhotoUrl": {
+          "type": "string",
+          "maxLength": 500000
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "isVisible": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["creatorId", "creatorRole", "name", "phone", "address", "area", "city", "lat", "lng", "isVisible", "createdAt", "updatedAt"]
+    },
+    "SecondAdminProfile": {
+      "title": "SecondAdminProfile",
+      "description": "Secondary Admin (2nd Admin) profile with contact details, profile photo, and pinned map location.",
+      "type": "object",
+      "properties": {
+        "adminId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "firebaseUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "passwordHash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "profilePhotoUrl": {
+          "type": "string",
+          "maxLength": 500000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "disabled"]
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["adminId", "name", "email", "phone", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/acash_users/{accountId}": {
+      "schema": { "$ref": "#/entities/AcashUser" },
+      "description": "Registered Acash Customer, Agent, and Merchant accounts."
+    },
+    "/acash_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/AcashTransaction" },
+      "description": "Financial ledger transactions across all roles."
+    },
+    "/acash_booths/{boothId}": {
+      "schema": { "$ref": "#/entities/AcashBooth" },
+      "description": "Physical Agent Booths and Customer Support Booths displayed on the interactive map."
+    },
+    "/acash_map_locations/{creatorId}": {
+      "schema": { "$ref": "#/entities/AcashMapLocation" },
+      "description": "Live map pins set directly from Profile by 2nd Admins, Merchants, and Agents."
+    },
+    "/acash_second_admins/{adminId}": {
+      "schema": { "$ref": "#/entities/SecondAdminProfile" },
+      "description": "Secondary Admin accounts and profile metadata."
+    },
+    "/acash_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AcashSetting" },
+      "description": "Global Fee Engine and Admin Alert configuration documents."
+    },
+    "/acash_admin_notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/AdminNotification" },
+      "description": "Admin panel notification alerts."
+    },
+    "/acash_admin_activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminActivityLog" },
+      "description": "Audit log of critical Admin operations."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Verified platform Admin accounts."
+    }
+  }
+}

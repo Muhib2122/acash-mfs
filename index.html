@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Acash — Mobile Financial Service & Admin Platform</title>
+    <meta name="description" content="Bilingual (EN/বাংলা) Mobile Financial Service platform for Customers, Agents, Merchants, and Platform Administrators." />
+    <meta property="og:title" content="Acash — Mobile Financial Service & Admin Platform" />
+    <meta property="og:description" content="Bilingual (EN/বাংলা) Mobile Financial Service platform for Customers, Agents, Merchants, and Platform Administrators." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#4F46E5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Acash" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/assets/aistudio/a_clean_vector_style_app_logo_on_a_transparent_bac_e63513a7.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Hind+Siliguri:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('acash_theme_v1');
+          var mode = saved === 'dark' ? 'dark' : 'light';
+          if (mode === 'dark') document.documentElement.classList.add('dark');
+          else document.documentElement.classList.remove('dark');
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 dark:bg-[#0B0D14] dark:text-slate-100 antialiased selection:bg-indigo-600/20 selection:text-indigo-900 dark:selection:bg-indigo-500/35 dark:selection:text-white transition-colors duration-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
