@@ -468,11 +468,12 @@ export async function downloadCreatorKycProfilePdf(user: AcashUser, adminEmail?:
   doc.roundedRect(20, 52, 34, 34, 2, 2, 'FD');
 
   let photoAdded = false;
-  if (user.profilePhotoUrl && user.profilePhotoUrl.startsWith('data:image/')) {
+  const photoSrc = user.profilePhotoUrl || user.kyc?.nidPhotoUrl;
+  if (photoSrc && photoSrc.startsWith('data:image/')) {
     try {
       doc.addImage(
-        user.profilePhotoUrl,
-        getImageFormatFromDataUrl(user.profilePhotoUrl),
+        photoSrc,
+        getImageFormatFromDataUrl(photoSrc),
         20.5,
         52.5,
         33,

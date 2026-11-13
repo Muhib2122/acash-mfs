@@ -2812,9 +2812,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 <div className="rounded-3xl bg-white dark:bg-[#121622] border border-indigo-200 dark:border-indigo-500/35 p-5 sm:p-6 shadow-md space-y-4">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
                     <div className="flex items-center gap-4">
-                      {inspectedCreator.profilePhotoUrl ? (
+                      {(inspectedCreator.profilePhotoUrl || inspectedCreator.kyc?.nidPhotoUrl) ? (
                         <img
-                          src={inspectedCreator.profilePhotoUrl}
+                          src={inspectedCreator.profilePhotoUrl || inspectedCreator.kyc?.nidPhotoUrl}
                           alt={inspectedCreator.name}
                           className="w-16 h-16 rounded-2xl object-cover border-2 border-indigo-500 shadow-sm shrink-0"
                         />
@@ -3193,9 +3193,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           </td>
                           <td className="py-3.5 px-4">
                             <div className="flex items-center gap-3">
-                              {u.profilePhotoUrl ? (
+                              {(u.profilePhotoUrl || u.kyc?.nidPhotoUrl) ? (
                                 <img
-                                  src={u.profilePhotoUrl}
+                                  src={u.profilePhotoUrl || u.kyc?.nidPhotoUrl}
                                   alt={u.name}
                                   className="w-9 h-9 rounded-xl object-cover border border-indigo-200 dark:border-indigo-500/35 shrink-0"
                                 />
