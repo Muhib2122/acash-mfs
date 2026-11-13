@@ -3029,7 +3029,7 @@ export async function executeFinancialTransaction(params: {
 
   writeLocalStore(store, true);
 
-  // Sync atomically to Firestore when accessible (using increment on receiver to respect PII isolation)
+  // Sync atomically to Firestore when accessible (ensuring receiver doc is created/updated robustly)
   const runFirestoreSync = async (includeReceiverUpdate: boolean) => {
     await runTransaction(db, async (transaction) => {
       const senderRef = doc(db, USERS_COL, params.senderId);
@@ -3046,11 +3046,28 @@ export async function executeFinancialTransaction(params: {
 
       if (includeReceiverUpdate && !requiresAdminApproval && resolvedReceiver) {
         const receiverRef = doc(db, USERS_COL, resolvedReceiver.accountId);
-        transaction.update(receiverRef, {
-          balance: increment(creditToReceiver),
-          ...(receiverCommInc > 0 ? { commissionBalance: increment(receiverCommInc) } : {}),
-          lastActiveAt: now,
-        });
+        const receiverSnap = await transaction.get(receiverRef);
+        const updatedReceiverData = store.users[resolvedReceiver.accountId];
+        if (receiverSnap.exists() && updatedReceiverData) {
+          transaction.set(receiverRef, updatedReceiverData, { merge: true });
+        } else if (updatedReceiverData) {
+          transaction.set(receiverRef, updatedReceiverData);
+        } else {
+          transaction.set(receiverRef, {
+            accountId: resolvedReceiver.accountId,
+            role: resolvedReceiver.role,
+            name: resolvedReceiver.name,
+            phone: resolvedReceiver.phone,
+            email: resolvedReceiver.email,
+            pinHash: resolvedReceiver.pinHash || '',
+            balance: creditToReceiver,
+            commissionBalance: receiverCommInc,
+            status: 'active',
+            verified: resolvedReceiver.verified,
+            createdAt: resolvedReceiver.createdAt || now,
+            lastActiveAt: now,
+          });
+        }
       }
 
       transaction.set(doc(db, TX_COL, txId), txRecord);
@@ -3063,13 +3080,17 @@ export async function executeFinancialTransaction(params: {
   try {
     await runFirestoreSync(true);
     firestoreBackendMode = 'firestore';
-  } catch {
-    // Fallback if receiverRef is a local-only seed account not yet initialized in Firestore
+  } catch (err) {
     try {
-      await runFirestoreSync(false);
+      await runFirestoreSync(true);
       firestoreBackendMode = 'firestore';
     } catch {
-      firestoreBackendMode = 'local_sync';
+      try {
+        await runFirestoreSync(false);
+        firestoreBackendMode = 'firestore';
+      } catch {
+        firestoreBackendMode = 'local_sync';
+      }
     }
   }
 
