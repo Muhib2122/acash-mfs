@@ -60,7 +60,7 @@ import {
   UserGender,
   UserRole,
 } from '../../types/acash';
-import { formatBdt, t } from '../../lib/i18n';
+import { formatBdt, formatCompactBdt, t } from '../../lib/i18n';
 import { consumeGoogleRedirectResult, signInWithGoogleSmart } from '../../lib/firebase';
 import {
   getVoiceMuted,
@@ -2335,8 +2335,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         ? 'মেইন এডমিন আনলিমিটেড ক্রেডিট ও ট্রেজারি ভল্ট'
                         : 'Main Admin Unlimited Credit Mint & Treasury Vault'}
                     </h2>
-                    <div className="font-mono-tabular text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
-                      {formatBdt(treasuryVault.balance, lang)}
+                    <div className="font-mono-tabular text-4xl sm:text-5xl lg:text-6xl font-black text-white tracking-tight">
+                      {formatCompactBdt(treasuryVault.balance, lang)}
+                      <div className="text-xs font-semibold text-indigo-200 mt-1">
+                        Exact: {formatBdt(treasuryVault.balance, lang)}
+                      </div>
                     </div>
                     <div className="grid grid-cols-2 gap-3 pt-1">
                       <div className="rounded-xl bg-white/5 border border-white/10 px-3 py-2">

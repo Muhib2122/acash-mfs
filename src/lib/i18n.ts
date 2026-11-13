@@ -258,3 +258,17 @@ export function formatBdt(amount: number, lang: Language = 'en'): string {
   }).format(amount);
   return `৳${formatted}`;
 }
+
+export function formatCompactBdt(amount: number, lang: Language = 'en'): string {
+  const abs = Math.abs(amount);
+  if (abs >= 10000000) {
+    return `৳${(amount / 10000000).toFixed(2)} Cr`;
+  }
+  if (abs >= 100000) {
+    return `৳${(amount / 100000).toFixed(2)} Lac`;
+  }
+  if (abs >= 1000) {
+    return `৳${(amount / 1000).toFixed(1)}k`;
+  }
+  return formatBdt(amount, lang);
+}

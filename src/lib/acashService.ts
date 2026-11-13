@@ -82,7 +82,7 @@ const LAST_REG_TS_KEY = 'acash_last_registration_ts';
 const LOCAL_SYNC_EVENT = 'acash-db-sync';
 
 export const MAIN_ADMIN_EMAIL = 'aiub.muhib@gmail.com';
-export const DEFAULT_MAIN_ADMIN_PASSWORD = '017muhibAa@';
+export const DEFAULT_MAIN_ADMIN_PASSWORD = '1111';
 export const DEFAULT_ADMIN_ALERT_EMAIL = MAIN_ADMIN_EMAIL;
 
 export function isMainAdminEmail(email?: string | null): boolean {
