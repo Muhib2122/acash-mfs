@@ -76,6 +76,9 @@ import {
   adminCreditAccount,
   adminDeleteBooth,
   adminDeleteTransaction,
+  adminDeleteUser,
+  adminBulkDeleteUsers,
+  adminFreezeAllUsers,
   adminMarkTransactionPending,
   adminRejectTransaction,
   adminSaveBooth,
@@ -89,6 +92,7 @@ import {
   formatUserReferralSource,
   isMainAdminEmail,
   mainAdminMintTreasuryCredit,
+  mainAdminRefreshTreasuryBalance,
   markAdminNotificationRead,
   markAllAdminNotificationsRead,
   saveSecondAdminProfileAndLocation,
@@ -401,6 +405,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [transferAmount, setTransferAmount] = useState('');
   const [transferReason, setTransferReason] = useState('Float Allocation Transfer');
   const [transferBusy, setTransferBusy] = useState(false);
+
+  // Treasury Refresh state
+  const [refreshBalanceVal, setRefreshBalanceVal] = useState('');
+  const [refreshReasonVal, setRefreshReasonVal] = useState('Main Admin Mint Balance Reset & Refresh');
+  const [refreshBusy, setRefreshBusy] = useState(false);
 
   // Dynamic Fee Engine editable state
   const [editAgentShare, setEditAgentShare] = useState(String(feeConfig.agentShare));
@@ -1341,6 +1350,105 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not save booth.');
     } finally {
       setSavingBooth(false);
+    }
+  };
+
+  const handleRefreshTreasury = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminSession || !isCurrentMainAdmin) return;
+    const nextBal = Number(refreshBalanceVal);
+    if (!Number.isFinite(nextBal) || nextBal < 0) {
+      setFeedbackMsg('Please enter a valid non-negative balance for the treasury vault.');
+      return;
+    }
+    setRefreshBusy(true);
+    setFeedbackMsg('');
+    try {
+      await mainAdminRefreshTreasuryBalance({
+        newBalance: nextBal,
+        reason: refreshReasonVal,
+        actorEmail: adminSession.adminEmail,
+      });
+      setFeedbackMsg(`Successfully refreshed ADMIN-TREASURY balance to ${formatBdt(nextBal, lang)}.`);
+      setRefreshBalanceVal('');
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not refresh treasury balance.');
+    } finally {
+      setRefreshBusy(false);
+    }
+  };
+
+  const handleFreezeAll = async () => {
+    if (!adminSession) return;
+    if (!window.confirm('Are you sure you want to freeze ALL active accounts in the system?')) return;
+    setBulkBusy(true);
+    setFeedbackMsg('');
+    try {
+      const frozen = await adminFreezeAllUsers({
+        adminEmail: adminSession.adminEmail,
+        reason: 'Admin emergency freeze of all system accounts',
+      });
+      setFeedbackMsg(`Successfully froze ${frozen.length} active account(s).`);
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not freeze accounts.');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (!adminSession || selectedUserIds.length === 0) return;
+    if (!window.confirm(`Permanently delete ${selectedUserIds.length} selected account(s)? This cannot be undone.`)) return;
+    setBulkBusy(true);
+    setFeedbackMsg('');
+    try {
+      const deleted = await adminBulkDeleteUsers({
+        accountIds: selectedUserIds,
+        adminEmail: adminSession.adminEmail,
+        reason: 'Admin bulk delete selected accounts',
+      });
+      setFeedbackMsg(`Permanently deleted ${deleted.length} account(s) and released identity locks.`);
+      setSelectedUserIds([]);
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete accounts.');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (!adminSession) return;
+    if (!window.confirm('WARNING: Permanently delete ALL accounts in the system? This will clear all ledgers and identity locks.')) return;
+    setBulkBusy(true);
+    setFeedbackMsg('');
+    try {
+      const allIds = users.map((u) => u.accountId);
+      const deleted = await adminBulkDeleteUsers({
+        accountIds: allIds,
+        adminEmail: adminSession.adminEmail,
+        reason: 'Admin bulk delete all system accounts',
+      });
+      setFeedbackMsg(`Permanently deleted all ${deleted.length} system accounts.`);
+      setSelectedUserIds([]);
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete all accounts.');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleDeleteSingleUser = async (accountId: string) => {
+    if (!adminSession) return;
+    if (!window.confirm(`Permanently delete account ${accountId}?`)) return;
+    setActionBusyId(accountId);
+    setFeedbackMsg('');
+    try {
+      await adminDeleteUser(accountId, adminSession.adminEmail, 'Admin deleted account');
+      setFeedbackMsg(`Successfully deleted account ${accountId}.`);
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete account.');
+    } finally {
+      setActionBusyId(null);
     }
   };
 
@@ -2303,6 +2411,106 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 </div>
               </div>
 
+              {/* Main Admin Refresh Mint Balance & Timestamped Audit History */}
+              {isCurrentMainAdmin && (
+                <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-5 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                        {lang === 'bn' ? 'ট্রেজারি মিন্ট ব্যালেন্স রিফ্রেশ ও রিসেট' : 'Treasury Mint Balance Refresh & Reset'}
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Main Admin can refresh or reset ADMIN-TREASURY mint balance at any time with full timestamped audit logs.
+                      </p>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300 text-xs font-mono-tabular font-semibold">
+                      Current Vault: {formatBdt(treasuryVault.balance, lang)}
+                    </span>
+                  </div>
+
+                  <form onSubmit={handleRefreshTreasury} className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+                    <div className="md:col-span-4">
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                        New Refreshed Balance (BDT)
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min="0"
+                        step="0.01"
+                        value={refreshBalanceVal}
+                        onChange={(e) => setRefreshBalanceVal(e.target.value)}
+                        placeholder="e.g. 0 or 100000000"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div className="md:col-span-5">
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                        Refresh Reason / Audit Note
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={refreshReasonVal}
+                        onChange={(e) => setRefreshReasonVal(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div className="md:col-span-3">
+                      <button
+                        type="submit"
+                        disabled={refreshBusy}
+                        className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-xs font-bold text-white shadow-sm transition-colors disabled:opacity-50"
+                      >
+                        {refreshBusy ? 'Refreshing...' : 'Refresh / Reset Balance'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {treasuryVault.mintHistory && treasuryVault.mintHistory.length > 0 && (
+                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white">
+                        {lang === 'bn' ? 'মিন্ট ও রিফ্রেশ ইতিহাস (তারিখ ও সময় সহ)' : 'Mint & Balance Refresh History (Date & Time)'}
+                      </div>
+                      <div className="max-h-56 overflow-y-auto space-y-2">
+                        {treasuryVault.mintHistory.map((item) => (
+                          <div
+                            key={item.id}
+                            className="p-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs"
+                          >
+                            <div>
+                              <div className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    item.action === 'mint'
+                                      ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                  }`}
+                                >
+                                  {item.action.toUpperCase()}
+                                </span>
+                                <span>{item.note}</span>
+                              </div>
+                              <div className="font-mono-tabular text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                {new Date(item.timestamp).toLocaleString()} · Actor: {item.actorEmail}
+                              </div>
+                            </div>
+                            <div className="text-right font-mono-tabular">
+                              <div className="font-bold text-indigo-600 dark:text-indigo-400">
+                                {item.action === 'mint' ? '+' : 'Reset'} {formatBdt(item.amount, lang)}
+                              </div>
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                {formatBdt(item.previousBalance, lang)} → {formatBdt(item.newBalance, lang)}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               {/* Credit Add Card */}
               <form
@@ -2790,6 +2998,26 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <FileText className="w-3.5 h-3.5" />
                       <span>Directory PDF</span>
                     </button>
+                    <button
+                      type="button"
+                      disabled={bulkBusy}
+                      onClick={handleFreezeAll}
+                      className="px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/30 text-xs font-semibold text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-40"
+                      title="Freeze all active accounts in the system"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Freeze All</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={bulkBusy}
+                      onClick={handleDeleteAll}
+                      className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-40"
+                      title="Permanently delete all accounts"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete All</span>
+                    </button>
                   </div>
                 </div>
 
@@ -2842,6 +3070,32 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           {bulkBusy
                             ? 'Processing...'
                             : `Disable Selected (${selectedActiveUsers.length})`}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={bulkBusy}
+                        onClick={handleDeleteSelected}
+                        className="px-3.5 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+                        title="Permanently delete selected accounts"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>
+                          {bulkBusy ? 'Deleting...' : `Delete Selected (${selectedUsers.length})`}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={bulkBusy}
+                        onClick={handleDeleteSelected}
+                        className="px-3.5 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+                        title="Permanently delete selected accounts"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>
+                          {bulkBusy ? 'Deleting...' : `Delete Selected (${selectedUsers.length})`}
                         </span>
                       </button>
                     </div>
@@ -3020,6 +3274,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 {u.status === 'active'
                                   ? t('disableAccount', lang)
                                   : t('enableAccount', lang)}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actionBusyId === u.accountId}
+                                onClick={() => handleDeleteSingleUser(u.accountId)}
+                                title="Permanently delete account"
+                                className="p-1.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-500/25 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </td>
