@@ -1603,6 +1603,21 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
   const isAccountIdPattern = /^[UAM]-\d{6}$/.test(normalizedId);
   const phone = normalizeBdPhone(clean);
   const isPhonePattern = phone.length >= 10;
+  const lowerEmail = clean.toLowerCase();
+
+  // 0. Check local store FIRST for instant resolution
+  const store = readLocalStore();
+  if (isAccountIdPattern && store.users[normalizedId]) {
+    return store.users[normalizedId];
+  }
+  for (const u of Object.values(store.users)) {
+    if (isPhonePattern && normalizeBdPhone(u.phone) === phone) {
+      return u;
+    }
+    if (clean.includes('@') && u.email.toLowerCase() === lowerEmail) {
+      return u;
+    }
+  }
 
   await ensureFirebaseAuthSession();
 
@@ -2566,11 +2581,13 @@ export function subscribeToAllTransactions(
   const attachFs = () => {
     unsubFs();
     try {
-      const q = query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(300));
+      const q = query(collection(db, TX_COL), limit(500));
       unsubFs = onSnapshot(
         q,
         (snap) => {
-          const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
+          const fsTxs = snap.docs
+            .map((d) => d.data() as AcashTransaction)
+            .sort((a, b) => b.createdAt - a.createdAt);
           const store = readLocalStore();
           let mutated = false;
 
