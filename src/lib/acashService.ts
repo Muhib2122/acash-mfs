@@ -869,16 +869,32 @@ function purgeLegacyBotRecords(state: LocalStoreState): boolean {
   let mutated = false;
   for (const [id, u] of Object.entries(state.users || {})) {
     const emailLower = (u.email || '').trim().toLowerCase();
-    if (LEGACY_BOT_USER_IDS.has(id) || LEGACY_BOT_EMAILS.has(emailLower)) {
+    if (
+      LEGACY_BOT_USER_IDS.has(id) ||
+      LEGACY_BOT_EMAILS.has(emailLower) ||
+      id.startsWith('U-1000') ||
+      id.startsWith('A-2000') ||
+      id.startsWith('M-3000')
+    ) {
       delete state.users[id];
       mutated = true;
     }
   }
-  for (const [id, loc] of Object.entries(state.mapLocations || {})) {
-    if (LEGACY_BOT_USER_IDS.has(id) || LEGACY_BOT_ADMIN_IDS.has(id)) {
-      delete state.mapLocations[id];
+  for (const [id, tx] of Object.entries(state.transactions || {})) {
+    if (
+      LEGACY_BOT_USER_IDS.has(tx.senderId) ||
+      LEGACY_BOT_USER_IDS.has(tx.receiverId) ||
+      tx.senderId.startsWith('U-1000') ||
+      tx.receiverId.startsWith('U-1000') ||
+      tx.senderId.startsWith('A-2000') ||
+      tx.receiverId.startsWith('A-2000')
+    ) {
+      delete state.transactions[id];
       mutated = true;
-    } else if (loc.creatorUid && LEGACY_BOT_USER_IDS.has(loc.creatorId)) {
+    }
+  }
+  for (const [id, loc] of Object.entries(state.mapLocations || {})) {
+    if (LEGACY_BOT_USER_IDS.has(id) || LEGACY_BOT_ADMIN_IDS.has(id) || LEGACY_BOT_USER_IDS.has(loc.creatorId)) {
       delete state.mapLocations[id];
       mutated = true;
     }
@@ -891,7 +907,7 @@ function purgeLegacyBotRecords(state: LocalStoreState): boolean {
     }
   }
   for (const b of Object.values(state.booths || {})) {
-    if (b.agentAccountId && LEGACY_BOT_USER_IDS.has(b.agentAccountId)) {
+    if (b.agentAccountId && (LEGACY_BOT_USER_IDS.has(b.agentAccountId) || b.agentAccountId.startsWith('A-2000'))) {
       delete b.agentAccountId;
       mutated = true;
     }
@@ -900,6 +916,16 @@ function purgeLegacyBotRecords(state: LocalStoreState): boolean {
 }
 
 function readLocalStore(): LocalStoreState {
+  try {
+    const wiped = localStorage.getItem('acash_clean_wipe_v7');
+    if (!wiped) {
+      localStorage.setItem('acash_clean_wipe_v7', 'true');
+      localStorage.removeItem(LOCAL_DB_KEY);
+    }
+  } catch {
+    // ignore
+  }
+
   const defaultCreds = buildDefaultMainAdminCredentials();
   try {
     const raw = localStorage.getItem(LOCAL_DB_KEY);
