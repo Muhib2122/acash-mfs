@@ -61,7 +61,7 @@ import {
   UserRole,
 } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
-import { signInWithGooglePopup } from '../../lib/firebase';
+import { consumeGoogleRedirectResult, signInWithGoogleSmart } from '../../lib/firebase';
 import {
   getVoiceMuted,
   playTransactionVoiceAlert,
@@ -1065,34 +1065,76 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     }
   };
 
+  const completeGoogleAdminAuth = async (fbUser: {
+    uid: string;
+    email: string | null;
+    displayName: string | null;
+    photoURL: string | null;
+  }) => {
+    const email = (fbUser.email || '').trim().toLowerCase();
+    if (!email) throw new Error('Google account has no verified email.');
+    const verified = await authorizeGoogleAdminLogin({
+      email,
+      uid: fbUser.uid,
+      displayName: fbUser.displayName,
+      photoURL: fbUser.photoURL,
+    });
+    onAdminLogin({
+      adminEmail: verified.adminEmail,
+      adminName: verified.adminName,
+      adminRole: verified.adminRole,
+      adminId: verified.adminRole === 'main_admin' ? 'ADM-MAIN' : verified.adminId,
+      phone: verified.phone,
+      profilePhotoUrl: verified.profilePhotoUrl,
+      firebaseUid: fbUser.uid,
+      loggedInAt: Date.now(),
+    });
+    if (verified.adminRole === 'second_admin') {
+      setSection('admin_profile');
+    } else {
+      setSection('overview');
+    }
+  };
+
+  useEffect(() => {
+    if (adminSession) return;
+    let active = true;
+    const handleRedirectReturn = async () => {
+      const outcome = await consumeGoogleRedirectResult('admin');
+      if (!active) return;
+      if (outcome.error) {
+        setAuthError(outcome.error);
+        return;
+      }
+      if (outcome.user) {
+        setGoogleAdminBusy(true);
+        try {
+          await completeGoogleAdminAuth(outcome.user);
+        } catch (err) {
+          if (active) {
+            setAuthError(err instanceof Error ? err.message : 'Google Admin Sign-In failed.');
+          }
+        } finally {
+          if (active) setGoogleAdminBusy(false);
+        }
+      }
+    };
+    void handleRedirectReturn();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminSession]);
+
   const handleGoogleAdminSignIn = async () => {
     setAuthError('');
     setGoogleAdminBusy(true);
     try {
-      const fbUser = await signInWithGooglePopup();
-      const email = (fbUser.email || '').trim().toLowerCase();
-      if (!email) throw new Error('Google account has no verified email.');
-      const verified = await authorizeGoogleAdminLogin({
-        email,
-        uid: fbUser.uid,
-        displayName: fbUser.displayName,
-        photoURL: fbUser.photoURL,
-      });
-      onAdminLogin({
-        adminEmail: verified.adminEmail,
-        adminName: verified.adminName,
-        adminRole: verified.adminRole,
-        adminId: verified.adminRole === 'main_admin' ? 'ADM-MAIN' : verified.adminId,
-        phone: verified.phone,
-        profilePhotoUrl: verified.profilePhotoUrl,
-        firebaseUid: fbUser.uid,
-        loggedInAt: Date.now(),
-      });
-      if (verified.adminRole === 'second_admin') {
-        setSection('admin_profile');
-      } else {
-        setSection('overview');
+      const outcome = await signInWithGoogleSmart('admin');
+      if (outcome.status === 'redirecting') {
+        return;
       }
+      await completeGoogleAdminAuth(outcome.user);
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Google Admin Sign-In failed.');
     } finally {

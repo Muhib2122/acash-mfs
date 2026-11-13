@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   User,
   Store,
@@ -16,10 +16,18 @@ import {
   FileCheck2,
   X,
 } from 'lucide-react';
+import { User as FirebaseUser } from 'firebase/auth';
 import { AcashUser, Language, ReferralSource, UserGender, UserRole } from '../../types/acash';
 import { t } from '../../lib/i18n';
 import { sendOtpEmail } from '../../lib/emailjs';
-import { auth, signInWithGooglePopup } from '../../lib/firebase';
+import {
+  auth,
+  consumeGoogleRedirectResult,
+  isLikelyInAppBrowser,
+  isRunningInIframe,
+  signInWithGoogleSmart,
+  startGoogleRedirectSignIn,
+} from '../../lib/firebase';
 import {
   authenticateAcashUser,
   findUserByIdentifier,
@@ -61,6 +69,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   // OTP state
   const [otpStep, setOtpStep] = useState(false);
   const [generatedOtp, setGeneratedOtp] = useState('');
+  const [otpExpiresAt, setOtpExpiresAt] = useState(0);
   const [otpInput, setOtpInput] = useState('');
   const [otpStatusMsg, setOtpStatusMsg] = useState('');
   const [pendingLoginUser, setPendingLoginUser] = useState<AcashUser | null>(null);
@@ -70,6 +79,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
   const [loading, setLoading] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleErrorNeedsHelp, setGoogleErrorNeedsHelp] = useState(false);
   const [googleIdentity, setGoogleIdentity] = useState<{
     uid: string;
     email: string;
@@ -77,6 +87,80 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     photoURL?: string;
   } | null>(null);
   const [error, setError] = useState('');
+
+  const isValidGmail = (value: string) =>
+    /^[a-zA-Z0-9._%+-]+@(gmail|googlemail)\.com$/i.test(value.trim());
+
+  const isDirectGoogleVerified = Boolean(
+    googleIdentity &&
+      auth.currentUser?.emailVerified &&
+      auth.currentUser?.uid === googleIdentity.uid &&
+      googleIdentity.email.trim().toLowerCase() === email.trim().toLowerCase()
+  );
+
+  const applyAuthenticatedGoogleUser = async (fbUser: FirebaseUser) => {
+    const fbEmail = (fbUser.email || '').trim().toLowerCase();
+    if (!fbEmail) {
+      throw new Error('Google account did not provide a verified Gmail address.');
+    }
+
+    const matched = await resolveAcashUserForGoogleAuth({
+      uid: fbUser.uid,
+      email: fbEmail,
+      displayName: fbUser.displayName,
+      photoURL: fbUser.photoURL,
+    });
+
+    if (matched) {
+      onAuthenticated(matched);
+      return;
+    }
+
+    // First-time Google user: MUST complete full info + Gender + TCA (Gmail already directly verified)
+    setGoogleIdentity({
+      uid: fbUser.uid,
+      email: fbEmail,
+      displayName: fbUser.displayName || fbEmail.split('@')[0],
+      photoURL: fbUser.photoURL || undefined,
+    });
+    setMode('register');
+    setOtpStep(false);
+    setName(fbUser.displayName || '');
+    setEmail(fbEmail);
+    setPin('');
+    setGender('');
+    setTcaAccepted(false);
+  };
+
+  useEffect(() => {
+    let active = true;
+    const handleRedirectReturn = async () => {
+      const outcome = await consumeGoogleRedirectResult('portal');
+      if (!active) return;
+      if (outcome.error) {
+        setError(outcome.error);
+        setGoogleErrorNeedsHelp(true);
+        return;
+      }
+      if (outcome.user) {
+        setGoogleBusy(true);
+        try {
+          await applyAuthenticatedGoogleUser(outcome.user);
+        } catch (err) {
+          if (active) {
+            setError(err instanceof Error ? err.message : 'Google Sign-In failed.');
+          }
+        } finally {
+          if (active) setGoogleBusy(false);
+        }
+      }
+    };
+    void handleRedirectReturn();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const roleOptions: Array<{
     id: UserRole;
@@ -112,7 +196,6 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const triggerOtpSend = async (targetEmail: string, targetName: string, targetRole: UserRole) => {
     const normalizedEmail = targetEmail.trim().toLowerCase();
     const code = String(Math.floor(100000 + Math.random() * 900000));
-    setGeneratedOtp(code);
     setOtpInput('');
     setOtpStatusMsg('');
 
@@ -125,15 +208,20 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
       roleLabel,
     });
 
-    if (res.sent) {
-      setOtpStatusMsg(`${t('otpSentTo', lang)} ${normalizedEmail}`);
-    } else {
-      setOtpStatusMsg(
+    if (!res.sent) {
+      setGeneratedOtp('');
+      setOtpExpiresAt(0);
+      setOtpStep(false);
+      throw new Error(
         lang === 'bn'
-          ? `ইমেইল ডেলিভারি সীমাবদ্ধ (${res.error})। স্যান্ডবক্স কোড: ${code}`
-          : `EmailJS notice (${res.error}). Fallback verification code: ${code}`
+          ? `EmailJS থেকে ${normalizedEmail}-এ ভেরিফিকেশন কোড পাঠানো যায়নি (${res.error || 'Delivery failed'})। অনুগ্রহ করে সঠিক Gmail দিন অথবা উপরে "গুগল (Firebase Auth)" ব্যবহার করুন।`
+          : `Could not deliver EmailJS OTP to ${normalizedEmail} (${res.error || 'Delivery failed'}). Please verify your Gmail address or use "Continue with Google" above.`
       );
     }
+
+    setGeneratedOtp(code);
+    setOtpExpiresAt(Date.now() + 10 * 60 * 1000);
+    setOtpStatusMsg(`${t('otpSentTo', lang)} ${normalizedEmail}`);
     setOtpStep(true);
   };
 
@@ -193,11 +281,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
       );
       return;
     }
-    if (!email.includes('@')) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isValidGmail(normalizedEmail)) {
       setError(
         lang === 'bn'
-          ? 'ওটিপি ভেরিফিকেশনের জন্য একটি সঠিক জিমেইল ঠিকানা দিন।'
-          : 'Enter a valid Gmail address for OTP verification.'
+          ? 'অ্যাকাউন্ট খুলতে অবশ্যই একটি সঠিক Gmail ঠিকানা (@gmail.com) দিতে হবে অথবা উপরে গুগল দিয়ে সাইন ইন করতে হবে।'
+          : 'A valid Gmail address (@gmail.com) is required for EmailJS OTP or Direct Google sign-up.'
       );
       return;
     }
@@ -244,8 +333,30 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setLoading(true);
     try {
-      // Always require Email verification code (even when signing up after Google Sign-In)
-      await triggerOtpSend(email.trim().toLowerCase(), name.trim(), role);
+      // Path 1: Direct Gmail via Google Firebase Auth (already email-verified by Google)
+      if (isDirectGoogleVerified && googleIdentity) {
+        const created = await registerAcashUser({
+          role,
+          name,
+          businessName: role !== 'U' ? businessName : undefined,
+          gender,
+          termsAcceptedAt: Date.now(),
+          phone,
+          email: googleIdentity.email.trim().toLowerCase(),
+          pin,
+          referredByType,
+          referredByAgentIdentifier:
+            referredByType === 'agent' ? referredByAgentIdentifier : undefined,
+          firebaseUid: googleIdentity.uid,
+          profilePhotoUrl: googleIdentity.photoURL,
+          verificationMethod: 'google_auth',
+        });
+        setCloudSynced(true);
+        setNewlyCreatedUser(created);
+      } else {
+        // Path 2: EmailJS Gmail OTP Verification (no bypass allowed)
+        await triggerOtpSend(normalizedEmail, name.trim(), role);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send verification OTP.');
     } finally {
@@ -255,43 +366,29 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
   const handleGoogleSignIn = async () => {
     setError('');
+    setGoogleErrorNeedsHelp(false);
     setGoogleBusy(true);
     try {
-      const fbUser = await signInWithGooglePopup();
-      const fbEmail = (fbUser.email || '').trim().toLowerCase();
-      if (!fbEmail) {
-        throw new Error('Google account did not provide a verified email address.');
-      }
-
-      const matched = await resolveAcashUserForGoogleAuth({
-        uid: fbUser.uid,
-        email: fbEmail,
-        displayName: fbUser.displayName,
-        photoURL: fbUser.photoURL,
-      });
-
-      if (matched) {
-        onAuthenticated(matched);
+      const outcome = await signInWithGoogleSmart('portal');
+      if (outcome.status === 'redirecting') {
         return;
       }
-
-      // First-time Google user: MUST complete full info + Gender + TCA + 6-digit verification code
-      setGoogleIdentity({
-        uid: fbUser.uid,
-        email: fbEmail,
-        displayName: fbUser.displayName || fbEmail.split('@')[0],
-        photoURL: fbUser.photoURL || undefined,
-      });
-      setMode('register');
-      setOtpStep(false);
-      setName(fbUser.displayName || '');
-      setEmail(fbEmail);
-      setPin('');
-      setGender('');
-      setTcaAccepted(false);
+      await applyAuthenticatedGoogleUser(outcome.user);
     } catch (err) {
+      setGoogleErrorNeedsHelp(true);
       setError(err instanceof Error ? err.message : 'Google Sign-In was cancelled or failed.');
     } finally {
+      setGoogleBusy(false);
+    }
+  };
+
+  const handleGoogleRedirectRetry = async () => {
+    setError('');
+    setGoogleBusy(true);
+    try {
+      await startGoogleRedirectSignIn('portal');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google redirect sign-in failed.');
       setGoogleBusy(false);
     }
   };
@@ -300,8 +397,16 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     e.preventDefault();
     setError('');
 
-    if (otpInput.trim() !== generatedOtp) {
-      setError(lang === 'bn' ? 'ভুল ওটিপি কোড। আবার চেষ্টা করুন।' : 'Invalid 6-digit OTP code.');
+    if (generatedOtp.length !== 6 || otpInput.trim() !== generatedOtp) {
+      setError(lang === 'bn' ? 'ভুল ওটিপি কোড। আপনার জিমেইল চেক করে সঠিক ৬-সংখ্যার কোড দিন।' : 'Invalid 6-digit OTP code. Please enter the code sent to your Gmail.');
+      return;
+    }
+    if (!otpExpiresAt || Date.now() > otpExpiresAt) {
+      setError(
+        lang === 'bn'
+          ? 'ওটিপি কোডের মেয়াদ শেষ হয়ে গেছে। অনুগ্রহ করে Resend OTP চাপুন।'
+          : 'This OTP has expired. Please tap Resend OTP to receive a fresh code.'
+      );
       return;
     }
 
@@ -323,14 +428,13 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           gender,
           termsAcceptedAt: Date.now(),
           phone,
-          email,
+          email: email.trim().toLowerCase(),
           pin,
           referredByType,
           referredByAgentIdentifier:
             referredByType === 'agent' ? referredByAgentIdentifier : undefined,
-          ...(googleIdentity && googleIdentity.email.toLowerCase() === email.trim().toLowerCase()
-            ? { firebaseUid: googleIdentity.uid, profilePhotoUrl: googleIdentity.photoURL }
-            : {}),
+          verificationMethod: 'emailjs_otp',
+          emailJsOtpVerified: true,
         });
         setCloudSynced(Boolean(created.firebaseUid && auth.currentUser?.emailVerified));
         setNewlyCreatedUser(created);
@@ -347,10 +451,13 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     setError('');
     setSyncingCloud(true);
     try {
-      const fbUser = await signInWithGooglePopup();
-      const ok = await syncAcashUserToCloud(newlyCreatedUser, fbUser.uid);
+      const outcome = await signInWithGoogleSmart('portal');
+      if (outcome.status === 'redirecting') {
+        return;
+      }
+      const ok = await syncAcashUserToCloud(newlyCreatedUser, outcome.user.uid);
       if (ok) {
-        setNewlyCreatedUser({ ...newlyCreatedUser, firebaseUid: fbUser.uid });
+        setNewlyCreatedUser({ ...newlyCreatedUser, firebaseUid: outcome.user.uid });
         setCloudSynced(true);
       }
     } catch (err) {
@@ -523,47 +630,75 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setGoogleIdentity(null)}
+                  onClick={() => {
+                    setGoogleIdentity(null);
+                    setEmail('');
+                    setError('');
+                  }}
                   className="text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white shrink-0"
                 >
-                  Switch
+                  {lang === 'bn' ? 'পরিবর্তন' : 'Switch'}
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                disabled={googleBusy || loading}
-                onClick={handleGoogleSignIn}
-                className="w-full py-3 px-4 rounded-xl bg-slate-50 dark:bg-[#0B0D14] hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
-              >
-                {googleBusy ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
-                ) : (
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      fill="#4285F4"
-                      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.37 24 12 24Z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-                    />
-                  </svg>
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={googleBusy || loading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full py-3 px-4 rounded-xl bg-slate-50 dark:bg-[#0B0D14] hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
+                >
+                  {googleBusy ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
+                  ) : (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="#4285F4"
+                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.37 24 12 24Z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                      />
+                    </svg>
+                  )}
+                  <span>
+                    {lang === 'bn'
+                      ? 'গুগল (Firebase Auth) দিয়ে সাইন ইন করুন'
+                      : 'Continue with Google (Firebase Auth)'}
+                  </span>
+                </button>
+
+                {googleErrorNeedsHelp && !isRunningInIframe() && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-200">
+                    <span>
+                      {isLikelyInAppBrowser()
+                        ? lang === 'bn'
+                          ? 'ইন-অ্যাপ ব্রাউজারে পপআপ ব্লক হলে Chrome/Safari-তে খুলুন অথবা রিডাইরেক্ট ব্যবহার করুন।'
+                          : 'In-app browser detected. Open in Chrome/Safari or try Redirect login.'
+                        : lang === 'bn'
+                          ? 'পপআপ ব্লক হলে গুগল রিডাইরেক্ট চেষ্টা করুন।'
+                          : 'Popup blocked? Try Google Redirect sign-in.'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={googleBusy}
+                      onClick={handleGoogleRedirectRetry}
+                      className="font-semibold text-indigo-700 dark:text-indigo-300 underline"
+                    >
+                      {lang === 'bn' ? 'Redirect Sign-In' : 'Use Redirect Sign-In'}
+                    </button>
+                  </div>
                 )}
-                <span>
-                  {lang === 'bn'
-                    ? 'গুগল (Firebase Auth) দিয়ে সাইন ইন করুন'
-                    : 'Continue with Google (Firebase Auth)'}
-                </span>
-              </button>
+              </div>
             )}
           </div>
 
@@ -790,20 +925,47 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                      {t('gmail', lang)}
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        {t('gmail', lang)}
+                      </label>
+                      <span
+                        className={`text-[10px] font-semibold ${
+                          isDirectGoogleVerified
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-indigo-600 dark:text-indigo-400'
+                        }`}
+                      >
+                        {isDirectGoogleVerified
+                          ? lang === 'bn'
+                            ? 'ডাইরেক্ট গুগল ভেরিফাইড'
+                            : 'Direct Google Verified'
+                          : lang === 'bn'
+                            ? 'EmailJS OTP আবশ্যক'
+                            : 'EmailJS OTP Required'}
+                      </span>
+                    </div>
                     <div className="relative">
                       <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                       <input
                         type="email"
                         required
+                        readOnly={isDirectGoogleVerified}
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
                         placeholder="yourname@gmail.com"
-                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                        className={`w-full pl-10 pr-4 py-2.5 rounded-xl border text-sm focus:outline-none focus:border-indigo-500 ${
+                          isDirectGoogleVerified
+                            ? 'bg-emerald-50/60 dark:bg-emerald-500/10 border-emerald-300 dark:border-emerald-500/40 text-emerald-900 dark:text-emerald-100 cursor-not-allowed'
+                            : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500'
+                        }`}
                       />
                     </div>
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      {lang === 'bn'
+                        ? 'নতুন আইডি শুধুমাত্র Direct Google Auth অথবা EmailJS Gmail OTP-এর মাধ্যমেই তৈরি করা যাবে।'
+                        : 'Accounts can only be created via Direct Google Gmail Auth or EmailJS 6-digit Gmail OTP.'}
+                    </p>
                   </div>
 
                   {/* Sex / Gender Info for Opposite-Gender Transaction Voice Alerts */}
@@ -953,10 +1115,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
                     <span>
-                      {googleIdentity && googleIdentity.email.toLowerCase() === email.trim().toLowerCase()
+                      {isDirectGoogleVerified
                         ? lang === 'bn'
-                          ? 'ভেরিফিকেশন কোড পাঠান ও গুগল সাইন-আপ সম্পন্ন করুন'
-                          : 'Send Verification Code & Complete Google Sign-Up'
+                          ? 'গুগল ভেরিফাইড অ্যাকাউন্ট তৈরি করুন'
+                          : 'Create Account (Direct Google Gmail)'
                         : t('sendOtp', lang)}
                     </span>
                   </button>
@@ -1026,7 +1188,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     try {
                       const targetEmail = pendingLoginUser ? pendingLoginUser.email : email;
                       const targetName = pendingLoginUser ? pendingLoginUser.name : name;
-                      await triggerOtpSend(targetEmail, targetName, role);
+                      const targetRole = pendingLoginUser ? pendingLoginUser.role : role;
+                      await triggerOtpSend(targetEmail, targetName, targetRole);
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : 'Failed to resend OTP.');
                     } finally {
                       setLoading(false);
                     }

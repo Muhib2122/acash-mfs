@@ -1669,9 +1669,45 @@ export async function registerAcashUser(params: {
   referredByAgentIdentifier?: string;
   firebaseUid?: string;
   profilePhotoUrl?: string;
+  verificationMethod: 'google_auth' | 'emailjs_otp';
+  emailJsOtpVerified?: boolean;
 }): Promise<AcashUser> {
   const phone = normalizeBdPhone(params.phone);
   const email = params.email.trim().toLowerCase();
+
+  if (!/^[a-zA-Z0-9._%+-]+@(gmail|googlemail)\.com$/i.test(email)) {
+    throw new Error('Only a valid Gmail address (@gmail.com) can be used to create an Acash ID.');
+  }
+  if (!params.termsAcceptedAt) {
+    throw new Error('Terms & Conditions Agreement (TCA) acceptance is required.');
+  }
+  if (params.gender !== 'male' && params.gender !== 'female') {
+    throw new Error('Gender selection is required.');
+  }
+
+  if (params.verificationMethod === 'google_auth') {
+    const fbUser = auth.currentUser;
+    const fbEmail = (fbUser?.email || '').trim().toLowerCase();
+    if (
+      !fbUser ||
+      !fbUser.emailVerified ||
+      !params.firebaseUid ||
+      fbUser.uid !== params.firebaseUid ||
+      fbEmail !== email
+    ) {
+      throw new Error(
+        'Direct Google Gmail verification expired or did not match. Please sign in with Google again.'
+      );
+    }
+  } else if (params.verificationMethod === 'emailjs_otp') {
+    if (!params.emailJsOtpVerified) {
+      throw new Error('EmailJS 6-digit Gmail OTP verification is mandatory to create an Acash ID.');
+    }
+  } else {
+    throw new Error(
+      'Acash accounts can only be created via Direct Google Gmail Auth or EmailJS Gmail OTP.'
+    );
+  }
 
   // Check duplicate in local store & Firestore directory
   const existingLocal = findInLocalStore(phone);
