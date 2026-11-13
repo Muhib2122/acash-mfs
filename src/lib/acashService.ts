@@ -4342,6 +4342,83 @@ export async function adminDeleteUser(
   });
 }
 
+export async function adminResetAllAccountsAndTransactions(params: {
+  adminEmail: string;
+  reason?: string;
+}): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  const allUserIds = Object.keys(store.users);
+
+  store.users = {};
+  store.transactions = {};
+  store.mapLocations = {};
+  store.treasuryVault = {
+    vaultId: 'ADMIN-TREASURY',
+    balance: 0,
+    totalMinted: 0,
+    totalDisbursed: 0,
+    mintHistory: [
+      {
+        id: `MINT-RESET-${now.toString(36).toUpperCase()}`,
+        action: 'refresh',
+        amount: 0,
+        previousBalance: store.treasuryVault?.balance || 0,
+        newBalance: 0,
+        note: params.reason?.trim() || 'System-wide factory reset of all accounts and transactions by Platform Admin',
+        actorEmail: params.adminEmail,
+        timestamp: now,
+      },
+    ],
+    updatedAt: now,
+    updatedBy: params.adminEmail,
+  };
+
+  const resetNotif: AdminNotification = {
+    id: `NTF-RESET-${now.toString(36).toUpperCase()}`,
+    title: 'System Factory Reset · All Users, Merchants, Agents & History Cleared',
+    message: `All ${allUserIds.length} accounts, transactions, identity locks, and treasury balance wiped clean by ${params.adminEmail}. Ready for fresh registrations.`,
+    category: 'account_status',
+    severity: 'warning',
+    createdAt: now,
+    read: false,
+    targetSection: 'users',
+  };
+  store.notifications[resetNotif.id] = resetNotif;
+
+  const resetActivity = makeActivityEntry({
+    idPrefix: 'ACT-RESET',
+    actionType: 'account_delete',
+    title: 'System Factory Reset · All Accounts & History Wiped',
+    details: `Successfully wiped all users, merchants, agents, transactions, KYC submissions and reset treasury vault to 0 BDT.`,
+    actorEmail: params.adminEmail,
+    targetIds: allUserIds.slice(0, 50),
+    timestamp: now,
+  });
+  store.activityLogs[resetActivity.id] = resetActivity;
+
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      ...allUserIds.map((id) =>
+        Promise.all([
+          deleteDoc(doc(db, USERS_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, DIRECTORY_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, MAP_LOCATIONS_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, KYC_SUBMISSIONS_COL, id)).catch(() => {}),
+        ])
+      ),
+      setDoc(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), store.treasuryVault).catch(() => {}),
+      setDoc(doc(db, ADMIN_NOTIF_COL, resetNotif.id), resetNotif).catch(() => {}),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, resetActivity.id), resetActivity).catch(() => {}),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+}
+
 export async function adminUpdateFeeConfig(config: Omit<FeeConfig, 'updatedAt'>): Promise<void> {
   const now = Date.now();
   const full: FeeConfig = normalizeFeeConfig({ ...config, updatedAt: now });

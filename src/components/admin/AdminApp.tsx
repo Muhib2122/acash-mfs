@@ -78,6 +78,7 @@ import {
   adminDeleteTransaction,
   adminDeleteUser,
   adminBulkDeleteUsers,
+  adminResetAllAccountsAndTransactions,
   adminFreezeAllUsers,
   adminMarkTransactionPending,
   adminRejectTransaction,
@@ -1432,6 +1433,30 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setSelectedUserIds([]);
     } catch (err) {
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete all accounts.');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleFactoryResetSystem = async () => {
+    if (!adminSession) return;
+    if (
+      !window.confirm(
+        '⚠️ FACTORY RESET: Delete ALL users, merchants, agents, transactions, KYC records, and reset treasury vault to 0 BDT? This will completely wipe the platform clean so you can add new accounts from scratch.'
+      )
+    )
+      return;
+    setBulkBusy(true);
+    setFeedbackMsg('');
+    try {
+      await adminResetAllAccountsAndTransactions({
+        adminEmail: adminSession.adminEmail,
+        reason: 'System factory reset by Main Admin',
+      });
+      setFeedbackMsg('System factory reset completed successfully! All accounts, transactions & history wiped clean.');
+      setSelectedUserIds([]);
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Factory reset failed.');
     } finally {
       setBulkBusy(false);
     }
@@ -3017,6 +3042,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Delete All</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={bulkBusy}
+                      onClick={handleFactoryResetSystem}
+                      className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white shadow-sm inline-flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-40"
+                      title="Factory Reset: Wipe all accounts, transactions & history"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Factory Reset All</span>
                     </button>
                   </div>
                 </div>
