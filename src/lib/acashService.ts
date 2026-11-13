@@ -2988,11 +2988,12 @@ export async function executeFinancialTransaction(params: {
     : amount;
   const receiverCommInc = getsCashOutCommission ? breakdown.agentAmount : 0;
 
-  if (!requiresAdminApproval && resolvedReceiver && cachedReceiver && cachedReceiver.pinHash) {
+  if (!requiresAdminApproval && resolvedReceiver) {
+    const existingRecv = cachedReceiver || resolvedReceiver;
     store.users[resolvedReceiver.accountId] = {
-      ...cachedReceiver,
-      balance: Number((cachedReceiver.balance + creditToReceiver).toFixed(2)),
-      commissionBalance: Number(((cachedReceiver.commissionBalance || 0) + receiverCommInc).toFixed(2)),
+      ...existingRecv,
+      balance: Number((existingRecv.balance + creditToReceiver).toFixed(2)),
+      commissionBalance: Number(((existingRecv.commissionBalance || 0) + receiverCommInc).toFixed(2)),
       lastActiveAt: now,
     };
   }
