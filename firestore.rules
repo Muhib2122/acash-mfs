@@ -182,7 +182,7 @@ service cloud.firestore {
         && data.id is string && data.id.size() > 0 && data.id.size() <= 64
         && data.actionType in [
           'fee_update', 'fund_transfer', 'credit_add', 'bulk_status_change',
-          'status_change', 'aml_decision', 'alert_settings', 'security_update'
+          'status_change', 'account_delete', 'aml_decision', 'alert_settings', 'security_update'
         ]
         && data.title is string && data.title.size() <= 160
         && data.details is string && data.details.size() <= 800
@@ -273,6 +273,17 @@ service cloud.firestore {
         && data.createdAt is number;
     }
 
+    function isValidKycSubmission(data) {
+      return data.keys().hasAll(['accountId', 'name', 'kyc', 'updatedAt'])
+        && data.keys().hasOnly(['accountId', 'name', 'businessName', 'kyc', 'updatedAt'])
+        && data.accountId is string && data.accountId.size() <= 12 && data.accountId.matches('^[UAM]-\\d{6}$')
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        && (!('businessName' in data) || (data.businessName is string && data.businessName.size() <= 140))
+        && data.kyc is map
+        && data.kyc.nidNumber is string && data.kyc.nidNumber.size() > 0 && data.kyc.nidNumber.size() <= 64
+        && data.updatedAt is number;
+    }
+
     // ---------- Boot Connection Health Check ----------
     match /test/connection {
       allow get: if true;
@@ -299,7 +310,7 @@ service cloud.firestore {
       allow list: if isVerifiedUser() && (
         resource.data.firebaseUid == request.auth.uid ||
         resource.data.email == request.auth.token.email ||
-        isRootAdminEmail()
+        isAdmin()
       );
       allow create: if isValidId(accountId) && isValidAcashUser(incoming()) && incoming().accountId == accountId && (
         isAdmin() || (
@@ -333,11 +344,21 @@ service cloud.firestore {
               ])) ||
               (incoming().balance >= existing().balance &&
                 incoming().diff(existing()).affectedKeys().hasOnly([
-                  'balance', 'commissionBalance', 'lastActiveAt'
-                ]))
-            )
+                'balance', 'commissionBalance', 'lastActiveAt'
+              ]))
           )
-        );
+        )
+      );
+      allow delete: if isAdmin() && isValidId(accountId);
+    }
+
+    // ---------- Acash KYC Submissions Bridge (PII Admin-Only Read, Any Account Write) ----------
+    match /acash_kyc_submissions/{accountId} {
+      allow get, list: if isAdmin();
+      allow create, update: if isValidId(accountId)
+        && isValidKycSubmission(incoming())
+        && incoming().accountId == accountId;
+      allow delete: if isAdmin() && isValidId(accountId);
     }
 
     // ---------- Acash Public Account Routing Directory (Non-PII Split Collection) ----------
@@ -363,6 +384,7 @@ service cloud.firestore {
           (existing().firebaseUid == request.auth.uid && incoming().firebaseUid == existing().firebaseUid) ||
           (!('firebaseUid' in existing()) && incoming().firebaseUid == request.auth.uid)
         );
+      allow delete: if isAdmin() && isValidId(accountId);
     }
 
     // ---------- Zero-PII Deterministic Identity & KYC Uniqueness Locks ----------
@@ -383,7 +405,7 @@ service cloud.firestore {
       allow list: if isVerifiedUser() && (
         resource.data.senderUid == request.auth.uid ||
         resource.data.receiverUid == request.auth.uid ||
-        isRootAdminEmail()
+        isAdmin()
       );
       allow create: if isVerifiedUser() && isValidId(txId) && isValidAcashTransaction(incoming()) && (
         incoming().senderUid == request.auth.uid || isAdmin()
@@ -435,7 +457,7 @@ service cloud.firestore {
       allow list: if isVerifiedUser() && (
         resource.data.firebaseUid == request.auth.uid ||
         resource.data.email == request.auth.token.email ||
-        isRootAdminEmail()
+        isAdmin()
       );
       allow create: if isAdmin() && isValidId(adminId) && isValidSecondAdmin(incoming());
       allow update: if isVerifiedUser() && isValidId(adminId) && isValidSecondAdmin(incoming())
@@ -468,7 +490,7 @@ service cloud.firestore {
     // ---------- Admin Notifications & Activity Logs ----------
     match /acash_admin_notifications/{notifId} {
       allow get: if isAdmin() && isValidId(notifId);
-      allow list: if isRootAdminEmail();
+      allow list: if isAdmin();
       allow create: if isVerifiedUser() && isValidId(notifId) && isValidAdminNotification(incoming());
       allow update: if isAdmin() && isValidId(notifId) && isValidAdminNotification(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
@@ -476,7 +498,7 @@ service cloud.firestore {
 
     match /acash_admin_activity_logs/{logId} {
       allow get: if isAdmin() && isValidId(logId);
-      allow list: if isRootAdminEmail();
+      allow list: if isAdmin();
       allow create: if isAdmin() && isValidId(logId) && isValidAdminActivityLog(incoming());
     }
   }

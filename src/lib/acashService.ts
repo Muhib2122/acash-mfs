@@ -48,18 +48,21 @@ import {
   FeeConfig,
   IdentityLockType,
   KycInfo,
+  KycSubmissionRecord,
   MainAdminCredentialConfig,
   MainTreasuryVault,
   OperatorId,
   ReferralSource,
   SecondAdminProfile,
   TransactionType,
+  TreasuryMintHistoryEntry,
   UserGender,
   UserMapLocation,
   UserRole,
 } from '../types/acash';
 
 const USERS_COL = 'acash_users';
+const KYC_SUBMISSIONS_COL = 'acash_kyc_submissions';
 const DIRECTORY_COL = 'acash_directory';
 const LOCKS_COL = 'acash_identity_locks';
 const TX_COL = 'acash_transactions';
@@ -74,6 +77,8 @@ const ADMIN_ALERT_DOC_ID = 'admin_alert';
 const MAIN_ADMIN_CREDS_DOC_ID = 'main_admin_credentials';
 const TREASURY_VAULT_DOC_ID = 'treasury_vault';
 const LOCAL_DB_KEY = 'acash_local_db_v1';
+const BOTS_PURGED_FLAG_KEY = 'acash_legacy_bots_purged_v1';
+const LAST_REG_TS_KEY = 'acash_last_registration_ts';
 const LOCAL_SYNC_EVENT = 'acash-db-sync';
 
 export const MAIN_ADMIN_EMAIL = 'aiub.muhib@gmail.com';
@@ -116,6 +121,7 @@ export const DEFAULT_TREASURY_VAULT: MainTreasuryVault = {
   balance: 0,
   totalMinted: 0,
   totalDisbursed: 0,
+  mintHistory: [],
   updatedAt: Date.now(),
   updatedBy: MAIN_ADMIN_EMAIL,
 };
@@ -126,6 +132,22 @@ export function normalizeTreasuryVault(raw?: Partial<MainTreasuryVault> | null):
     const n = Number(v);
     return Number.isFinite(n) && n >= 0 ? Number(n.toFixed(2)) : 0;
   };
+  const rawHistory = Array.isArray(src.mintHistory) ? src.mintHistory : [];
+  const mintHistory: TreasuryMintHistoryEntry[] = rawHistory
+    .filter((entry): entry is TreasuryMintHistoryEntry => Boolean(entry && typeof entry.id === 'string' && typeof entry.timestamp === 'number'))
+    .map((entry) => ({
+      id: entry.id,
+      action: entry.action === 'refresh' ? ('refresh' as const) : ('mint' as const),
+      amount: numOrZero(entry.amount),
+      previousBalance: numOrZero(entry.previousBalance),
+      newBalance: numOrZero(entry.newBalance),
+      note: typeof entry.note === 'string' ? entry.note : '',
+      actorEmail: typeof entry.actorEmail === 'string' && entry.actorEmail ? entry.actorEmail : MAIN_ADMIN_EMAIL,
+      timestamp: entry.timestamp,
+    }))
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 250);
+
   return {
     vaultId: 'ADMIN-TREASURY',
     balance: numOrZero(src.balance),
@@ -133,6 +155,7 @@ export function normalizeTreasuryVault(raw?: Partial<MainTreasuryVault> | null):
     totalDisbursed: numOrZero(src.totalDisbursed),
     ...(typeof src.lastMintAmount === 'number' ? { lastMintAmount: src.lastMintAmount } : {}),
     ...(typeof src.lastMintNote === 'string' && src.lastMintNote ? { lastMintNote: src.lastMintNote } : {}),
+    mintHistory,
     updatedAt: typeof src.updatedAt === 'number' ? src.updatedAt : Date.now(),
     updatedBy: typeof src.updatedBy === 'string' && src.updatedBy ? src.updatedBy : MAIN_ADMIN_EMAIL,
   };
@@ -374,6 +397,16 @@ async function claimIdentityLock(
   await setDoc(ref, lockDoc);
 }
 
+async function releaseIdentityLock(
+  lockType: IdentityLockType,
+  rawValue: string
+): Promise<void> {
+  if (!rawValue) return;
+  const lockId = await buildIdentityLockId(lockType, rawValue);
+  if (!/^[a-zA-Z0-9_-]{6,128}$/.test(lockId)) return;
+  await deleteDoc(doc(db, LOCKS_COL, lockId)).catch(() => {});
+}
+
 async function backfillUserIdentityLocks(user: AcashUser): Promise<void> {
   if (!user?.accountId) return;
   const created = user.createdAt || Date.now();
@@ -393,12 +426,69 @@ async function backfillUserIdentityLocks(user: AcashUser): Promise<void> {
   }
 }
 
+const LEGACY_BOT_USER_IDS = new Set(['U-100001', 'A-200001', 'M-300001', 'M-300002']);
+const LEGACY_BOT_ADMIN_IDS = new Set(['ADM-200001', 'ADM-200002']);
+const LEGACY_BOT_EMAILS = new Set([
+  'nafis.customer@gmail.com',
+  'karim.agent@gmail.com',
+  'aarong.merchant@gmail.com',
+  'walton.b2b@gmail.com',
+  'rafiq.admin@acash.com',
+  'nusrat.admin@acash.com',
+]);
+const LEGACY_BOT_PHONES = new Set([
+  '01711000001',
+  '01811000002',
+  '01911000003',
+  '01611000004',
+  '01799000101',
+  '01799000102',
+]);
+
+function isSpamOrBotPhone(phone: string): string | null {
+  if (!/^01[3-9]\d{8}$/.test(phone)) {
+    return 'Enter a valid 11-digit Bangladesh mobile number (e.g. 017XXXXXXXX).';
+  }
+  if (LEGACY_BOT_PHONES.has(phone)) {
+    return 'Dummy/reserved system mobile numbers cannot be used for registration.';
+  }
+  if (/^01[3-9](\d)\1{7}$/.test(phone) || /(01234567|12345678|23456789|98765432)/.test(phone)) {
+    return 'Invalid or repetitive spam phone pattern detected. Use a genuine mobile number.';
+  }
+  return null;
+}
+
+function isSpamOrBotEmail(email: string): string | null {
+  const lower = email.trim().toLowerCase();
+  if (LEGACY_BOT_EMAILS.has(lower)) {
+    return 'Reserved legacy emails cannot be used for registration.';
+  }
+  const localPart = lower.split('@')[0] || '';
+  if (
+    localPart.length < 3 ||
+    /^(bot|spam|fake|testbot|dummy|noreply)/.test(localPart) ||
+    /\+bot\d*/i.test(localPart)
+  ) {
+    return 'Automated/bot-like Gmail addresses are blocked by Acash Anti-Spam Security.';
+  }
+  return null;
+}
+
 export async function checkRegistrationIdentityAvailability(params: {
   phone: string;
   email: string;
 }): Promise<void> {
   const phone = normalizeBdPhone(params.phone);
   const email = params.email.trim().toLowerCase();
+
+  if (phone) {
+    const phoneErr = isSpamOrBotPhone(phone);
+    if (phoneErr) throw new Error(phoneErr);
+  }
+  if (email) {
+    const emailErr = isSpamOrBotEmail(email);
+    if (emailErr) throw new Error(emailErr);
+  }
 
   // 1. Check local synchronized store for both phone and Gmail
   const store = readLocalStore();
@@ -481,92 +571,7 @@ export function getBackendSyncMode(): 'firestore' | 'local_sync' {
 }
 
 function buildSeedUsers(): Record<string, AcashUser> {
-  const now = Date.now();
-  const list: AcashUser[] = [
-    {
-      accountId: 'U-100001',
-      role: 'U',
-      name: 'Nafis Rahman',
-      gender: 'male',
-      termsAcceptedAt: now - 86400000 * 7,
-      phone: '01711000001',
-      email: 'nafis.customer@gmail.com',
-      pinHash: hashPin('1234'),
-      balance: 125000,
-      commissionBalance: 0,
-      status: 'active',
-      verified: true,
-      referredByType: 'agent',
-      referredByAgentId: 'A-200001',
-      referredByAgentPhone: '01811000002',
-      referredByAgentName: 'Dhaka Central Agent Point',
-      createdAt: now - 86400000 * 7,
-      lastActiveAt: now,
-    },
-    {
-      accountId: 'A-200001',
-      role: 'A',
-      name: 'Karim Uddin',
-      businessName: 'Dhaka Central Agent Point',
-      gender: 'male',
-      termsAcceptedAt: now - 86400000 * 14,
-      phone: '01811000002',
-      email: 'karim.agent@gmail.com',
-      pinHash: hashPin('1234'),
-      balance: 450000,
-      commissionBalance: 2480.5,
-      status: 'active',
-      verified: true,
-      referredByType: 'own_app',
-      createdAt: now - 86400000 * 14,
-      lastActiveAt: now,
-    },
-    {
-      accountId: 'M-300001',
-      role: 'M',
-      name: 'Farhana Yasmin',
-      businessName: 'Aarong Flagship Store',
-      gender: 'female',
-      termsAcceptedAt: now - 86400000 * 21,
-      phone: '01911000003',
-      email: 'aarong.merchant@gmail.com',
-      pinHash: hashPin('1234'),
-      staffPinHash: hashPin('0000'),
-      balance: 280000,
-      commissionBalance: 0,
-      status: 'active',
-      verified: true,
-      referredByType: 'own_app',
-      createdAt: now - 86400000 * 21,
-      lastActiveAt: now,
-    },
-    {
-      accountId: 'M-300002',
-      role: 'M',
-      name: 'Tariq Mahmud',
-      businessName: 'Walton Wholesale Supply',
-      gender: 'male',
-      termsAcceptedAt: now - 86400000 * 10,
-      phone: '01611000004',
-      email: 'walton.b2b@gmail.com',
-      pinHash: hashPin('1234'),
-      staffPinHash: hashPin('0000'),
-      balance: 190000,
-      commissionBalance: 0,
-      status: 'active',
-      verified: true,
-      referredByType: 'agent',
-      referredByAgentId: 'A-200001',
-      referredByAgentPhone: '01811000002',
-      referredByAgentName: 'Dhaka Central Agent Point',
-      createdAt: now - 86400000 * 10,
-      lastActiveAt: now,
-    },
-  ];
-
-  const map: Record<string, AcashUser> = {};
-  for (const u of list) map[u.accountId] = u;
-  return map;
+  return {};
 }
 
 function buildDefaultNotifications(): Record<string, AdminNotification> {
@@ -635,7 +640,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Dhaka',
       address: '42 Dilkusha C/A, Ground Floor Arcade, Motijheel, Dhaka 1000',
       phone: '01811000002',
-      agentAccountId: 'A-200001',
       hours: '08:30 AM – 10:00 PM',
       status: 'open',
       lat: 23.7272,
@@ -671,7 +675,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Dhaka',
       address: 'Road 45, Plot 14, Gulshan-2 Circle, Dhaka 1212',
       phone: '01811000102',
-      agentAccountId: 'A-200001',
       hours: '09:00 AM – 11:00 PM',
       status: 'open',
       lat: 23.7949,
@@ -707,7 +710,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Dhaka',
       address: 'Shop 9, Rapa Plaza Annex, Mirpur Road, Dhanmondi 27, Dhaka',
       phone: '01811000203',
-      agentAccountId: 'A-200001',
       hours: '08:00 AM – 10:30 PM',
       status: 'open',
       lat: 23.7561,
@@ -743,7 +745,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Dhaka',
       address: 'Shah Ali Plaza East Gate, Mirpur-10 Circle, Dhaka 1216',
       phone: '01811000304',
-      agentAccountId: 'A-200001',
       hours: '08:00 AM – 11:00 PM',
       status: 'busy',
       lat: 23.8069,
@@ -762,7 +763,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Dhaka',
       address: 'House 21, Lake Drive Road, Sector 7, Uttara, Dhaka 1230',
       phone: '01811000405',
-      agentAccountId: 'A-200001',
       hours: '08:30 AM – 10:00 PM',
       status: 'open',
       lat: 23.8682,
@@ -798,7 +798,6 @@ function buildSeedBooths(): Record<string, AcashBooth> {
       city: 'Chattogram',
       address: 'Sk. Mujib Road, Agrabad C/A, Chattogram 4100',
       phone: '01811000506',
-      agentAccountId: 'A-200001',
       hours: '08:30 AM – 09:30 PM',
       status: 'open',
       lat: 22.3239,
@@ -849,151 +848,12 @@ function buildSeedBooths(): Record<string, AcashBooth> {
   return map;
 }
 
-function makeAvatarSvgDataUrl(initials: string, bgHex: string): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${bgHex}"/><stop offset="100%" stop-color="#1E103C"/></linearGradient></defs><rect width="128" height="128" rx="64" fill="url(#g)"/><text x="64" y="75" text-anchor="middle" fill="#FFFFFF" font-family="Arial, sans-serif" font-size="44" font-weight="700">${initials}</text></svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
 function buildSeedSecondAdmins(): Record<string, SecondAdminProfile> {
-  const now = Date.now();
-  const list: SecondAdminProfile[] = [
-    {
-      adminId: 'ADM-200001',
-      name: 'Rafiqul Islam',
-      title: 'Dhaka Metro 2nd Admin & Field Desk',
-      email: 'rafiq.admin@acash.com',
-      phone: '01799000101',
-      passwordHash: hashPin('Acash2nd@2026'),
-      createdBy: MAIN_ADMIN_EMAIL,
-      profilePhotoUrl: makeAvatarSvgDataUrl('RI', '#0EA5E9'),
-      mapLocation: {
-        lat: 23.7509,
-        lng: 90.3935,
-        address: 'Karwan Bazar Regional Admin Desk, Level 3, Dhaka 1215',
-        area: 'Karwan Bazar',
-        city: 'Dhaka',
-        isVisible: true,
-        updatedAt: now,
-      },
-      status: 'active',
-      createdAt: now - 86400000 * 25,
-      updatedAt: now,
-    },
-    {
-      adminId: 'ADM-200002',
-      name: 'Nusrat Jahan',
-      title: 'Uttara Zone 2nd Admin Coordinator',
-      email: 'nusrat.admin@acash.com',
-      phone: '01799000102',
-      passwordHash: hashPin('Acash2nd@2026'),
-      createdBy: MAIN_ADMIN_EMAIL,
-      profilePhotoUrl: makeAvatarSvgDataUrl('NJ', '#0284C7'),
-      mapLocation: {
-        lat: 23.8728,
-        lng: 90.3984,
-        address: 'Sector 11 Regional Verification Desk, Uttara, Dhaka 1230',
-        area: 'Uttara',
-        city: 'Dhaka',
-        isVisible: true,
-        updatedAt: now,
-      },
-      status: 'active',
-      createdAt: now - 86400000 * 18,
-      updatedAt: now,
-    },
-  ];
-  const map: Record<string, SecondAdminProfile> = {};
-  for (const a of list) map[a.adminId] = a;
-  return map;
+  return {};
 }
 
 function buildSeedMapLocations(): Record<string, AcashMapLocation> {
-  const now = Date.now();
-  const list: AcashMapLocation[] = [
-    {
-      creatorId: 'A-200001',
-      creatorRole: 'agent',
-      name: 'Karim Uddin',
-      businessName: 'Dhaka Central Agent Point',
-      phone: '01811000002',
-      profilePhotoUrl: makeAvatarSvgDataUrl('KU', '#10B981'),
-      address: '42 Dilkusha C/A, Motijheel, Dhaka 1000',
-      area: 'Motijheel',
-      city: 'Dhaka',
-      lat: 23.7285,
-      lng: 90.4152,
-      isVisible: true,
-      createdAt: now - 86400000 * 14,
-      updatedAt: now,
-    },
-    {
-      creatorId: 'M-300001',
-      creatorRole: 'merchant',
-      name: 'Farhana Yasmin',
-      businessName: 'Aarong Flagship Store',
-      phone: '01911000003',
-      profilePhotoUrl: makeAvatarSvgDataUrl('FY', '#C026D3'),
-      address: 'Lalmatia / Satmasjid Rd, Dhanmondi 27, Dhaka 1209',
-      area: 'Dhanmondi',
-      city: 'Dhaka',
-      lat: 23.7536,
-      lng: 90.3712,
-      isVisible: true,
-      createdAt: now - 86400000 * 21,
-      updatedAt: now,
-    },
-    {
-      creatorId: 'M-300002',
-      creatorRole: 'merchant',
-      name: 'Tariq Mahmud',
-      businessName: 'Walton Wholesale Supply',
-      phone: '01611000004',
-      profilePhotoUrl: makeAvatarSvgDataUrl('TM', '#9333EA'),
-      address: 'Bashundhara Gate Commercial Complex, Dhaka 1229',
-      area: 'Bashundhara',
-      city: 'Dhaka',
-      lat: 23.8135,
-      lng: 90.4248,
-      isVisible: true,
-      createdAt: now - 86400000 * 10,
-      updatedAt: now,
-    },
-    {
-      creatorId: 'ADM-200001',
-      creatorRole: 'second_admin',
-      name: 'Rafiqul Islam',
-      businessName: 'Dhaka Metro 2nd Admin & Field Desk',
-      phone: '01799000101',
-      profilePhotoUrl: makeAvatarSvgDataUrl('RI', '#0EA5E9'),
-      address: 'Karwan Bazar Regional Admin Desk, Level 3, Dhaka 1215',
-      area: 'Karwan Bazar',
-      city: 'Dhaka',
-      lat: 23.7509,
-      lng: 90.3935,
-      isVisible: true,
-      createdAt: now - 86400000 * 25,
-      updatedAt: now,
-    },
-    {
-      creatorId: 'ADM-200002',
-      creatorRole: 'second_admin',
-      name: 'Nusrat Jahan',
-      businessName: 'Uttara Zone 2nd Admin Coordinator',
-      phone: '01799000102',
-      profilePhotoUrl: makeAvatarSvgDataUrl('NJ', '#0284C7'),
-      address: 'Sector 11 Regional Verification Desk, Uttara, Dhaka 1230',
-      area: 'Uttara',
-      city: 'Dhaka',
-      lat: 23.8728,
-      lng: 90.3984,
-      isVisible: true,
-      createdAt: now - 86400000 * 18,
-      updatedAt: now,
-    },
-  ];
-  const map: Record<string, AcashMapLocation> = {};
-  for (const item of list) map[item.creatorId] = item;
-  return map;
+  return {};
 }
 
 function buildDefaultMainAdminCredentials(): MainAdminCredentialConfig {
@@ -1005,20 +865,51 @@ function buildDefaultMainAdminCredentials(): MainAdminCredentialConfig {
   };
 }
 
+function purgeLegacyBotRecords(state: LocalStoreState): boolean {
+  let mutated = false;
+  for (const [id, u] of Object.entries(state.users || {})) {
+    const emailLower = (u.email || '').trim().toLowerCase();
+    if (LEGACY_BOT_USER_IDS.has(id) || LEGACY_BOT_EMAILS.has(emailLower)) {
+      delete state.users[id];
+      mutated = true;
+    }
+  }
+  for (const [id, loc] of Object.entries(state.mapLocations || {})) {
+    if (LEGACY_BOT_USER_IDS.has(id) || LEGACY_BOT_ADMIN_IDS.has(id)) {
+      delete state.mapLocations[id];
+      mutated = true;
+    } else if (loc.creatorUid && LEGACY_BOT_USER_IDS.has(loc.creatorId)) {
+      delete state.mapLocations[id];
+      mutated = true;
+    }
+  }
+  for (const [id, sa] of Object.entries(state.secondAdmins || {})) {
+    const emailLower = (sa.email || '').trim().toLowerCase();
+    if (LEGACY_BOT_ADMIN_IDS.has(id) || LEGACY_BOT_EMAILS.has(emailLower)) {
+      delete state.secondAdmins[id];
+      mutated = true;
+    }
+  }
+  for (const b of Object.values(state.booths || {})) {
+    if (b.agentAccountId && LEGACY_BOT_USER_IDS.has(b.agentAccountId)) {
+      delete b.agentAccountId;
+      mutated = true;
+    }
+  }
+  return mutated;
+}
+
 function readLocalStore(): LocalStoreState {
   const defaultCreds = buildDefaultMainAdminCredentials();
   try {
     const raw = localStorage.getItem(LOCAL_DB_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as LocalStoreState;
-      const seedUsers = buildSeedUsers();
       const seedBooths = buildSeedBooths();
-      const seedMapLocations = buildSeedMapLocations();
-      const seedSecondAdmins = buildSeedSecondAdmins();
-      const mergedUsers = { ...seedUsers, ...(parsed.users || {}) };
+      const mergedUsers = { ...(parsed.users || {}) };
       const mergedBooths = { ...seedBooths, ...(parsed.booths || {}) };
-      const mergedMapLocations = { ...seedMapLocations, ...(parsed.mapLocations || {}) };
-      const mergedSecondAdmins = { ...seedSecondAdmins, ...(parsed.secondAdmins || {}) };
+      const mergedMapLocations = { ...(parsed.mapLocations || {}) };
+      const mergedSecondAdmins = { ...(parsed.secondAdmins || {}) };
       const storedCreds =
         parsed.mainAdminCredentials &&
         parsed.mainAdminCredentials.email?.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase() &&
@@ -1029,7 +920,7 @@ function readLocalStore(): LocalStoreState {
         parsed.adminAlertEmail && parsed.adminAlertEmail !== 'aiub58muhib@gmail.com'
           ? parsed.adminAlertEmail
           : DEFAULT_ADMIN_ALERT_EMAIL;
-      return {
+      const hydrated: LocalStoreState = {
         users: mergedUsers,
         transactions: parsed.transactions || {},
         booths: mergedBooths,
@@ -1042,16 +933,20 @@ function readLocalStore(): LocalStoreState {
         mainAdminCredentials: storedCreds,
         treasuryVault: normalizeTreasuryVault(parsed.treasuryVault),
       };
+      if (purgeLegacyBotRecords(hydrated)) {
+        writeLocalStore(hydrated, false);
+      }
+      return hydrated;
     }
   } catch {
     // ignore parse failure
   }
   const initial: LocalStoreState = {
-    users: buildSeedUsers(),
+    users: {},
     transactions: {},
     booths: buildSeedBooths(),
-    mapLocations: buildSeedMapLocations(),
-    secondAdmins: buildSeedSecondAdmins(),
+    mapLocations: {},
+    secondAdmins: {},
     notifications: buildDefaultNotifications(),
     activityLogs: buildDefaultActivityLogs(),
     feeConfig: normalizeFeeConfig(DEFAULT_FEE_CONFIG),
@@ -1502,21 +1397,6 @@ export async function ensureDefaultPlatformData(): Promise<void> {
         await setDoc(vaultRef, store.treasuryVault);
       }
 
-      const seedUsers = Object.values(buildSeedUsers());
-      for (const u of seedUsers) {
-        const ref = doc(db, USERS_COL, u.accountId);
-        const snap = await getDoc(ref);
-        if (!snap.exists()) {
-          await setDoc(ref, u);
-        }
-        const dirRef = doc(db, DIRECTORY_COL, u.accountId);
-        const dirSnap = await getDoc(dirRef);
-        if (!dirSnap.exists()) {
-          await setDoc(dirRef, toDirectoryEntry(u));
-        }
-        void backfillUserIdentityLocks(u);
-      }
-
       const seedBooths = Object.values(buildSeedBooths());
       for (const b of seedBooths) {
         const bRef = doc(db, BOOTHS_COL, b.boothId);
@@ -1526,21 +1406,36 @@ export async function ensureDefaultPlatformData(): Promise<void> {
         }
       }
 
-      const seedSecondAdmins = Object.values(buildSeedSecondAdmins());
-      for (const sa of seedSecondAdmins) {
-        const saRef = doc(db, SECOND_ADMINS_COL, sa.adminId);
-        const saSnap = await getDoc(saRef);
-        if (!saSnap.exists()) {
-          await setDoc(saRef, sa);
-        }
+      // One-time cleanup: purge any legacy bot/sandbox accounts from Firestore so zero bot accounts exist
+      let alreadyPurged = false;
+      try {
+        alreadyPurged = localStorage.getItem(BOTS_PURGED_FLAG_KEY) === '1';
+      } catch {
+        // ignore
       }
-
-      const seedMapLocs = Object.values(buildSeedMapLocations());
-      for (const loc of seedMapLocs) {
-        const lRef = doc(db, MAP_LOCATIONS_COL, loc.creatorId);
-        const lSnap = await getDoc(lRef);
-        if (!lSnap.exists()) {
-          await setDoc(lRef, loc);
+      if (!alreadyPurged) {
+        await Promise.all([
+          ...Array.from(LEGACY_BOT_USER_IDS).map((botId) =>
+            Promise.all([
+              deleteDoc(doc(db, USERS_COL, botId)).catch(() => {}),
+              deleteDoc(doc(db, DIRECTORY_COL, botId)).catch(() => {}),
+              deleteDoc(doc(db, MAP_LOCATIONS_COL, botId)).catch(() => {}),
+              deleteDoc(doc(db, KYC_SUBMISSIONS_COL, botId)).catch(() => {}),
+            ])
+          ),
+          ...Array.from(LEGACY_BOT_ADMIN_IDS).map((botAdminId) =>
+            Promise.all([
+              deleteDoc(doc(db, SECOND_ADMINS_COL, botAdminId)).catch(() => {}),
+              deleteDoc(doc(db, MAP_LOCATIONS_COL, botAdminId)).catch(() => {}),
+            ])
+          ),
+          ...Array.from(LEGACY_BOT_EMAILS).map((e) => releaseIdentityLock('email', e)),
+          ...Array.from(LEGACY_BOT_PHONES).map((p) => releaseIdentityLock('phone', p)),
+        ]);
+        try {
+          localStorage.setItem(BOTS_PURGED_FLAG_KEY, '1');
+        } catch {
+          // ignore
         }
       }
     }
@@ -1873,6 +1768,10 @@ export async function registerAcashUser(params: {
   const phone = normalizeBdPhone(params.phone);
   const email = params.email.trim().toLowerCase();
 
+  const cleanName = params.name.trim();
+  if (cleanName.length < 2 || /^\d+$/.test(cleanName)) {
+    throw new Error('Enter your genuine full name (minimum 2 characters, not numeric only).');
+  }
   if (!/^[a-zA-Z0-9._%+-]+@(gmail|googlemail)\.com$/i.test(email)) {
     throw new Error('Only a valid Gmail address (@gmail.com) can be used to create an Acash ID.');
   }
@@ -1881,6 +1780,22 @@ export async function registerAcashUser(params: {
   }
   if (params.gender !== 'male' && params.gender !== 'female') {
     throw new Error('Gender selection is required.');
+  }
+
+  // Anti-spam per-device registration cooldown (45s)
+  try {
+    const lastRegRaw = localStorage.getItem(LAST_REG_TS_KEY);
+    const lastRegTs = lastRegRaw ? Number(lastRegRaw) : 0;
+    const elapsedSec = Math.floor((Date.now() - lastRegTs) / 1000);
+    if (lastRegTs && elapsedSec >= 0 && elapsedSec < 45) {
+      throw new Error(
+        `Anti-Spam Protection: Please wait ${45 - elapsedSec} seconds before creating another account from this device.`
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Anti-Spam')) {
+      throw err;
+    }
   }
 
   if (params.verificationMethod === 'google_auth') {
@@ -1918,7 +1833,7 @@ export async function registerAcashUser(params: {
   if (referredByType === 'agent') {
     const rawRef = (params.referredByAgentIdentifier || '').trim();
     if (!rawRef) {
-      throw new Error('Please enter the referring Agent ID (e.g. A-200001) or Agent mobile number.');
+      throw new Error('Please enter the referring Agent ID (e.g. A-234567) or Agent mobile number.');
     }
 
     const matchedAgent = await findUserByIdentifier(rawRef);
@@ -1934,11 +1849,11 @@ export async function registerAcashUser(params: {
       const normalizedRefPhone = normalizeBdPhone(rawRef);
       if (/^A-\d{6}$/.test(normalizedRefId)) {
         referredByAgentId = normalizedRefId;
-      } else if (/^01\d{9}$/.test(normalizedRefPhone)) {
+      } else if (/^01[3-9]\d{8}$/.test(normalizedRefPhone)) {
         referredByAgentPhone = normalizedRefPhone;
       } else {
         throw new Error(
-          'Enter a valid Agent ID (e.g. A-200001) or 11-digit Agent mobile number (e.g. 01811000002).'
+          'Enter a valid Agent ID (e.g. A-234567) or 11-digit Agent mobile number (e.g. 017XXXXXXXX).'
         );
       }
     }
@@ -2076,6 +1991,12 @@ export async function registerAcashUser(params: {
     openedAt: new Date(now).toLocaleString(),
   });
 
+  try {
+    localStorage.setItem(LAST_REG_TS_KEY, String(now));
+  } catch {
+    // ignore storage errors
+  }
+
   return newUser;
 }
 
@@ -2086,7 +2007,7 @@ export async function authenticateAcashUser(params: {
 }): Promise<AcashUser> {
   const user = await findUserByIdentifier(params.identifier);
   if (!user) {
-    throw new Error('Account not found. Check your Acash ID (e.g. U-100001), phone, or Gmail.');
+    throw new Error('Account not found. Check your Acash ID (e.g. U-123456), phone, or Gmail.');
   }
   if (!user.pinHash) {
     throw new Error(
@@ -2171,7 +2092,14 @@ export function subscribeToUser(
           callback(u);
           syncDirIfOwner(u);
         } else if (!snap.metadata.fromCache) {
-          // Only emit null if neither Firestore server nor local store has this user
+          const store = readLocalStore();
+          const localUser = store.users[accountId];
+          if (localUser && Date.now() - localUser.createdAt > 10000) {
+            delete store.users[accountId];
+            writeLocalStore(store, false);
+            callback(null);
+            return;
+          }
           emitLocalIfFound();
         }
       },
@@ -2367,20 +2295,135 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
+  let unsubKycFs: Unsubscribe = () => {};
   let unsubDirFs: Unsubscribe = () => {};
-  try {
-    const q = query(collection(db, USERS_COL), orderBy('createdAt', 'desc'));
-    unsubFs = onSnapshot(
-      q,
-      (snap) => {
-        const fsUsers = snap.docs.map((d) => d.data() as AcashUser);
-        if (fsUsers.length > 0) {
+  const kycSubmissionCache: Record<string, KycSubmissionRecord> = {};
+
+  const applyKycSubmissionToUser = (u: AcashUser, sub?: KycSubmissionRecord): AcashUser => {
+    if (!sub) return u;
+    const existingKycTs = u.kyc?.updatedAt || 0;
+    if (u.kyc && sub.updatedAt <= existingKycTs) return u;
+    return {
+      ...u,
+      ...(sub.name ? { name: sub.name } : {}),
+      ...(sub.businessName ? { businessName: sub.businessName } : {}),
+      kyc: sub.kyc,
+      verified: true,
+      lastActiveAt: Math.max(u.lastActiveAt || 0, sub.updatedAt),
+    };
+  };
+
+  const attachDirectoryListener = () => {
+    unsubDirFs();
+    try {
+      const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'), limit(500));
+      unsubDirFs = onSnapshot(
+        qDir,
+        (snap) => {
+          const entries = snap.docs.map((d) => d.data() as AcashDirectoryEntry);
           const store = readLocalStore();
-          for (const u of fsUsers) {
-            store.users[u.accountId] = u;
+          let changed = false;
+
+          for (const change of snap.docChanges()) {
+            if (change.type === 'removed' && store.users[change.doc.id]) {
+              delete store.users[change.doc.id];
+              changed = true;
+            }
           }
-          writeLocalStore(store, false);
-          // Backfill directory entries and identity locks for existing accounts when signed in as Admin
+
+          for (const entry of entries) {
+            if (LEGACY_BOT_USER_IDS.has(entry.accountId)) continue;
+            const existing = store.users[entry.accountId];
+            if (!existing) {
+              store.users[entry.accountId] = applyKycSubmissionToUser(
+                directoryEntryToStubUser(entry),
+                kycSubmissionCache[entry.accountId]
+              );
+              changed = true;
+            } else {
+              const merged = applyKycSubmissionToUser(
+                {
+                  ...existing,
+                  name: entry.name || existing.name,
+                  ...(entry.businessName ? { businessName: entry.businessName } : {}),
+                  phone: entry.phone || existing.phone,
+                  status: entry.status,
+                  verified: entry.verified,
+                  ...(entry.firebaseUid ? { firebaseUid: entry.firebaseUid } : {}),
+                },
+                kycSubmissionCache[entry.accountId]
+              );
+              store.users[entry.accountId] = merged;
+              changed = true;
+            }
+          }
+          if (changed) {
+            writeLocalStore(store, false);
+          }
+          emitLocal();
+        },
+        () => {
+          emitLocal();
+        }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const attachProtectedListeners = () => {
+    unsubFs();
+    unsubKycFs();
+    try {
+      const q = query(collection(db, USERS_COL), orderBy('createdAt', 'desc'));
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const fsUsers = snap.docs
+            .map((d) => d.data() as AcashUser)
+            .filter((u) => !LEGACY_BOT_USER_IDS.has(u.accountId));
+          const store = readLocalStore();
+          let mutated = false;
+
+          for (const change of snap.docChanges()) {
+            if (change.type === 'removed' && store.users[change.doc.id]) {
+              delete store.users[change.doc.id];
+              mutated = true;
+            }
+          }
+
+          if (!snap.metadata.fromCache) {
+            const serverIds = new Set(fsUsers.map((u) => u.accountId));
+            for (const id of Object.keys(store.users)) {
+              if (!serverIds.has(id)) {
+                delete store.users[id];
+                mutated = true;
+              }
+            }
+          }
+
+          for (const u of fsUsers) {
+            const existing = store.users[u.accountId];
+            const cachedSub = kycSubmissionCache[u.accountId];
+            const mergedKyc =
+              existing?.kyc && (!u.kyc || existing.kyc.updatedAt > u.kyc.updatedAt)
+                ? existing.kyc
+                : u.kyc;
+            const candidate = applyKycSubmissionToUser(
+              {
+                ...u,
+                ...(mergedKyc ? { kyc: mergedKyc } : {}),
+              },
+              cachedSub
+            );
+            store.users[u.accountId] = candidate;
+            mutated = true;
+          }
+
+          if (mutated) {
+            writeLocalStore(store, false);
+          }
+
           if (auth.currentUser?.emailVerified && isMainAdminEmail(auth.currentUser.email)) {
             for (const u of fsUsers) {
               void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), {
@@ -2389,62 +2432,95 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
               void backfillUserIdentityLocks(u);
             }
           }
+          emitLocal();
+        },
+        () => {
+          emitLocal();
         }
-        emitLocal();
-      },
-      () => {
-        emitLocal();
-      }
-    );
-  } catch {
-    // ignore
-  }
+      );
+    } catch {
+      // ignore
+    }
 
-  try {
-    const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'), limit(500));
-    unsubDirFs = onSnapshot(
-      qDir,
-      (snap) => {
-        const entries = snap.docs.map((d) => d.data() as AcashDirectoryEntry);
-        if (entries.length > 0) {
+    try {
+      const qKyc = query(collection(db, KYC_SUBMISSIONS_COL), limit(300));
+      unsubKycFs = onSnapshot(
+        qKyc,
+        (snap) => {
+          const subs = snap.docs
+            .map((d) => d.data() as KycSubmissionRecord)
+            .filter((s) => !LEGACY_BOT_USER_IDS.has(s.accountId));
+          if (subs.length === 0) return;
+
           const store = readLocalStore();
           let changed = false;
-          for (const entry of entries) {
-            const existing = store.users[entry.accountId];
-            if (!existing) {
-              store.users[entry.accountId] = directoryEntryToStubUser(entry);
+
+          for (const sub of subs) {
+            kycSubmissionCache[sub.accountId] = sub;
+            const existing = store.users[sub.accountId];
+            if (!existing) continue;
+            const existingKycTs = existing.kyc?.updatedAt || 0;
+            if (!existing.kyc || sub.updatedAt > existingKycTs) {
+              const updatedUser = applyKycSubmissionToUser(existing, sub);
+              store.users[sub.accountId] = updatedUser;
               changed = true;
-            } else {
-              const updated: AcashUser = {
-                ...existing,
-                name: entry.name || existing.name,
-                ...(entry.businessName ? { businessName: entry.businessName } : {}),
-                phone: entry.phone || existing.phone,
-                status: entry.status,
-                verified: entry.verified,
-                ...(entry.firebaseUid ? { firebaseUid: entry.firebaseUid } : {}),
-              };
-              store.users[entry.accountId] = updated;
-              changed = true;
+
+              if (auth.currentUser?.emailVerified) {
+                void setDoc(
+                  doc(db, USERS_COL, sub.accountId),
+                  {
+                    name: updatedUser.name,
+                    ...(updatedUser.businessName ? { businessName: updatedUser.businessName } : {}),
+                    kyc: updatedUser.kyc,
+                    verified: true,
+                    lastActiveAt: updatedUser.lastActiveAt,
+                  },
+                  { merge: true }
+                ).catch(() => {});
+                if (sub.kyc?.nidNumber) {
+                  void claimIdentityLock('nid', sub.kyc.nidNumber, sub.accountId, sub.updatedAt).catch(() => {});
+                }
+                if (sub.kyc?.taxCertificateNumber) {
+                  void claimIdentityLock('tax', sub.kyc.taxCertificateNumber, sub.accountId, sub.updatedAt).catch(() => {});
+                }
+              }
             }
           }
+
           if (changed) {
             writeLocalStore(store, false);
+            emitLocal();
           }
+        },
+        () => {
+          // Non-admin viewers cannot read KYC submissions
         }
-        emitLocal();
-      },
-      () => {
-        emitLocal();
-      }
-    );
-  } catch {
-    // ignore
-  }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachDirectoryListener();
+  attachProtectedListeners();
+
+  let lastAuthUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastAuthUid) {
+      lastAuthUid = nextUid;
+      attachProtectedListeners();
+      attachDirectoryListener();
+    } else if (!nextUid) {
+      lastAuthUid = '';
+    }
+  });
 
   return () => {
     unsubLocal();
+    unsubAuth();
     unsubFs();
+    unsubKycFs();
     unsubDirFs();
   };
 }
@@ -2461,63 +2537,79 @@ export function subscribeToAllTransactions(
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
-  try {
-    const q = query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(300));
-    unsubFs = onSnapshot(
-      q,
-      (snap) => {
-        const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
-        const store = readLocalStore();
-        let mutated = false;
+  const attachFs = () => {
+    unsubFs();
+    try {
+      const q = query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(300));
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
+          const store = readLocalStore();
+          let mutated = false;
 
-        for (const change of snap.docChanges()) {
-          if (change.type === 'removed' && store.transactions[change.doc.id]) {
-            delete store.transactions[change.doc.id];
-            mutated = true;
-          }
-        }
-
-        if (!snap.metadata.fromCache) {
-          const serverIds = new Set(fsTxs.map((t) => t.txId));
-          const oldestServerTs =
-            fsTxs.length >= 300 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
-          for (const [id, existingTx] of Object.entries(store.transactions)) {
-            const isCloudTx = Boolean(
-              existingTx.senderUid ||
-                existingTx.receiverUid ||
-                existingTx.type === 'admin_credit' ||
-                existingTx.type === 'admin_transfer' ||
-                existingTx.approvedBy
-            );
-            if (isCloudTx && existingTx.createdAt >= oldestServerTs && !serverIds.has(id)) {
-              delete store.transactions[id];
+          for (const change of snap.docChanges()) {
+            if (change.type === 'removed' && store.transactions[change.doc.id]) {
+              delete store.transactions[change.doc.id];
               mutated = true;
             }
           }
-        }
 
-        if (fsTxs.length > 0) {
-          for (const tx of fsTxs) {
-            store.transactions[tx.txId] = tx;
-            mutated = true;
+          if (!snap.metadata.fromCache) {
+            const serverIds = new Set(fsTxs.map((t) => t.txId));
+            const oldestServerTs =
+              fsTxs.length >= 300 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
+            for (const [id, existingTx] of Object.entries(store.transactions)) {
+              const isCloudTx = Boolean(
+                existingTx.senderUid ||
+                  existingTx.receiverUid ||
+                  existingTx.type === 'admin_credit' ||
+                  existingTx.type === 'admin_transfer' ||
+                  existingTx.approvedBy
+              );
+              if (isCloudTx && existingTx.createdAt >= oldestServerTs && !serverIds.has(id)) {
+                delete store.transactions[id];
+                mutated = true;
+              }
+            }
           }
-        }
 
-        if (mutated) {
-          writeLocalStore(store, false);
+          if (fsTxs.length > 0) {
+            for (const tx of fsTxs) {
+              store.transactions[tx.txId] = tx;
+              mutated = true;
+            }
+          }
+
+          if (mutated) {
+            writeLocalStore(store, false);
+          }
+          emitLocal();
+        },
+        () => {
+          emitLocal();
         }
-        emitLocal();
-      },
-      () => {
-        emitLocal();
-      }
-    );
-  } catch {
-    // ignore
-  }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachFs();
+  let lastUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastUid) {
+      lastUid = nextUid;
+      attachFs();
+    } else if (!nextUid) {
+      lastUid = '';
+    }
+  });
 
   return () => {
     unsubLocal();
+    unsubAuth();
     unsubFs();
   };
 }
@@ -2534,31 +2626,47 @@ export function subscribeToAdminNotifications(
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
-  try {
-    const q = query(collection(db, ADMIN_NOTIF_COL), orderBy('createdAt', 'desc'), limit(100));
-    unsubFs = onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as AdminNotification);
-        if (list.length > 0) {
-          const store = readLocalStore();
-          for (const n of list) {
-            store.notifications[n.id] = n;
+  const attachFs = () => {
+    unsubFs();
+    try {
+      const q = query(collection(db, ADMIN_NOTIF_COL), orderBy('createdAt', 'desc'), limit(100));
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as AdminNotification);
+          if (list.length > 0) {
+            const store = readLocalStore();
+            for (const n of list) {
+              store.notifications[n.id] = n;
+            }
+            writeLocalStore(store, false);
           }
-          writeLocalStore(store, false);
+          emitLocal();
+        },
+        () => {
+          emitLocal();
         }
-        emitLocal();
-      },
-      () => {
-        emitLocal();
-      }
-    );
-  } catch {
-    // ignore
-  }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachFs();
+  let lastUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastUid) {
+      lastUid = nextUid;
+      attachFs();
+    } else if (!nextUid) {
+      lastUid = '';
+    }
+  });
 
   return () => {
     unsubLocal();
+    unsubAuth();
     unsubFs();
   };
 }
@@ -2604,31 +2712,47 @@ export function subscribeToAdminActivityLogs(
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
-  try {
-    const q = query(collection(db, ADMIN_ACTIVITY_COL), orderBy('timestamp', 'desc'), limit(200));
-    unsubFs = onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => d.data() as AdminActivityLog);
-        if (list.length > 0) {
-          const store = readLocalStore();
-          for (const item of list) {
-            store.activityLogs[item.id] = item;
+  const attachFs = () => {
+    unsubFs();
+    try {
+      const q = query(collection(db, ADMIN_ACTIVITY_COL), orderBy('timestamp', 'desc'), limit(200));
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as AdminActivityLog);
+          if (list.length > 0) {
+            const store = readLocalStore();
+            for (const item of list) {
+              store.activityLogs[item.id] = item;
+            }
+            writeLocalStore(store, false);
           }
-          writeLocalStore(store, false);
+          emitLocal();
+        },
+        () => {
+          emitLocal();
         }
-        emitLocal();
-      },
-      () => {
-        emitLocal();
-      }
-    );
-  } catch {
-    // ignore
-  }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachFs();
+  let lastUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastUid) {
+      lastUid = nextUid;
+      attachFs();
+    } else if (!nextUid) {
+      lastUid = '';
+    }
+  });
 
   return () => {
     unsubLocal();
+    unsubAuth();
     unsubFs();
   };
 }
@@ -3086,12 +3210,25 @@ export async function mainAdminMintTreasuryCredit(params: {
 
   const store = readLocalStore();
   const currentVault = normalizeTreasuryVault(store.treasuryVault);
+  const previousBalance = currentVault.balance;
+  const newBalance = Number((previousBalance + amt).toFixed(2));
+  const mintEntry: TreasuryMintHistoryEntry = {
+    id: `MINT-${txId}`,
+    action: 'mint',
+    amount: amt,
+    previousBalance,
+    newBalance,
+    note: noteText.slice(0, 200),
+    actorEmail: params.actorEmail,
+    timestamp: now,
+  };
   const updatedVault: MainTreasuryVault = {
     ...currentVault,
-    balance: Number((currentVault.balance + amt).toFixed(2)),
+    balance: newBalance,
     totalMinted: Number((currentVault.totalMinted + amt).toFixed(2)),
     lastMintAmount: amt,
     lastMintNote: noteText.slice(0, 200),
+    mintHistory: [mintEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
     updatedAt: now,
     updatedBy: params.actorEmail,
   };
@@ -3171,6 +3308,93 @@ export async function mainAdminMintTreasuryCredit(params: {
   }
 
   return { vault: updatedVault, tx: txRecord };
+}
+
+export async function mainAdminRefreshTreasuryBalance(params: {
+  newBalance: number;
+  reason?: string;
+  actorEmail: string;
+}): Promise<MainTreasuryVault> {
+  if (!isMainAdminEmail(params.actorEmail)) {
+    throw new Error(`Only Main Admin (${MAIN_ADMIN_EMAIL}) can refresh the Treasury Mint Balance.`);
+  }
+  const nextBal = Number(params.newBalance);
+  if (!Number.isFinite(nextBal) || nextBal < 0) {
+    throw new Error('Refreshed Mint Balance must be 0 or greater.');
+  }
+
+  const now = Date.now();
+  const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const entryId = `REF-${now.toString(36).toUpperCase()}-${rand}`;
+  const cleanReason =
+    params.reason?.trim() ||
+    (nextBal === 0 ? 'Main Admin Treasury Mint Balance Reset to ৳0.00' : 'Main Admin Treasury Mint Balance Refresh');
+
+  const store = readLocalStore();
+  const currentVault = normalizeTreasuryVault(store.treasuryVault);
+  const previousBalance = currentVault.balance;
+  const newBalance = Number(nextBal.toFixed(2));
+  const diff = Number(Math.abs(newBalance - previousBalance).toFixed(2));
+
+  const refreshEntry: TreasuryMintHistoryEntry = {
+    id: entryId,
+    action: 'refresh',
+    amount: diff,
+    previousBalance,
+    newBalance,
+    note: cleanReason.slice(0, 200),
+    actorEmail: params.actorEmail,
+    timestamp: now,
+  };
+
+  const updatedVault: MainTreasuryVault = {
+    ...currentVault,
+    balance: newBalance,
+    lastMintNote: cleanReason.slice(0, 200),
+    mintHistory: [refreshEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
+    updatedAt: now,
+    updatedBy: params.actorEmail,
+  };
+  store.treasuryVault = updatedVault;
+
+  const refreshNotif: AdminNotification = {
+    id: `NTF-${entryId}`,
+    title: `Treasury Mint Balance Refreshed (৳${newBalance.toLocaleString()})`,
+    message: `Main Admin refreshed ADMIN-TREASURY balance from ৳${previousBalance.toLocaleString()} to ৳${newBalance.toLocaleString()}. Note: ${cleanReason}`,
+    category: 'treasury',
+    severity: 'warning',
+    createdAt: now,
+    read: false,
+    targetSection: 'treasury',
+  };
+  store.notifications[refreshNotif.id] = refreshNotif;
+
+  const refreshActivity = makeActivityEntry({
+    idPrefix: 'ACT-REF',
+    actionType: 'credit_add',
+    title: `Mint Balance Refreshed (৳${previousBalance.toLocaleString()} → ৳${newBalance.toLocaleString()})`,
+    details: `Main Admin (${params.actorEmail}) refreshed ADMIN-TREASURY mint balance from ৳${previousBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })} to ৳${newBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Reason: ${cleanReason}`,
+    actorEmail: params.actorEmail,
+    targetIds: ['ADMIN-TREASURY'],
+    amount: newBalance,
+    timestamp: now,
+  });
+  store.activityLogs[refreshActivity.id] = refreshActivity;
+
+  writeLocalStore(store, true);
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), updatedVault);
+      transaction.set(doc(db, ADMIN_NOTIF_COL, refreshNotif.id), refreshNotif);
+      transaction.set(doc(db, ADMIN_ACTIVITY_COL, refreshActivity.id), refreshActivity);
+    });
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return updatedVault;
 }
 
 export async function adminCreditAccount(params: {
@@ -3972,11 +4196,11 @@ export async function adminBulkUpdateUserStatus(params: {
     actionType: 'bulk_status_change',
     title:
       params.newStatus === 'disabled'
-        ? `Bulk Disabled ${updatedUsers.length} Account(s)`
+        ? `Bulk Froze / Disabled ${updatedUsers.length} Account(s)`
         : `Bulk Enabled ${updatedUsers.length} Account(s)`,
-    details: `Changed status to ${params.newStatus.toUpperCase()} for ${updatedUsers.length} accounts (${affectedIds.join(', ')}). ${params.newStatus === 'disabled' ? `Cause: ${cleanReason}` : `Note: ${cleanReason}`}`,
+    details: `Changed status to ${params.newStatus.toUpperCase()} for ${updatedUsers.length} accounts (${affectedIds.slice(0, 25).join(', ')}${affectedIds.length > 25 ? '...' : ''}). ${params.newStatus === 'disabled' ? `Cause: ${cleanReason}` : `Note: ${cleanReason}`}`,
     actorEmail: params.adminEmail,
-    targetIds: affectedIds,
+    targetIds: affectedIds.slice(0, 100),
     timestamp: now,
   });
   store.activityLogs[bulkActivity.id] = bulkActivity;
@@ -4005,6 +4229,117 @@ export async function adminBulkUpdateUserStatus(params: {
   }
 
   return updatedUsers;
+}
+
+export async function adminFreezeAllUsers(params: {
+  adminEmail: string;
+  reason?: string;
+}): Promise<AcashUser[]> {
+  const store = readLocalStore();
+  const activeIds = Object.values(store.users)
+    .filter((u) => u.status === 'active')
+    .map((u) => u.accountId);
+  if (activeIds.length === 0) return [];
+  return adminBulkUpdateUserStatus({
+    accountIds: activeIds,
+    newStatus: 'disabled',
+    reason: params.reason?.trim() || 'Emergency System-Wide Freeze by Platform Admin',
+    adminEmail: params.adminEmail,
+  });
+}
+
+export async function adminBulkDeleteUsers(params: {
+  accountIds: string[];
+  adminEmail: string;
+  reason?: string;
+}): Promise<string[]> {
+  const uniqueIds = Array.from(new Set(params.accountIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return [];
+
+  const now = Date.now();
+  const store = readLocalStore();
+  const deletedUsers: AcashUser[] = [];
+
+  for (const id of uniqueIds) {
+    const existing = store.users[id];
+    if (existing) {
+      deletedUsers.push(existing);
+      delete store.users[id];
+    }
+    if (store.mapLocations[id]) {
+      delete store.mapLocations[id];
+    }
+  }
+
+  const deletedIds = deletedUsers.length > 0 ? deletedUsers.map((u) => u.accountId) : uniqueIds;
+  const cleanReason = params.reason?.trim() || 'Permanently deleted by Platform Admin';
+
+  const delNotif: AdminNotification = {
+    id: `NTF-DEL-${now.toString(36).toUpperCase()}`,
+    title: `Deleted ${deletedIds.length} Account(s) Permanently`,
+    message: `${deletedIds.slice(0, 12).join(', ')}${deletedIds.length > 12 ? ` (+${deletedIds.length - 12} more)` : ''} · Reason: ${cleanReason}`,
+    category: 'account_status',
+    severity: 'warning',
+    createdAt: now,
+    read: false,
+    targetSection: 'activity',
+  };
+  store.notifications[delNotif.id] = delNotif;
+
+  const delActivity = makeActivityEntry({
+    idPrefix: 'ACT-DEL',
+    actionType: 'account_delete',
+    title: `Deleted ${deletedIds.length} Account(s) Permanently`,
+    details: `Removed ${deletedIds.length} account(s) from users, directory, map pins, KYC submissions & released identity locks (${deletedIds.slice(0, 25).join(', ')}${deletedIds.length > 25 ? '...' : ''}). Reason: ${cleanReason}`,
+    actorEmail: params.adminEmail || 'Admin',
+    targetIds: deletedIds.slice(0, 100),
+    timestamp: now,
+  });
+  store.activityLogs[delActivity.id] = delActivity;
+
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      ...deletedIds.map((id) =>
+        Promise.all([
+          deleteDoc(doc(db, USERS_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, DIRECTORY_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, MAP_LOCATIONS_COL, id)).catch(() => {}),
+          deleteDoc(doc(db, KYC_SUBMISSIONS_COL, id)).catch(() => {}),
+        ])
+      ),
+      ...deletedUsers.map((u) =>
+        Promise.all([
+          u.email ? releaseIdentityLock('email', u.email) : Promise.resolve(),
+          u.phone ? releaseIdentityLock('phone', u.phone) : Promise.resolve(),
+          u.kyc?.nidNumber ? releaseIdentityLock('nid', u.kyc.nidNumber) : Promise.resolve(),
+          u.kyc?.taxCertificateNumber
+            ? releaseIdentityLock('tax', u.kyc.taxCertificateNumber)
+            : Promise.resolve(),
+        ])
+      ),
+      setDoc(doc(db, ADMIN_NOTIF_COL, delNotif.id), delNotif).catch(() => {}),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, delActivity.id), delActivity).catch(() => {}),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return deletedIds;
+}
+
+export async function adminDeleteUser(
+  accountId: string,
+  adminEmail: string,
+  reason?: string
+): Promise<void> {
+  await adminBulkDeleteUsers({
+    accountIds: [accountId],
+    adminEmail,
+    reason,
+  });
 }
 
 export async function adminUpdateFeeConfig(config: Omit<FeeConfig, 'updatedAt'>): Promise<void> {
@@ -4170,7 +4505,11 @@ export async function updateUserKyc(params: {
 }): Promise<AcashUser> {
   const now = Date.now();
   const store = readLocalStore();
-  const user = store.users[params.accountId];
+  let user = store.users[params.accountId];
+  if (!user) {
+    const found = await findUserByIdentifier(params.accountId);
+    if (found) user = found;
+  }
   if (!user) throw new Error('Account not found.');
 
   const cleanNid = params.kyc.nidNumber.trim();
@@ -4266,6 +4605,22 @@ export async function updateUserKyc(params: {
   store.notifications[kycNotif.id] = kycNotif;
   writeLocalStore(store, true);
 
+  const kycBridgePayload: KycSubmissionRecord = {
+    accountId: updated.accountId,
+    name: updated.name,
+    ...(updated.businessName ? { businessName: updated.businessName } : {}),
+    kyc: nextKyc,
+    updatedAt: now,
+  };
+
+  let syncedViaBridge = false;
+  try {
+    await setDoc(doc(db, KYC_SUBMISSIONS_COL, params.accountId), kycBridgePayload);
+    syncedViaBridge = true;
+  } catch {
+    // fallback handled below
+  }
+
   try {
     await setDoc(doc(db, USERS_COL, params.accountId), updated, { merge: true });
     await setDoc(doc(db, DIRECTORY_COL, params.accountId), toDirectoryEntry(updated), {
@@ -4275,8 +4630,9 @@ export async function updateUserKyc(params: {
       await setDoc(doc(db, MAP_LOCATIONS_COL, params.accountId), updatedPin, { merge: true });
     }
     await setDoc(doc(db, ADMIN_NOTIF_COL, kycNotif.id), kycNotif);
+    firestoreBackendMode = 'firestore';
   } catch (err) {
-    firestoreBackendMode = 'local_sync';
+    firestoreBackendMode = syncedViaBridge ? 'firestore' : 'local_sync';
     if (auth.currentUser && isPermissionError(err)) {
       console.warn('Firestore KYC sync error:', err);
     }

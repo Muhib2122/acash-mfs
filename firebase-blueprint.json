@@ -334,7 +334,7 @@
         },
         "actionType": {
           "type": "string",
-          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "aml_decision", "alert_settings", "security_update"]
+          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "account_delete", "aml_decision", "alert_settings", "security_update"]
         },
         "title": {
           "type": "string",
@@ -564,12 +564,43 @@
         }
       },
       "required": ["lockId", "lockType", "accountId", "createdAt"]
+    },
+    "KycSubmissionRecord": {
+      "title": "KycSubmissionRecord",
+      "description": "Admin-readable KYC submission record enabling real-time auto-sync from both Google Auth and EmailJS OTP accounts.",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "pattern": "^[UAM]-\\d{6}$",
+          "maxLength": 12
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "businessName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "kyc": {
+          "type": "object"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["accountId", "name", "kyc", "updatedAt"]
     }
   },
   "firestore": {
     "/acash_users/{accountId}": {
       "schema": { "$ref": "#/entities/AcashUser" },
       "description": "Registered Acash Customer, Agent, and Merchant accounts."
+    },
+    "/acash_kyc_submissions/{accountId}": {
+      "schema": { "$ref": "#/entities/KycSubmissionRecord" },
+      "description": "KYC submission bridge syncing customer, agent, and merchant KYC updates directly to Admin."
     },
     "/acash_directory/{accountId}": {
       "schema": { "$ref": "#/entities/AcashDirectoryEntry" },

@@ -175,6 +175,7 @@ export type AdminActivityType =
   | 'credit_add'
   | 'bulk_status_change'
   | 'status_change'
+  | 'account_delete'
   | 'aml_decision'
   | 'alert_settings'
   | 'security_update';
@@ -323,6 +324,17 @@ export interface AdminSession {
   loggedInAt: number;
 }
 
+export interface TreasuryMintHistoryEntry {
+  id: string;
+  action: 'mint' | 'refresh';
+  amount: number;
+  previousBalance: number;
+  newBalance: number;
+  note: string;
+  actorEmail: string;
+  timestamp: number;
+}
+
 export interface MainTreasuryVault {
   vaultId: 'ADMIN-TREASURY';
   balance: number;
@@ -330,7 +342,16 @@ export interface MainTreasuryVault {
   totalDisbursed: number;
   lastMintAmount?: number;
   lastMintNote?: string;
+  mintHistory?: TreasuryMintHistoryEntry[];
   updatedAt: number;
   updatedBy: string;
+}
+
+export interface KycSubmissionRecord {
+  accountId: string;
+  name: string;
+  businessName?: string;
+  kyc: KycInfo;
+  updatedAt: number;
 }
 
