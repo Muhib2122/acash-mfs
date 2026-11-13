@@ -26,12 +26,14 @@ import {
   isLikelyInAppBrowser,
   isRunningInIframe,
   signInWithGoogleSmart,
+  signOutFirebase,
   startGoogleRedirectSignIn,
 } from '../../lib/firebase';
 import {
   authenticateAcashUser,
   findUserByIdentifier,
   formatUserReferralSource,
+  getBackendSyncMode,
   registerAcashUser,
   resolveAcashUserForGoogleAuth,
   syncAcashUserToCloud,
@@ -436,7 +438,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           verificationMethod: 'emailjs_otp',
           emailJsOtpVerified: true,
         });
-        setCloudSynced(Boolean(created.firebaseUid && auth.currentUser?.emailVerified));
+        setCloudSynced(
+          getBackendSyncMode() === 'firestore' ||
+            Boolean(created.firebaseUid && auth.currentUser?.emailVerified)
+        );
         setNewlyCreatedUser(created);
       }
     } catch (err) {
@@ -631,6 +636,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    void signOutFirebase();
                     setGoogleIdentity(null);
                     setEmail('');
                     setError('');

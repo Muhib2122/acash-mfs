@@ -290,10 +290,16 @@ service cloud.firestore {
         resource.data.email == request.auth.token.email ||
         isRootAdminEmail()
       );
-      allow create: if isVerifiedUser() && isValidId(accountId) && isValidAcashUser(incoming()) && (
+      allow create: if isValidId(accountId) && isValidAcashUser(incoming()) && incoming().accountId == accountId && (
         isAdmin() || (
-          incoming().firebaseUid == request.auth.uid &&
-          incoming().status == 'active'
+          incoming().status == 'active' &&
+          incoming().verified == true &&
+          incoming().commissionBalance == 0 &&
+          incoming().balance == (incoming().role == 'A' ? 100000 : (incoming().role == 'M' ? 15000 : 10000)) &&
+          (
+            (isVerifiedUser() && incoming().firebaseUid == request.auth.uid) ||
+            (!isSignedIn() && !('firebaseUid' in incoming()))
+          )
         )
       );
       allow update: if isVerifiedUser() && isValidId(accountId) && isValidAcashUser(incoming()) && (
@@ -326,9 +332,16 @@ service cloud.firestore {
     // ---------- Acash Public Account Routing Directory (Non-PII Split Collection) ----------
     match /acash_directory/{accountId} {
       allow get: if isValidId(accountId);
-      allow list: if resource.data.accountId is string;
-      allow create: if isVerifiedUser() && isValidId(accountId) && isValidAcashDirectory(incoming()) && (
-        isAdmin() || incoming().firebaseUid == request.auth.uid
+      allow list: if request.query.limit != null && request.query.limit <= 500;
+      allow create: if isValidId(accountId) && isValidAcashDirectory(incoming()) && incoming().accountId == accountId && (
+        isAdmin() || (
+          incoming().status == 'active' &&
+          incoming().verified == true &&
+          (
+            (isVerifiedUser() && incoming().firebaseUid == request.auth.uid) ||
+            (!isSignedIn() && !('firebaseUid' in incoming()))
+          )
+        )
       );
       allow update: if isVerifiedUser() && isValidId(accountId) && isValidAcashDirectory(incoming())
         && incoming().accountId == existing().accountId
@@ -364,7 +377,7 @@ service cloud.firestore {
     // ---------- Acash Agent Booths & Customer Support Booths (Public Non-PII Map Directory) ----------
     match /acash_booths/{boothId} {
       allow get: if isValidId(boothId);
-      allow list: if resource.data.boothId is string;
+      allow list: if request.query.limit != null && request.query.limit <= 300;
       allow create: if isAdmin() && isValidId(boothId) && isValidAcashBooth(incoming());
       allow update: if isAdmin() && isValidId(boothId) && isValidAcashBooth(incoming())
         && incoming().boothId == existing().boothId
@@ -375,7 +388,7 @@ service cloud.firestore {
     // ---------- Creator Live Map Locations (2nd Admins, Merchants, Agents) ----------
     match /acash_map_locations/{creatorId} {
       allow get: if isValidId(creatorId);
-      allow list: if resource.data.creatorId is string;
+      allow list: if request.query.limit != null && request.query.limit <= 300;
       allow create: if isVerifiedUser() && isValidId(creatorId) && isValidAcashMapLocation(incoming()) && (
         isAdmin() || incoming().creatorUid == request.auth.uid
       );

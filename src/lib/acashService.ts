@@ -22,6 +22,7 @@ import {
   handleFirestoreError,
   isPermissionError,
   OperationType,
+  signOutFirebase,
   subscribeToFirebaseAuth,
 } from './firebase';
 import {
@@ -1778,7 +1779,17 @@ export async function registerAcashUser(params: {
 
   const initialBalance = params.role === 'A' ? 100000 : params.role === 'M' ? 15000 : 10000;
   const now = Date.now();
-  const activeUid = params.firebaseUid || auth.currentUser?.uid;
+  const fbSession = await ensureFirebaseAuthSession();
+
+  if (params.verificationMethod === 'emailjs_otp' && fbSession) {
+    // Ensure EmailJS registration runs as clean non-Google identity matching !isSignedIn() rules
+    await signOutFirebase();
+  }
+
+  const activeUid =
+    params.verificationMethod === 'google_auth'
+      ? params.firebaseUid || fbSession?.uid
+      : undefined;
 
   const newUser: AcashUser = {
     accountId,
@@ -1822,20 +1833,37 @@ export async function registerAcashUser(params: {
   store.notifications[regNotif.id] = regNotif;
   writeLocalStore(store, true);
 
+  let cloudUserWritten = false;
+  let cloudDirWritten = false;
   try {
-    const fbUser = await ensureFirebaseAuthSession();
-    if (fbUser && fbUser.emailVerified) {
-      await setDoc(doc(db, USERS_COL, accountId), newUser);
-      await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
-      await setDoc(doc(db, ADMIN_NOTIF_COL, regNotif.id), regNotif);
-      firestoreBackendMode = 'firestore';
-    } else {
-      firestoreBackendMode = 'local_sync';
-    }
+    await setDoc(doc(db, USERS_COL, accountId), newUser);
+    cloudUserWritten = true;
+    await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
+    cloudDirWritten = true;
+    firestoreBackendMode = 'firestore';
   } catch (err) {
-    firestoreBackendMode = 'local_sync';
+    if (!cloudDirWritten) {
+      try {
+        await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
+        cloudDirWritten = true;
+      } catch {
+        // handled below
+      }
+    }
+    firestoreBackendMode = cloudDirWritten ? 'firestore' : 'local_sync';
     if (auth.currentUser && isPermissionError(err)) {
       handleFirestoreError(err, OperationType.CREATE, `${USERS_COL}/${accountId}`);
+    }
+    if (!cloudUserWritten && !cloudDirWritten) {
+      console.warn('Firestore registration sync warning:', err);
+    }
+  }
+
+  if (params.verificationMethod === 'google_auth' && fbSession?.emailVerified) {
+    try {
+      await setDoc(doc(db, ADMIN_NOTIF_COL, regNotif.id), regNotif);
+    } catch {
+      // non-fatal notification write
     }
   }
 
@@ -1907,7 +1935,12 @@ export function subscribeToUser(
   });
 
   const syncDirIfOwner = (u: AcashUser) => {
-    if (auth.currentUser?.emailVerified && u.firebaseUid === auth.currentUser.uid) {
+    const fbEmail = (auth.currentUser?.email || '').trim().toLowerCase();
+    if (
+      auth.currentUser?.emailVerified &&
+      (u.firebaseUid === auth.currentUser.uid ||
+        (!u.firebaseUid && u.email && u.email.toLowerCase() === fbEmail))
+    ) {
       void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), { merge: true }).catch(
         () => {}
       );
@@ -2142,7 +2175,7 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
   }
 
   try {
-    const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'));
+    const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'), limit(500));
     unsubDirFs = onSnapshot(
       qDir,
       (snap) => {
@@ -3807,7 +3840,7 @@ export function subscribeToBooths(callback: (booths: AcashBooth[]) => void): Uns
 
   let unsubFs: Unsubscribe = () => {};
   try {
-    const q = query(collection(db, BOOTHS_COL), orderBy('updatedAt', 'desc'));
+    const q = query(collection(db, BOOTHS_COL), orderBy('updatedAt', 'desc'), limit(300));
     unsubFs = onSnapshot(
       q,
       (snap) => {
@@ -3977,7 +4010,7 @@ export function subscribeToMapLocations(callback: (locations: AcashMapLocation[]
 
   let unsubFs: Unsubscribe = () => {};
   try {
-    const q = query(collection(db, MAP_LOCATIONS_COL), orderBy('updatedAt', 'desc'));
+    const q = query(collection(db, MAP_LOCATIONS_COL), orderBy('updatedAt', 'desc'), limit(300));
     unsubFs = onSnapshot(
       q,
       (snap) => {

@@ -201,6 +201,17 @@ export async function consumeGoogleRedirectResult(
 
   try {
     const result = await getRedirectResult(auth);
+    let resolvedUser = result?.user ?? null;
+    if (!resolvedUser && storedScope) {
+      try {
+        await auth.authStateReady();
+        if (auth.currentUser?.emailVerified) {
+          resolvedUser = auth.currentUser;
+        }
+      } catch {
+        // ignore fallback hydration failure
+      }
+    }
     if (storedScope) {
       try {
         sessionStorage.removeItem(GOOGLE_REDIRECT_SCOPE_KEY);
@@ -208,7 +219,7 @@ export async function consumeGoogleRedirectResult(
         // ignore
       }
     }
-    return { user: result?.user ?? null };
+    return { user: resolvedUser };
   } catch (err) {
     try {
       sessionStorage.removeItem(GOOGLE_REDIRECT_SCOPE_KEY);
@@ -243,6 +254,11 @@ export function subscribeToFirebaseAuth(
 }
 
 export async function ensureFirebaseAuthSession(): Promise<FirebaseUser | null> {
+  try {
+    await auth.authStateReady();
+  } catch {
+    // ignore auth hydration fallback
+  }
   return auth.currentUser;
 }
 
