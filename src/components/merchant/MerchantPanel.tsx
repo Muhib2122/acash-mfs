@@ -108,7 +108,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [selectedReceipt, setSelectedReceipt] = useState<AcashTransaction | null>(null);
 
   const numericCashOutAmt = Number(cashOutAmount) || 0;
-  const { fee: cashOutFee, breakdown: cashOutBreakdown } = useMemo(
+  const { fee: cashOutFee } = useMemo(
     () =>
       calculateFeeBreakdown('merchant_cash_out', numericCashOutAmt, feeConfig, {
         targetIsAdmin: cashOutMode === 'admin',
@@ -791,9 +791,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               <span className="font-mono-tabular font-semibold text-indigo-700 dark:text-indigo-300">
                 {cashOutMode === 'admin'
                   ? feeConfig.merchantCashOutToAdminFeePer1000 > 0
-                    ? `৳${feeConfig.merchantCashOutToAdminFeePer1000}/1,000 (G:${feeConfig.merchantCashOutToAdminGovtShare} · P:${feeConfig.merchantCashOutToAdminShare})`
+                    ? `৳${feeConfig.merchantCashOutToAdminFeePer1000}/1,000`
                     : 'Free (৳0/1,000)'
-                  : `৳${feeConfig.merchantCashOutFeePer1000}/1,000 (A:${feeConfig.merchantCashOutAgentShare} · G:${feeConfig.merchantCashOutGovtShare} · P:${feeConfig.merchantCashOutAdminShare})`}
+                  : `৳${feeConfig.merchantCashOutFeePer1000}/1,000`}
               </span>
             </div>
 
@@ -894,13 +894,6 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                         </span>
                       </div>
                     </div>
-                    {cashOutFee > 0 && (
-                      <div className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
-                        Split → Agent: ৳{cashOutBreakdown.agentAmount.toFixed(2)} · Govt: ৳
-                        {cashOutBreakdown.govtAmount.toFixed(2)} · Admin: ৳
-                        {cashOutBreakdown.adminAmount.toFixed(2)}
-                      </div>
-                    )}
                   </div>
                 )}
 

@@ -733,12 +733,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                       </span>
                     </div>
                   </div>
-                  {fee > 0 && (
-                    <div className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
-                      Split → Agent: ৳{breakdown.agentAmount.toFixed(2)} · Govt: ৳
-                      {breakdown.govtAmount.toFixed(2)} · Admin: ৳{breakdown.adminAmount.toFixed(2)}
-                    </div>
-                  )}
                 </div>
               )}
 

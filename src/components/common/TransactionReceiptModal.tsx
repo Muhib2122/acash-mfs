@@ -154,16 +154,6 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 </span>
               </div>
             )}
-            {tx.fee > 0 && (
-              <div className="flex items-center justify-between px-4 py-3 gap-2">
-                <span className="text-slate-500 dark:text-slate-400">
-                  {lang === 'bn' ? 'ফি বণ্টন (লকড)' : 'Locked Fee Split'}
-                </span>
-                <span className="font-mono-tabular text-[11px] text-indigo-600 dark:text-indigo-300 text-right">
-                  A: {formatBdt(tx.feeBreakdown.agentAmount)} · G: {formatBdt(tx.feeBreakdown.govtAmount)} · P: {formatBdt(tx.feeBreakdown.adminAmount)}
-                </span>
-              </div>
-            )}
             {tx.note && (
               <div className="flex items-center justify-between px-4 py-3 gap-2">
                 <span className="text-slate-500 dark:text-slate-400">{lang === 'bn' ? 'নোট' : 'Reference'}</span>

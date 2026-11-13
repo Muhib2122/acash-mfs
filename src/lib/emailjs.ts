@@ -1,9 +1,9 @@
 import emailjs from '@emailjs/browser';
 
 export const EMAILJS_CONFIG = {
-  serviceId: 'service_2zwawxd',
-  templateId: 'template_8qgrwb9',
-  publicKey: 'Q-1BGbDCPvnx_pHQo',
+  serviceId: (import.meta.env.VITE_EMAILJS_SERVICE_ID || 'service_2zwawxd').trim(),
+  templateId: (import.meta.env.VITE_EMAILJS_TEMPLATE_ID || 'template_8qgrwb9').trim(),
+  publicKey: (import.meta.env.VITE_EMAILJS_PUBLIC_KEY || 'Q-1BGbDCPvnx_pHQo').trim(),
 };
 
 let initialized = false;
@@ -13,6 +13,20 @@ function ensureInitialized() {
     emailjs.init({ publicKey: EMAILJS_CONFIG.publicKey });
     initialized = true;
   }
+}
+
+function extractEmailJsError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null) {
+    const record = err as { text?: unknown; message?: unknown; status?: unknown };
+    if (typeof record.text === 'string' && record.text.trim()) {
+      return record.status ? `HTTP ${record.status}: ${record.text}` : record.text;
+    }
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message;
+    }
+  }
+  return 'EmailJS delivery failed';
 }
 
 export interface SendEmailResult {
@@ -26,17 +40,31 @@ export async function sendOtpEmail(params: {
   otp: string;
   roleLabel: string;
 }): Promise<SendEmailResult> {
+  const cleanEmail = params.toEmail.trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    return { sent: false, error: 'Invalid recipient email address' };
+  }
+
   ensureInitialized();
 
+  const nowStr = new Date().toLocaleString();
   const templateParams = {
-    to_email: params.toEmail,
-    email: params.toEmail,
-    user_email: params.toEmail,
+    to_email: cleanEmail,
+    email: cleanEmail,
+    user_email: cleanEmail,
+    recipient: cleanEmail,
+    recipient_email: cleanEmail,
+    to: cleanEmail,
+    reply_to: cleanEmail,
     to_name: params.toName || 'Acash User',
     name: params.toName || 'Acash User',
+    from_name: 'Acash Official',
+    subject: `Acash Verification Code: ${params.otp}`,
     otp: params.otp,
     passcode: params.otp,
     code: params.otp,
+    account_id: params.roleLabel,
+    time: nowStr,
     role: params.roleLabel,
     app_name: 'Acash MFS',
     message: `Your Acash ${params.roleLabel} verification OTP is ${params.otp}. It expires in 10 minutes. Never share this code with anyone.`,
@@ -51,7 +79,7 @@ export async function sendOtpEmail(params: {
     );
     return { sent: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'EmailJS delivery failed';
+    const message = extractEmailJsError(err);
     console.warn('EmailJS OTP error:', message);
     return { sent: false, error: message };
   }
@@ -77,15 +105,17 @@ export async function sendAccountStatusEmail(params: {
       : `Dear ${params.toName}, your Acash account (${params.accountId}) has been re-enabled by Platform Administration. Note: ${params.reason}.`;
 
   const templateParams = {
-    to_email: params.toEmail,
-    email: params.toEmail,
-    user_email: params.toEmail,
+    to_email: params.toEmail.trim().toLowerCase(),
+    email: params.toEmail.trim().toLowerCase(),
+    user_email: params.toEmail.trim().toLowerCase(),
     to_name: params.toName || 'Acash User',
     name: params.toName || 'Acash User',
     subject: subjectLine,
     otp: params.status === 'disabled' ? 'ACCOUNT DISABLED' : 'ACCOUNT ACTIVE',
     passcode: params.accountId,
     code: params.accountId,
+    account_id: params.accountId,
+    time: new Date().toLocaleString(),
     role: params.accountId,
     app_name: 'Acash MFS Security',
     reason: params.reason,
@@ -101,7 +131,7 @@ export async function sendAccountStatusEmail(params: {
     );
     return { sent: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'EmailJS delivery failed';
+    const message = extractEmailJsError(err);
     console.warn('EmailJS Account Status alert error:', message);
     return { sent: false, error: message };
   }
@@ -115,21 +145,29 @@ async function sendGenericNotificationEmail(params: {
   roleLabel: string;
   message: string;
 }): Promise<SendEmailResult> {
-  if (!params.toEmail || !params.toEmail.includes('@')) {
+  const cleanEmail = params.toEmail.trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
     return { sent: false, error: 'Invalid recipient email' };
   }
   ensureInitialized();
 
   const templateParams = {
-    to_email: params.toEmail,
-    email: params.toEmail,
-    user_email: params.toEmail,
+    to_email: cleanEmail,
+    email: cleanEmail,
+    user_email: cleanEmail,
+    recipient: cleanEmail,
+    recipient_email: cleanEmail,
+    to: cleanEmail,
+    reply_to: cleanEmail,
     to_name: params.toName || 'Acash User',
     name: params.toName || 'Acash User',
+    from_name: 'Acash Official',
     subject: params.subject,
     otp: params.badgeCode,
     passcode: params.badgeCode,
     code: params.badgeCode,
+    account_id: params.roleLabel,
+    time: new Date().toLocaleString(),
     role: params.roleLabel,
     app_name: 'Acash MFS',
     message: params.message,
@@ -144,8 +182,8 @@ async function sendGenericNotificationEmail(params: {
     );
     return { sent: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'EmailJS delivery failed';
-    console.warn(`EmailJS error (${params.toEmail}):`, message);
+    const message = extractEmailJsError(err);
+    console.warn(`EmailJS error (${cleanEmail}):`, message);
     return { sent: false, error: message };
   }
 }

@@ -44,7 +44,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [role, setRole] = useState<UserRole>('U');
 
   // Form states
-  const [identifier, setIdentifier] = useState('U-100001');
+  const [identifier, setIdentifier] = useState('');
   const [name, setName] = useState('');
   const [businessName, setBusinessName] = useState('');
   const [gender, setGender] = useState<UserGender | ''>('');
@@ -52,7 +52,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [tcaModalOpen, setTcaModalOpen] = useState(false);
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
-  const [pin, setPin] = useState('1234');
+  const [pin, setPin] = useState('');
   const [requireLoginOtp, setRequireLoginOtp] = useState(false);
   const [referredByType, setReferredByType] = useState<ReferralSource>('own_app');
   const [referredByAgentIdentifier, setReferredByAgentIdentifier] = useState('');
@@ -79,28 +79,24 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     id: UserRole;
     label: string;
     prefix: string;
-    sandboxId: string;
     icon: React.ElementType;
   }> = [
     {
       id: 'U',
       label: t('roleCustomer', lang),
       prefix: 'U-',
-      sandboxId: 'U-100001',
       icon: User,
     },
     {
       id: 'A',
       label: t('roleAgent', lang),
       prefix: 'A-',
-      sandboxId: 'A-200001',
       icon: Briefcase,
     },
     {
       id: 'M',
       label: t('roleMerchant', lang),
       prefix: 'M-',
-      sandboxId: 'M-300001',
       icon: Store,
     },
   ];
@@ -108,20 +104,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const handleRoleSwitch = (nextRole: UserRole) => {
     setRole(nextRole);
     setError('');
-    if (mode === 'login') {
-      const currentIsDefault =
-        identifier === '' ||
-        identifier === 'U-100001' ||
-        identifier === 'A-200001' ||
-        identifier === 'M-300001';
-      if (currentIsDefault) {
-        const match = roleOptions.find((r) => r.id === nextRole);
-        if (match) setIdentifier(match.sandboxId);
-      }
-    }
   };
 
   const triggerOtpSend = async (targetEmail: string, targetName: string, targetRole: UserRole) => {
+    const normalizedEmail = targetEmail.trim().toLowerCase();
     const code = String(Math.floor(100000 + Math.random() * 900000));
     setGeneratedOtp(code);
     setOtpInput('');
@@ -130,14 +116,14 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     const roleLabel =
       targetRole === 'U' ? 'Customer (U)' : targetRole === 'A' ? 'Agent (A)' : 'Merchant (M)';
     const res = await sendOtpEmail({
-      toEmail: targetEmail,
-      toName: targetName,
+      toEmail: normalizedEmail,
+      toName: targetName.trim(),
       otp: code,
       roleLabel,
     });
 
     if (res.sent) {
-      setOtpStatusMsg(`${t('otpSentTo', lang)} ${targetEmail}`);
+      setOtpStatusMsg(`${t('otpSentTo', lang)} ${normalizedEmail}`);
     } else {
       setOtpStatusMsg(
         lang === 'bn'
@@ -352,20 +338,6 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     }
   };
 
-  const handleQuickSandboxLogin = async (accountId: string) => {
-    setError('');
-    setLoading(true);
-    try {
-      const user = await findUserByIdentifier(accountId);
-      if (!user) throw new Error('Account could not be loaded.');
-      onAuthenticated(user);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Quick login failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   if (newlyCreatedUser) {
     return (
       <div className="max-w-lg mx-auto px-4 py-12">
@@ -423,97 +395,31 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 lg:py-12">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-10 items-stretch">
-        {/* Left Editorial / Product Architecture Panel */}
-        <div className="lg:col-span-6 flex flex-col justify-between rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-9 shadow-sm dark:shadow-none">
+        {/* Left Calm Welcome Panel */}
+        <div className="lg:col-span-5 flex flex-col justify-between rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-9 shadow-sm dark:shadow-none">
           <div className="space-y-6">
             <BrandLogo size="lg" subtitle={t('tagline', lang)} />
 
-            <div className="space-y-3 pt-1">
-              <h1 className="font-display text-2xl sm:text-4xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight [text-wrap:balance]">
+            <div className="space-y-3 pt-2">
+              <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight [text-wrap:balance]">
                 {lang === 'bn'
-                  ? 'একটি ইউনিফাইড প্ল্যাটফর্মে গ্রাহক, এজেন্ট ও মার্চেন্ট সেবা'
-                  : 'Unified Mobile Finance for Customers, Agents & Merchants'}
+                  ? 'নিরাপদ, দ্রুত এবং সহজ ডিজিটাল লেনদেন'
+                  : 'Simple, Calm & Secure Digital Wallet'}
               </h1>
-              <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed max-w-xl">
+              <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
                 {lang === 'bn'
-                  ? 'রিয়েল-টাইম ফায়ারবেস সেটেলমেন্ট, জিমেইল ওটিপি নিরাপত্তা এবং ট্যাপ-অ্যান্ড-হোল্ড অথরাইজেশন সহ আধুনিক ফাইন্যান্সিয়াল প্ল্যাটফর্ম।'
-                  : 'Real-time Firebase ledger settlements, Gmail OTP verification via EmailJS, interactive Tap & Hold authorization, and bilingual EN/বাংলা controls.'}
+                  ? 'আপনার আক্যাশ অ্যাকাউন্টে প্রবেশ করুন অথবা নতুন অ্যাকাউন্ট তৈরি করে সেন্ড মানি, ক্যাশ-আউট, মোবাইল রিচার্জ ও মার্চেন্ট পেমেন্ট শুরু করুন।'
+                  : 'Sign in to your Acash account or register to send money, cash out, pay merchants, and recharge any mobile operator.'}
               </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
-              <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4">
-                <div className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                  Role Prefixes (U · A · M)
-                </div>
-                <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  {lang === 'bn'
-                    ? 'প্রতিটি অ্যাকাউন্টের জন্য স্বয়ংক্রিয় রোল-ভিত্তিক ইউনিক আইডি'
-                    : 'Automatic U- Customer, A- Agent & M- Merchant identity prefixes'}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4">
-                <div className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                  50,000+ BDT AML Gate
-                </div>
-                <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  {lang === 'bn'
-                    ? 'উচ্চ-মূল্যের লেনদেন সরাসরি অ্যাডমিন সিকিউরিটি রিভিউতে যায়'
-                    : 'High-value transfers route automatically to Admin Security Review'}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4">
-                <div className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                  Smart Telecom & QR
-                </div>
-                <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  {lang === 'bn'
-                    ? 'জিপি, রবি, বাংলালিংক, এয়ারটেল ও টেলিটক প্রিফিক্স অটো-ডিটেকশন'
-                    : 'Auto-prefix detection for GP, Robi, Banglalink, Airtel & Teletalk + Dynamic QR'}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4">
-                <div className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                  Direct Google & Gmail OTP
-                </div>
-                <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  {lang === 'bn'
-                    ? 'ফায়ারবেস গুগল সাইন-ইন এবং ইমেইলজেএস জিমেইল ওটিপি ভেরিফিকেশন'
-                    : 'Firebase Google Auth plus EmailJS Gmail OTP verification on sign-up'}
-                </div>
-              </div>
             </div>
           </div>
 
-          {/* Quick Sandbox Demo Access & Booth Map */}
-          <div className="mt-7 pt-6 border-t border-slate-200 dark:border-slate-800 space-y-4">
-            <div>
-              <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-3">
-                {t('quickDemoAccess', lang)} (1-Click Sign In · PIN: 1234)
-              </div>
-              <div className="grid grid-cols-3 gap-2.5">
-                {roleOptions.map((item) => (
-                  <button
-                    key={item.sandboxId}
-                    type="button"
-                    disabled={loading}
-                    onClick={() => handleQuickSandboxLogin(item.sandboxId)}
-                    className="p-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-500 text-left transition-colors"
-                  >
-                    <div className="text-xs font-semibold text-slate-900 dark:text-white">{item.label}</div>
-                    <div className="font-mono-tabular text-[11px] text-indigo-600 dark:text-indigo-400 mt-0.5">
-                      {item.sandboxId}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {onOpenBoothMap && (
+          {onOpenBoothMap && (
+            <div className="mt-8 pt-6 border-t border-slate-200 dark:border-slate-800">
               <button
                 type="button"
                 onClick={onOpenBoothMap}
-                className="w-full py-2.5 px-4 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-xs font-semibold text-emerald-700 dark:text-emerald-300 inline-flex items-center justify-center gap-2 transition-colors"
+                className="w-full py-3 px-4 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-xs font-semibold text-emerald-700 dark:text-emerald-300 inline-flex items-center justify-center gap-2 transition-colors"
               >
                 <MapPin className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <span>
@@ -522,12 +428,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     : 'Explore Agent Booth & Customer Support Map'}
                 </span>
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Right Interactive Auth Card */}
-        <div className="lg:col-span-6 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-8 flex flex-col justify-center shadow-sm dark:shadow-none">
+        <div className="lg:col-span-7 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-8 flex flex-col justify-center shadow-sm dark:shadow-none">
           {/* Google Sign-In with Firebase Auth */}
           <div className="mb-5">
             {googleIdentity ? (
@@ -615,8 +521,6 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 setMode('login');
                 setOtpStep(false);
                 setError('');
-                if (!identifier) setIdentifier('U-100001');
-                if (!pin) setPin('1234');
               }}
               className={`py-2.5 text-sm font-semibold rounded-lg transition-colors ${
                 mode === 'login'
@@ -696,7 +600,11 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         required
                         value={identifier}
                         onChange={(e) => setIdentifier(e.target.value)}
-                        placeholder="U-100001, A-200001, M-300001, or 017..."
+                        placeholder={
+                          lang === 'bn'
+                            ? 'অ্যাকাউন্ট আইডি বা মোবাইল নম্বর (যেমন 017...)'
+                            : 'Account ID or Mobile Number (e.g. 017...)'
+                        }
                         className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                       />
                     </div>
@@ -995,12 +903,17 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             </>
           ) : (
             <form onSubmit={handleVerifyOtpAndFinalize} className="space-y-4">
-              <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 space-y-1">
+              <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 space-y-1.5">
                 <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700 dark:text-indigo-200">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                   <span>EmailJS Gmail Verification</span>
                 </div>
                 <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">{otpStatusMsg}</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {lang === 'bn'
+                    ? 'ইনবক্সে না পেলে অবশ্যই Gmail-এর Spam / Promotions ফোল্ডার চেক করুন, অথবা Resend OTP চাপুন।'
+                    : 'Check both Inbox and Spam / Promotions folders in Gmail, or tap Resend OTP below.'}
+                </p>
               </div>
 
               <div>
@@ -1044,14 +957,21 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    const targetEmail = pendingLoginUser ? pendingLoginUser.email : email;
-                    const targetName = pendingLoginUser ? pendingLoginUser.name : name;
-                    triggerOtpSend(targetEmail, targetName, role);
+                  disabled={loading}
+                  onClick={async () => {
+                    setLoading(true);
+                    setError('');
+                    try {
+                      const targetEmail = pendingLoginUser ? pendingLoginUser.email : email;
+                      const targetName = pendingLoginUser ? pendingLoginUser.name : name;
+                      await triggerOtpSend(targetEmail, targetName, role);
+                    } finally {
+                      setLoading(false);
+                    }
                   }}
-                  className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium"
+                  className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                   <span>{t('resendOtp', lang)}</span>
                 </button>
               </div>
