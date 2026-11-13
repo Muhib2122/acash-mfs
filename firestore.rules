@@ -242,6 +242,26 @@ service cloud.firestore {
         && data.updatedAt is number;
     }
 
+    function isValidAcashDirectory(data) {
+      return data.keys().hasAll([
+          'accountId', 'role', 'name', 'phone', 'status', 'verified', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'accountId', 'firebaseUid', 'role', 'name', 'businessName', 'phone',
+          'status', 'verified', 'createdAt', 'updatedAt'
+        ])
+        && data.accountId is string && data.accountId.size() <= 12 && data.accountId.matches('^[UAM]-\\d{6}$')
+        && (!('firebaseUid' in data) || (data.firebaseUid is string && data.firebaseUid.size() <= 128))
+        && data.role in ['U', 'A', 'M']
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        && (!('businessName' in data) || (data.businessName is string && data.businessName.size() <= 140))
+        && data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 20
+        && data.status in ['active', 'disabled']
+        && data.verified is bool
+        && data.createdAt is number
+        && data.updatedAt is number;
+    }
+
     // ---------- Boot Connection Health Check ----------
     match /test/connection {
       allow get: if true;
@@ -294,13 +314,31 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly([
                 'firebaseUid', 'profilePhotoUrl', 'lastActiveAt'
               ])) ||
-            (incoming().balance >= existing().balance &&
-              incoming().diff(existing()).affectedKeys().hasOnly([
-                'balance', 'commissionBalance', 'lastActiveAt'
-              ]))
+              (incoming().balance >= existing().balance &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'balance', 'commissionBalance', 'lastActiveAt'
+                ]))
+            )
           )
-        )
+        );
+    }
+
+    // ---------- Acash Public Account Routing Directory (Non-PII Split Collection) ----------
+    match /acash_directory/{accountId} {
+      allow get: if isValidId(accountId);
+      allow list: if resource.data.accountId is string;
+      allow create: if isVerifiedUser() && isValidId(accountId) && isValidAcashDirectory(incoming()) && (
+        isAdmin() || incoming().firebaseUid == request.auth.uid
       );
+      allow update: if isVerifiedUser() && isValidId(accountId) && isValidAcashDirectory(incoming())
+        && incoming().accountId == existing().accountId
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin() ||
+          (existing().firebaseUid == request.auth.uid && incoming().firebaseUid == existing().firebaseUid) ||
+          (!('firebaseUid' in existing()) && incoming().firebaseUid == request.auth.uid)
+        );
     }
 
     // ---------- Acash Financial Transactions ----------

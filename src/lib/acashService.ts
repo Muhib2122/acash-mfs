@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  increment,
   onSnapshot,
   orderBy,
   query,
@@ -30,6 +31,7 @@ import {
 } from './emailjs';
 import {
   AcashBooth,
+  AcashDirectoryEntry,
   AcashMapLocation,
   AcashTransaction,
   AcashUser,
@@ -55,6 +57,7 @@ import {
 } from '../types/acash';
 
 const USERS_COL = 'acash_users';
+const DIRECTORY_COL = 'acash_directory';
 const TX_COL = 'acash_transactions';
 const BOOTHS_COL = 'acash_booths';
 const MAP_LOCATIONS_COL = 'acash_map_locations';
@@ -1309,6 +1312,11 @@ export async function ensureDefaultPlatformData(): Promise<void> {
         if (!snap.exists()) {
           await setDoc(ref, u);
         }
+        const dirRef = doc(db, DIRECTORY_COL, u.accountId);
+        const dirSnap = await getDoc(dirRef);
+        if (!dirSnap.exists()) {
+          await setDoc(dirRef, toDirectoryEntry(u));
+        }
       }
 
       const seedBooths = Object.values(buildSeedBooths());
@@ -1343,6 +1351,68 @@ export async function ensureDefaultPlatformData(): Promise<void> {
     firestoreBackendMode = 'local_sync';
     console.warn('Firestore bootstrap fallback to local sync:', err);
   }
+}
+
+function toDirectoryEntry(user: AcashUser): AcashDirectoryEntry {
+  return {
+    accountId: user.accountId,
+    ...(user.firebaseUid ? { firebaseUid: user.firebaseUid } : {}),
+    role: user.role,
+    name: user.name,
+    ...(user.businessName ? { businessName: user.businessName } : {}),
+    phone: user.phone,
+    status: user.status,
+    verified: Boolean(user.verified),
+    createdAt: user.createdAt,
+    updatedAt: user.lastActiveAt || user.createdAt || Date.now(),
+  };
+}
+
+function directoryEntryToStubUser(entry: AcashDirectoryEntry): AcashUser {
+  return {
+    accountId: entry.accountId,
+    ...(entry.firebaseUid ? { firebaseUid: entry.firebaseUid } : {}),
+    role: entry.role,
+    name: entry.name,
+    ...(entry.businessName ? { businessName: entry.businessName } : {}),
+    phone: entry.phone,
+    email: '',
+    pinHash: '',
+    balance: 0,
+    commissionBalance: 0,
+    status: entry.status,
+    verified: entry.verified,
+    createdAt: entry.createdAt,
+    lastActiveAt: entry.updatedAt || entry.createdAt,
+  };
+}
+
+export async function syncAcashUserToCloud(
+  user: AcashUser,
+  overrideFirebaseUid?: string
+): Promise<boolean> {
+  const fbUser = await ensureFirebaseAuthSession();
+  if (!fbUser || !fbUser.emailVerified) {
+    return false;
+  }
+
+  const uidToUse = overrideFirebaseUid || user.firebaseUid || fbUser.uid;
+  const syncedUser: AcashUser = {
+    ...user,
+    firebaseUid: uidToUse,
+    lastActiveAt: Date.now(),
+  };
+
+  const store = readLocalStore();
+  store.users[syncedUser.accountId] = syncedUser;
+  writeLocalStore(store, true);
+
+  await setDoc(doc(db, USERS_COL, syncedUser.accountId), syncedUser, { merge: true });
+  await setDoc(doc(db, DIRECTORY_COL, syncedUser.accountId), toDirectoryEntry(syncedUser), {
+    merge: true,
+  });
+  firestoreBackendMode = 'firestore';
+  return true;
 }
 
 export async function resolveAcashUserForGoogleAuth(params: {
@@ -1392,6 +1462,9 @@ export async function resolveAcashUserForGoogleAuth(params: {
 
   try {
     await setDoc(doc(db, USERS_COL, updated.accountId), updated, { merge: true });
+    await setDoc(doc(db, DIRECTORY_COL, updated.accountId), toDirectoryEntry(updated), {
+      merge: true,
+    });
     firestoreBackendMode = 'firestore';
   } catch (err) {
     if (auth.currentUser && isPermissionError(err)) {
@@ -1407,10 +1480,16 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
   const clean = identifier.trim();
   if (!clean) return null;
 
-  try {
-    await ensureFirebaseAuthSession();
-    const normalizedId = normalizeAccountIdInput(clean);
-    if (/^[UAM]-\d{6}$/.test(normalizedId)) {
+  const normalizedId = normalizeAccountIdInput(clean);
+  const isAccountIdPattern = /^[UAM]-\d{6}$/.test(normalizedId);
+  const phone = normalizeBdPhone(clean);
+  const isPhonePattern = phone.length >= 10;
+
+  await ensureFirebaseAuthSession();
+
+  // 1. Try full user record in acash_users (succeeds for owner or Admin)
+  if (isAccountIdPattern) {
+    try {
       const snap = await getDoc(doc(db, USERS_COL, normalizedId));
       if (snap.exists()) {
         const u = snap.data() as AcashUser;
@@ -1419,10 +1498,13 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
         writeLocalStore(store, false);
         return u;
       }
+    } catch {
+      // Expected PERMISSION_DENIED when looking up another user's private PII doc; continue to acash_directory
     }
+  }
 
-    const phone = normalizeBdPhone(clean);
-    if (phone.length >= 10) {
+  if (isPhonePattern) {
+    try {
       const qPhone = query(collection(db, USERS_COL), where('phone', '==', phone), limit(1));
       const snapPhone = await getDocs(qPhone);
       if (!snapPhone.empty) {
@@ -1432,9 +1514,13 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
         writeLocalStore(store, false);
         return u;
       }
+    } catch {
+      // Expected PERMISSION_DENIED for non-admin recipient phone queries; continue to acash_directory
     }
+  }
 
-    if (clean.includes('@')) {
+  if (clean.includes('@')) {
+    try {
       const qEmail = query(
         collection(db, USERS_COL),
         where('email', '==', clean.toLowerCase()),
@@ -1448,12 +1534,112 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
         writeLocalStore(store, false);
         return u;
       }
+    } catch {
+      // continue to directory/local store
     }
-  } catch {
-    firestoreBackendMode = 'local_sync';
   }
 
-  // Fallback to synchronized store (guarantees sandbox & locally registered accounts always work)
+  // 2. Try non-PII cross-portal routing directory (acash_directory)
+  const resolveFromDirectoryEntry = (entry: AcashDirectoryEntry): AcashUser => {
+    const store = readLocalStore();
+    const cached = store.users[entry.accountId];
+    if (cached && cached.pinHash) {
+      const merged: AcashUser = {
+        ...cached,
+        name: entry.name || cached.name,
+        ...(entry.businessName ? { businessName: entry.businessName } : {}),
+        phone: entry.phone || cached.phone,
+        status: entry.status,
+        verified: entry.verified,
+        ...(entry.firebaseUid ? { firebaseUid: entry.firebaseUid } : {}),
+      };
+      store.users[entry.accountId] = merged;
+      writeLocalStore(store, false);
+      return merged;
+    }
+    return directoryEntryToStubUser(entry);
+  };
+
+  if (isAccountIdPattern) {
+    try {
+      const dirSnap = await getDoc(doc(db, DIRECTORY_COL, normalizedId));
+      if (dirSnap.exists()) {
+        return resolveFromDirectoryEntry(dirSnap.data() as AcashDirectoryEntry);
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  if (isPhonePattern) {
+    try {
+      const qDirPhone = query(collection(db, DIRECTORY_COL), where('phone', '==', phone), limit(1));
+      const dirPhoneSnap = await getDocs(qDirPhone);
+      if (!dirPhoneSnap.empty) {
+        return resolveFromDirectoryEntry(dirPhoneSnap.docs[0].data() as AcashDirectoryEntry);
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  // 3. Fallback to public Agent/Merchant live map directory if applicable
+  if (isAccountIdPattern && (normalizedId.startsWith('A-') || normalizedId.startsWith('M-'))) {
+    try {
+      const mapSnap = await getDoc(doc(db, MAP_LOCATIONS_COL, normalizedId));
+      if (mapSnap.exists()) {
+        const loc = mapSnap.data() as AcashMapLocation;
+        if (loc.creatorRole === 'agent' || loc.creatorRole === 'merchant') {
+          return directoryEntryToStubUser({
+            accountId: loc.creatorId,
+            ...(loc.creatorUid ? { firebaseUid: loc.creatorUid } : {}),
+            role: loc.creatorRole === 'agent' ? 'A' : 'M',
+            name: loc.name,
+            ...(loc.businessName ? { businessName: loc.businessName } : {}),
+            phone: loc.phone,
+            status: 'active',
+            verified: true,
+            createdAt: loc.createdAt,
+            updatedAt: loc.updatedAt,
+          });
+        }
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  if (isPhonePattern) {
+    try {
+      const qMapPhone = query(
+        collection(db, MAP_LOCATIONS_COL),
+        where('phone', '==', phone),
+        limit(1)
+      );
+      const mapPhoneSnap = await getDocs(qMapPhone);
+      if (!mapPhoneSnap.empty) {
+        const loc = mapPhoneSnap.docs[0].data() as AcashMapLocation;
+        if (loc.creatorRole === 'agent' || loc.creatorRole === 'merchant') {
+          return directoryEntryToStubUser({
+            accountId: loc.creatorId,
+            ...(loc.creatorUid ? { firebaseUid: loc.creatorUid } : {}),
+            role: loc.creatorRole === 'agent' ? 'A' : 'M',
+            name: loc.name,
+            ...(loc.businessName ? { businessName: loc.businessName } : {}),
+            phone: loc.phone,
+            status: 'active',
+            verified: true,
+            createdAt: loc.createdAt,
+            updatedAt: loc.updatedAt,
+          });
+        }
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  // 4. Fallback to local synchronized store (sandbox & locally registered accounts)
   return findInLocalStore(clean);
 }
 
@@ -1487,10 +1673,22 @@ export async function registerAcashUser(params: {
   const phone = normalizeBdPhone(params.phone);
   const email = params.email.trim().toLowerCase();
 
-  // Check duplicate in local store & Firestore
+  // Check duplicate in local store & Firestore directory
   const existingLocal = findInLocalStore(phone);
   if (existingLocal) {
     throw new Error('An Acash account with this mobile number already exists.');
+  }
+  try {
+    const dupDirSnap = await getDocs(
+      query(collection(db, DIRECTORY_COL), where('phone', '==', phone), limit(1))
+    );
+    if (!dupDirSnap.empty) {
+      throw new Error('An Acash account with this mobile number already exists.');
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('already exists')) {
+      throw err;
+    }
   }
 
   const referredByType: ReferralSource = params.referredByType === 'agent' ? 'agent' : 'own_app';
@@ -1531,6 +1729,15 @@ export async function registerAcashUser(params: {
   const store = readLocalStore();
   while (store.users[accountId]) {
     accountId = generateAccountId(params.role);
+  }
+  try {
+    let dirExists = await getDoc(doc(db, DIRECTORY_COL, accountId));
+    while (dirExists.exists() || store.users[accountId]) {
+      accountId = generateAccountId(params.role);
+      dirExists = await getDoc(doc(db, DIRECTORY_COL, accountId));
+    }
+  } catch {
+    // ignore offline check
   }
 
   const initialBalance = params.role === 'A' ? 100000 : params.role === 'M' ? 15000 : 10000;
@@ -1583,8 +1790,11 @@ export async function registerAcashUser(params: {
     const fbUser = await ensureFirebaseAuthSession();
     if (fbUser && fbUser.emailVerified) {
       await setDoc(doc(db, USERS_COL, accountId), newUser);
+      await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
       await setDoc(doc(db, ADMIN_NOTIF_COL, regNotif.id), regNotif);
       firestoreBackendMode = 'firestore';
+    } else {
+      firestoreBackendMode = 'local_sync';
     }
   } catch (err) {
     firestoreBackendMode = 'local_sync';
@@ -1618,6 +1828,11 @@ export async function authenticateAcashUser(params: {
   const user = await findUserByIdentifier(params.identifier);
   if (!user) {
     throw new Error('Account not found. Check your Acash ID (e.g. U-100001), phone, or Gmail.');
+  }
+  if (!user.pinHash) {
+    throw new Error(
+      'Account found in Acash Cloud. On a new browser or device, click "Continue with Google" to verify and load your wallet.'
+    );
   }
   if (user.pinHash !== hashPin(params.pin)) {
     throw new Error('Invalid security PIN.');
@@ -1655,6 +1870,14 @@ export function subscribeToUser(
     emitLocalIfFound();
   });
 
+  const syncDirIfOwner = (u: AcashUser) => {
+    if (auth.currentUser?.emailVerified && u.firebaseUid === auth.currentUser.uid) {
+      void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), { merge: true }).catch(
+        () => {}
+      );
+    }
+  };
+
   let unsubFs: Unsubscribe = () => {};
   try {
     // Also fetch once in case local store is empty on fresh PWA / browser session
@@ -1666,6 +1889,7 @@ export function subscribeToUser(
           store.users[accountId] = u;
           writeLocalStore(store, false);
           callback(u);
+          syncDirIfOwner(u);
         }
       })
       .catch(() => {
@@ -1681,6 +1905,7 @@ export function subscribeToUser(
           store.users[accountId] = u;
           writeLocalStore(store, false);
           callback(u);
+          syncDirIfOwner(u);
         } else if (!snap.metadata.fromCache) {
           // Only emit null if neither Firestore server nor local store has this user
           emitLocalIfFound();
@@ -1848,6 +2073,7 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
+  let unsubDirFs: Unsubscribe = () => {};
   try {
     const q = query(collection(db, USERS_COL), orderBy('createdAt', 'desc'));
     unsubFs = onSnapshot(
@@ -1860,6 +2086,56 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
             store.users[u.accountId] = u;
           }
           writeLocalStore(store, false);
+          // Backfill directory entries for existing accounts when signed in as Admin
+          if (auth.currentUser?.emailVerified && isMainAdminEmail(auth.currentUser.email)) {
+            for (const u of fsUsers) {
+              void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), {
+                merge: true,
+              }).catch(() => {});
+            }
+          }
+        }
+        emitLocal();
+      },
+      () => {
+        emitLocal();
+      }
+    );
+  } catch {
+    // ignore
+  }
+
+  try {
+    const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'));
+    unsubDirFs = onSnapshot(
+      qDir,
+      (snap) => {
+        const entries = snap.docs.map((d) => d.data() as AcashDirectoryEntry);
+        if (entries.length > 0) {
+          const store = readLocalStore();
+          let changed = false;
+          for (const entry of entries) {
+            const existing = store.users[entry.accountId];
+            if (!existing) {
+              store.users[entry.accountId] = directoryEntryToStubUser(entry);
+              changed = true;
+            } else {
+              const updated: AcashUser = {
+                ...existing,
+                name: entry.name || existing.name,
+                ...(entry.businessName ? { businessName: entry.businessName } : {}),
+                phone: entry.phone || existing.phone,
+                status: entry.status,
+                verified: entry.verified,
+                ...(entry.firebaseUid ? { firebaseUid: entry.firebaseUid } : {}),
+              };
+              store.users[entry.accountId] = updated;
+              changed = true;
+            }
+          }
+          if (changed) {
+            writeLocalStore(store, false);
+          }
         }
         emitLocal();
       },
@@ -1874,6 +2150,7 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
   return () => {
     unsubLocal();
     unsubFs();
+    unsubDirFs();
   };
 }
 
@@ -2146,8 +2423,13 @@ export async function executeFinancialTransaction(params: {
     );
   }
 
-  const receiverLocal = receiverUser ? store.users[receiverUser.accountId] : null;
-  if (receiverLocal && receiverLocal.status !== 'active') {
+  const cachedReceiver = receiverUser ? store.users[receiverUser.accountId] : null;
+  const resolvedReceiver = receiverUser
+    ? cachedReceiver && cachedReceiver.pinHash
+      ? cachedReceiver
+      : receiverUser
+    : null;
+  if (resolvedReceiver && resolvedReceiver.status !== 'active') {
     throw new Error('Recipient account is disabled.');
   }
 
@@ -2165,28 +2447,28 @@ export async function executeFinancialTransaction(params: {
     senderRole: senderLocal.role,
     receiverId: isAdminTarget
       ? 'ADMIN-TREASURY'
-      : receiverLocal
-        ? receiverLocal.accountId
+      : resolvedReceiver
+        ? resolvedReceiver.accountId
         : params.operator
           ? `OP-${params.operator.toUpperCase()}`
           : `BILL-${(params.biller || 'UTIL').toUpperCase()}`,
-    ...(receiverLocal?.firebaseUid ? { receiverUid: receiverLocal.firebaseUid } : {}),
+    ...(resolvedReceiver?.firebaseUid ? { receiverUid: resolvedReceiver.firebaseUid } : {}),
     receiverName: isAdminTarget
       ? 'Acash Admin Treasury'
-      : receiverLocal
-        ? receiverLocal.businessName || receiverLocal.name
+      : resolvedReceiver
+        ? resolvedReceiver.businessName || resolvedReceiver.name
         : params.operator
           ? `${params.operator.toUpperCase()} Recharge (${params.rechargeNumber})`
           : `${(params.biller || 'Utility').toUpperCase()} (${params.billAccountNumber})`,
     receiverPhone: isAdminTarget
       ? 'SYSTEM'
-      : receiverLocal
-        ? receiverLocal.phone
+      : resolvedReceiver
+        ? resolvedReceiver.phone
         : params.rechargeNumber || params.billAccountNumber || '',
     receiverRole: isAdminTarget
       ? 'ADMIN'
-      : receiverLocal
-        ? receiverLocal.role
+      : resolvedReceiver
+        ? resolvedReceiver.role
         : params.operator
           ? 'OPERATOR'
           : 'BILLER',
@@ -2220,18 +2502,20 @@ export async function executeFinancialTransaction(params: {
     lastActiveAt: now,
   };
 
-  if (!requiresAdminApproval && receiverLocal) {
-    const getsCashOutCommission =
-      params.type === 'cash_out' ||
-      (params.type === 'merchant_cash_out' && receiverLocal.role === 'A');
-    const creditToReceiver = getsCashOutCommission
-      ? Number((amount + breakdown.agentAmount).toFixed(2))
-      : amount;
-    const receiverCommInc = getsCashOutCommission ? breakdown.agentAmount : 0;
-    store.users[receiverLocal.accountId] = {
-      ...receiverLocal,
-      balance: Number((receiverLocal.balance + creditToReceiver).toFixed(2)),
-      commissionBalance: Number(((receiverLocal.commissionBalance || 0) + receiverCommInc).toFixed(2)),
+  const getsCashOutCommission =
+    Boolean(resolvedReceiver) &&
+    (params.type === 'cash_out' ||
+      (params.type === 'merchant_cash_out' && resolvedReceiver?.role === 'A'));
+  const creditToReceiver = getsCashOutCommission
+    ? Number((amount + breakdown.agentAmount).toFixed(2))
+    : amount;
+  const receiverCommInc = getsCashOutCommission ? breakdown.agentAmount : 0;
+
+  if (!requiresAdminApproval && resolvedReceiver && cachedReceiver && cachedReceiver.pinHash) {
+    store.users[resolvedReceiver.accountId] = {
+      ...cachedReceiver,
+      balance: Number((cachedReceiver.balance + creditToReceiver).toFixed(2)),
+      commissionBalance: Number(((cachedReceiver.commissionBalance || 0) + receiverCommInc).toFixed(2)),
       lastActiveAt: now,
     };
   }
@@ -2267,8 +2551,8 @@ export async function executeFinancialTransaction(params: {
 
   writeLocalStore(store, true);
 
-  // Sync atomically to Firestore when accessible
-  try {
+  // Sync atomically to Firestore when accessible (using increment on receiver to respect PII isolation)
+  const runFirestoreSync = async (includeReceiverUpdate: boolean) => {
     await runTransaction(db, async (transaction) => {
       const senderRef = doc(db, USERS_COL, params.senderId);
       const senderSnap = await transaction.get(senderRef);
@@ -2282,18 +2566,13 @@ export async function executeFinancialTransaction(params: {
         transaction.set(senderRef, store.users[senderLocal.accountId]);
       }
 
-      if (receiverLocal) {
-        const receiverRef = doc(db, USERS_COL, receiverLocal.accountId);
-        const rSnap = await transaction.get(receiverRef);
-        if (rSnap.exists()) {
-          transaction.update(receiverRef, {
-            balance: store.users[receiverLocal.accountId].balance,
-            commissionBalance: store.users[receiverLocal.accountId].commissionBalance,
-            lastActiveAt: now,
-          });
-        } else {
-          transaction.set(receiverRef, store.users[receiverLocal.accountId]);
-        }
+      if (includeReceiverUpdate && !requiresAdminApproval && resolvedReceiver) {
+        const receiverRef = doc(db, USERS_COL, resolvedReceiver.accountId);
+        transaction.update(receiverRef, {
+          balance: increment(creditToReceiver),
+          ...(receiverCommInc > 0 ? { commissionBalance: increment(receiverCommInc) } : {}),
+          lastActiveAt: now,
+        });
       }
 
       transaction.set(doc(db, TX_COL, txId), txRecord);
@@ -2301,8 +2580,19 @@ export async function executeFinancialTransaction(params: {
         transaction.set(doc(db, ADMIN_NOTIF_COL, txNotif.id), txNotif);
       }
     });
+  };
+
+  try {
+    await runFirestoreSync(true);
+    firestoreBackendMode = 'firestore';
   } catch {
-    firestoreBackendMode = 'local_sync';
+    // Fallback if receiverRef is a local-only seed account not yet initialized in Firestore
+    try {
+      await runFirestoreSync(false);
+      firestoreBackendMode = 'firestore';
+    } catch {
+      firestoreBackendMode = 'local_sync';
+    }
   }
 
   if (requiresAdminApproval) {
@@ -2657,10 +2947,17 @@ export async function adminCreditAccount(params: {
 
   try {
     await runTransaction(db, async (transaction) => {
-      transaction.set(
-        doc(db, USERS_COL, currentTarget.accountId),
-        store.users[currentTarget.accountId]
-      );
+      if (currentTarget.pinHash) {
+        transaction.set(
+          doc(db, USERS_COL, currentTarget.accountId),
+          store.users[currentTarget.accountId]
+        );
+      } else {
+        transaction.update(doc(db, USERS_COL, currentTarget.accountId), {
+          balance: increment(amt),
+          lastActiveAt: now,
+        });
+      }
       transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), updatedVault);
       transaction.set(doc(db, TX_COL, txId), txRecord);
       transaction.set(doc(db, ADMIN_NOTIF_COL, creditNotif.id), creditNotif);
@@ -2801,15 +3098,29 @@ export async function adminTransferBetweenAccounts(params: {
   try {
     await runTransaction(db, async (transaction) => {
       if (currentFrom) {
-        transaction.set(
-          doc(db, USERS_COL, currentFrom.accountId),
-          store.users[currentFrom.accountId]
-        );
+        if (currentFrom.pinHash) {
+          transaction.set(
+            doc(db, USERS_COL, currentFrom.accountId),
+            store.users[currentFrom.accountId]
+          );
+        } else {
+          transaction.update(doc(db, USERS_COL, currentFrom.accountId), {
+            balance: increment(-amt),
+            lastActiveAt: now,
+          });
+        }
       }
       if (isFromTreasury) {
         transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), store.treasuryVault);
       }
-      transaction.set(doc(db, USERS_COL, currentTo.accountId), store.users[currentTo.accountId]);
+      if (currentTo.pinHash) {
+        transaction.set(doc(db, USERS_COL, currentTo.accountId), store.users[currentTo.accountId]);
+      } else {
+        transaction.update(doc(db, USERS_COL, currentTo.accountId), {
+          balance: increment(amt),
+          lastActiveAt: now,
+        });
+      }
       transaction.set(doc(db, TX_COL, txId), txRecord);
       transaction.set(doc(db, ADMIN_NOTIF_COL, trNotif.id), trNotif);
       transaction.set(doc(db, ADMIN_ACTIVITY_COL, trActivity.id), trActivity);
@@ -3091,6 +3402,9 @@ export async function adminToggleUserStatus(
         ...(newStatus === 'disabled' ? { disabledAt: now, disabledBy: adminEmail || 'Admin' } : {}),
         lastActiveAt: now,
       });
+      await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(updatedUser), {
+        merge: true,
+      });
       await setDoc(doc(db, ADMIN_NOTIF_COL, statusNotif.id), statusNotif);
       await setDoc(doc(db, ADMIN_ACTIVITY_COL, statusActivity.id), statusActivity);
     } catch {
@@ -3182,6 +3496,11 @@ export async function adminBulkUpdateUserStatus(params: {
           ...(u.status === 'disabled' ? { disabledAt: now, disabledBy: params.adminEmail } : {}),
           lastActiveAt: now,
         }).catch(() => {})
+      ),
+      ...updatedUsers.map((u) =>
+        setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), { merge: true }).catch(
+          () => {}
+        )
       ),
       setDoc(doc(db, ADMIN_NOTIF_COL, bulkNotif.id), bulkNotif).catch(() => {}),
       setDoc(doc(db, ADMIN_ACTIVITY_COL, bulkActivity.id), bulkActivity).catch(() => {}),
@@ -3421,6 +3740,9 @@ export async function updateUserKyc(params: {
 
   try {
     await setDoc(doc(db, USERS_COL, params.accountId), updated, { merge: true });
+    await setDoc(doc(db, DIRECTORY_COL, params.accountId), toDirectoryEntry(updated), {
+      merge: true,
+    });
     if (updatedPin) {
       await setDoc(doc(db, MAP_LOCATIONS_COL, params.accountId), updatedPin, { merge: true });
     }

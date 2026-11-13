@@ -136,6 +136,19 @@ export interface AcashUser {
   lastActiveAt: number;
 }
 
+export interface AcashDirectoryEntry {
+  accountId: string;
+  firebaseUid?: string;
+  role: UserRole;
+  name: string;
+  businessName?: string;
+  phone: string;
+  status: AccountStatus;
+  verified: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AdminNotification {
   id: string;
   title: string;

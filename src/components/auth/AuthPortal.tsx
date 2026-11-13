@@ -19,13 +19,14 @@ import {
 import { AcashUser, Language, ReferralSource, UserGender, UserRole } from '../../types/acash';
 import { t } from '../../lib/i18n';
 import { sendOtpEmail } from '../../lib/emailjs';
-import { signInWithGooglePopup } from '../../lib/firebase';
+import { auth, signInWithGooglePopup } from '../../lib/firebase';
 import {
   authenticateAcashUser,
   findUserByIdentifier,
   formatUserReferralSource,
   registerAcashUser,
   resolveAcashUserForGoogleAuth,
+  syncAcashUserToCloud,
 } from '../../lib/acashService';
 import { BrandLogo } from '../common/BrandLogo';
 
@@ -64,6 +65,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [otpStatusMsg, setOtpStatusMsg] = useState('');
   const [pendingLoginUser, setPendingLoginUser] = useState<AcashUser | null>(null);
   const [newlyCreatedUser, setNewlyCreatedUser] = useState<AcashUser | null>(null);
+  const [cloudSynced, setCloudSynced] = useState(false);
+  const [syncingCloud, setSyncingCloud] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
@@ -329,12 +332,31 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             ? { firebaseUid: googleIdentity.uid, profilePhotoUrl: googleIdentity.photoURL }
             : {}),
         });
+        setCloudSynced(Boolean(created.firebaseUid && auth.currentUser?.emailVerified));
         setNewlyCreatedUser(created);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Account creation failed.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSyncNewAccountToCloud = async () => {
+    if (!newlyCreatedUser) return;
+    setError('');
+    setSyncingCloud(true);
+    try {
+      const fbUser = await signInWithGooglePopup();
+      const ok = await syncAcashUserToCloud(newlyCreatedUser, fbUser.uid);
+      if (ok) {
+        setNewlyCreatedUser({ ...newlyCreatedUser, firebaseUid: fbUser.uid });
+        setCloudSynced(true);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google verification cancelled or failed.');
+    } finally {
+      setSyncingCloud(false);
     }
   };
 
@@ -380,6 +402,46 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               </div>
             </div>
           </div>
+
+          {cloudSynced ? (
+            <div className="rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 px-3.5 py-2.5 text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+              {lang === 'bn'
+                ? 'ক্লাউড ডাটাবেসে সেভ হয়েছে — এখন সব পোর্টালে (Admin, Agent, Merchant, User) খুঁজে পাওয়া যাবে।'
+                : 'Synced to Acash Cloud — discoverable across all portals & devices.'}
+            </div>
+          ) : (
+            <div className="rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/35 p-3.5 text-left space-y-2.5">
+              <div className="text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
+                {lang === 'bn'
+                  ? 'সব পোর্টালে (Admin, Agent, Merchant ও অন্য ডিভাইস) এই অ্যাকাউন্টটি খুঁজে পেতে নিচের বাটনে ক্লিক করে গুগল ভেরিফিকেশন যুক্ত করুন।'
+                  : 'To make this account searchable across all portals (Admin, Agent, Merchant & other devices), verify with Google once.'}
+              </div>
+              <button
+                type="button"
+                disabled={syncingCloud}
+                onClick={handleSyncNewAccountToCloud}
+                className="w-full py-2.5 px-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+              >
+                {syncingCloud ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {lang === 'bn'
+                    ? 'গুগল ভেরিফাই করে ক্লাউডে সেভ করুন'
+                    : 'Verify Google & Sync Across Portals'}
+                </span>
+              </button>
+            </div>
+          )}
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
+              {error}
+            </div>
+          )}
+
           <button
             type="button"
             onClick={() => onAuthenticated(newlyCreatedUser)}

@@ -490,12 +490,62 @@
         }
       },
       "required": ["adminId", "name", "email", "phone", "status", "createdAt", "updatedAt"]
+    },
+    "AcashDirectoryEntry": {
+      "title": "AcashDirectoryEntry",
+      "description": "Public non-PII account routing entry for cross-portal recipient lookup by Acash ID or mobile number.",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "pattern": "^[UAM]-\\d{6}$",
+          "maxLength": 12
+        },
+        "firebaseUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "enum": ["U", "A", "M"]
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "businessName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "disabled"]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["accountId", "role", "name", "phone", "status", "verified", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/acash_users/{accountId}": {
       "schema": { "$ref": "#/entities/AcashUser" },
       "description": "Registered Acash Customer, Agent, and Merchant accounts."
+    },
+    "/acash_directory/{accountId}": {
+      "schema": { "$ref": "#/entities/AcashDirectoryEntry" },
+      "description": "Public non-PII recipient lookup directory for resolving Acash IDs and phone numbers across portals."
     },
     "/acash_transactions/{txId}": {
       "schema": { "$ref": "#/entities/AcashTransaction" },
