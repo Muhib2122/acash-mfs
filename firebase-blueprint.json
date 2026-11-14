@@ -197,6 +197,9 @@
           "type": "string",
           "maxLength": 300
         },
+        "giftCard": {
+          "type": "object"
+        },
         "settledOnce": {
           "type": "boolean"
         },
@@ -334,7 +337,7 @@
         },
         "actionType": {
           "type": "string",
-          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "account_delete", "aml_decision", "alert_settings", "security_update"]
+          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "account_delete", "aml_decision", "alert_settings", "security_update", "account_alert", "kyc_decision"]
         },
         "title": {
           "type": "string",

@@ -19,17 +19,20 @@ import {
   Volume2,
   VolumeX,
   Bell,
+  Gift,
 } from 'lucide-react';
 import {
   AcashTransaction,
   AcashUser,
   BillerId,
   FeeConfig,
+  GiftCardPayload,
   Language,
   OperatorId,
 } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
 import { calculateFeeBreakdown, executeFinancialTransaction } from '../../lib/acashService';
+import { formatGiftSignature, getGiftCardTemplate } from '../../lib/giftCards';
 import { downloadAccountStatementPdf } from '../../lib/pdfGenerator';
 import { getVoiceMuted, playTransactionVoiceAlert, setVoiceMuted } from '../../lib/soundbox';
 import { TapAndHoldButton } from '../common/TapAndHoldButton';
@@ -37,6 +40,12 @@ import { OperatorLogo, OPERATORS, detectOperatorFromPhone } from '../common/Oper
 import { QrModal } from '../common/QrModal';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { Wallet3DCard } from '../common/Wallet3DCard';
+import {
+  GiftCardDraftState,
+  GiftCardFlightOverlay,
+  GiftCardReceiverOverlay,
+  GiftCardSelectorStrip,
+} from '../common/GiftCardExperience';
 
 interface CustomerPanelProps {
   user: AcashUser;
@@ -104,6 +113,15 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [qrMode, setQrMode] = useState<'show' | 'scan' | null>(null);
   const [selectedReceipt, setSelectedReceipt] = useState<AcashTransaction | null>(null);
   const [searchTx, setSearchTx] = useState('');
+  const [giftDraft, setGiftDraft] = useState<GiftCardDraftState>(() => ({
+    enabled: false,
+    cardId: 'eid_mubarak',
+    customMessage: '',
+    signaturePrefix: lang === 'bn' ? 'bn' : 'en',
+    senderDisplayName: user.name,
+  }));
+  const [flightTx, setFlightTx] = useState<AcashTransaction | null>(null);
+  const [viewedGiftTx, setViewedGiftTx] = useState<AcashTransaction | null>(null);
   const [voiceMuted, setVoiceMutedState] = useState<boolean>(getVoiceMuted);
   const [voiceBanner, setVoiceBanner] = useState<{
     amount: number;
@@ -191,9 +209,13 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   };
 
   const numericAmount = Number(amount) || 0;
+  const hasGiftCardActive = activeService === 'send_money' && giftDraft.enabled;
   const { fee, breakdown } = useMemo(
-    () => calculateFeeBreakdown(activeService, numericAmount, feeConfig),
-    [activeService, numericAmount, feeConfig]
+    () =>
+      calculateFeeBreakdown(activeService, numericAmount, feeConfig, {
+        hasGiftCard: hasGiftCardActive,
+      }),
+    [activeService, numericAmount, feeConfig, hasGiftCardActive]
   );
   const totalDebit = Number((numericAmount + fee).toFixed(2));
   const isHighValue = numericAmount >= feeConfig.highValueThreshold;
@@ -204,6 +226,13 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     setPin('');
     setError('');
     setCompletedTx(null);
+    setGiftDraft((prev) => ({
+      ...prev,
+      enabled: false,
+      customMessage: '',
+      signaturePrefix: lang === 'bn' ? 'bn' : 'en',
+      senderDisplayName: user.name,
+    }));
   };
 
   const handleProceedToConfirm = (e: React.FormEvent) => {
@@ -257,6 +286,23 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
 
     setSubmitting(true);
     try {
+      let giftCardPayload: GiftCardPayload | undefined;
+      if (activeService === 'send_money' && giftDraft.enabled) {
+        const tpl = getGiftCardTemplate(giftDraft.cardId);
+        const rawMsg = giftDraft.customMessage.trim();
+        const defaultMsg = lang === 'bn' ? tpl.defaultMessageBn : tpl.defaultMessageEn;
+        giftCardPayload = {
+          cardId: tpl.id,
+          cardTitleBn: tpl.titleBn,
+          cardTitleEn: tpl.titleEn,
+          themeCategory: tpl.themeCategory,
+          message: rawMsg || defaultMsg,
+          signaturePrefix: giftDraft.signaturePrefix,
+          senderDisplayName: (giftDraft.senderDisplayName.trim() || user.name).slice(0, 60),
+          isCustomEdited: Boolean(rawMsg),
+        };
+      }
+
       const tx = await executeFinancialTransaction({
         type: activeService,
         senderId: user.accountId,
@@ -271,6 +317,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         billAccountNumber: activeService === 'bill_pay' ? billAccount : undefined,
         billMonth: activeService === 'bill_pay' ? billMonth : undefined,
         note,
+        giftCard: giftCardPayload,
       });
 
       setCompletedTx(tx);
@@ -278,6 +325,9 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       setAmount('');
       setNote('');
       setPin('');
+      if (tx.giftCard) {
+        setFlightTx(tx);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Transaction failed.');
     } finally {
@@ -755,6 +805,15 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 </div>
               </div>
 
+              {activeService === 'send_money' && (
+                <GiftCardSelectorStrip
+                  lang={lang}
+                  senderKycName={user.name}
+                  draft={giftDraft}
+                  onChange={setGiftDraft}
+                />
+              )}
+
               {/* Quick Amount Chips for Recharge/Transfers */}
               <div className="flex flex-wrap gap-2">
                 {[100, 500, 1000, 5000, 55000].map((preset) => (
@@ -780,9 +839,13 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                       {fee > 0 && (
                         <span className="ml-1.5 text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
                           (
-                          {breakdown.chargeMode === 'flat'
-                            ? `Flat ৳${breakdown.ratePer1000}`
-                            : `৳${breakdown.ratePer1000}/1k`}
+                          {hasGiftCardActive
+                            ? lang === 'bn'
+                              ? 'গিফট কার্ড ফ্ল্যাট ৳২ · শুধুমাত্র প্রেরকের'
+                              : 'Gift Card Flat ৳2 · Sender Only'
+                            : breakdown.chargeMode === 'flat'
+                              ? `Flat ৳${breakdown.ratePer1000}`
+                              : `৳${breakdown.ratePer1000}/1k`}
                           )
                         </span>
                       )}
@@ -872,6 +935,30 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     {formatBdt(totalDebit, lang)}
                   </span>
                 </div>
+                {hasGiftCardActive && (
+                  <div className="pt-2.5 border-t border-rose-200/70 dark:border-rose-500/20 space-y-1">
+                    <div className="flex items-center justify-between text-rose-700 dark:text-rose-300 font-semibold">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Gift className="w-3.5 h-3.5" />
+                        <span>{getGiftCardTemplate(giftDraft.cardId).titleBn}</span>
+                      </span>
+                      <span>
+                        {formatGiftSignature(
+                          giftDraft.signaturePrefix,
+                          giftDraft.senderDisplayName.trim() || user.name
+                        )}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300 line-clamp-2">
+                      “
+                      {giftDraft.customMessage.trim() ||
+                        (lang === 'bn'
+                          ? getGiftCardTemplate(giftDraft.cardId).defaultMessageBn
+                          : getGiftCardTemplate(giftDraft.cardId).defaultMessageEn)}
+                      ”
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -934,7 +1021,17 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   {t('txHash', lang)}: {completedTx.txHash}
                 </p>
               </div>
-              <div className="flex justify-center gap-3 pt-2">
+              <div className="flex flex-wrap justify-center gap-3 pt-2">
+                {completedTx.giftCard && (
+                  <button
+                    type="button"
+                    onClick={() => setViewedGiftTx(completedTx)}
+                    className="px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-xs font-semibold text-rose-700 dark:text-rose-200 hover:bg-rose-100 inline-flex items-center gap-1.5"
+                  >
+                    <Gift className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'গিফট কার্ড দেখুন' : 'View Gift Card'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSelectedReceipt(completedTx)}
@@ -1009,8 +1106,14 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                       </div>
                     )}
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {isIncoming ? tx.senderName : tx.receiverName}
+                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate flex items-center gap-2">
+                        <span className="truncate">{isIncoming ? tx.senderName : tx.receiverName}</span>
+                        {tx.giftCard && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[10px] font-bold text-rose-700 dark:text-rose-300 shrink-0">
+                            <Gift className="w-3 h-3" />
+                            <span>{tx.giftCard.cardTitleBn}</span>
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span>{tx.type.replace(/_/g, ' ').toUpperCase()}</span>
@@ -1090,6 +1193,37 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
           currentAccountId={user.accountId}
           lang={lang}
           onClose={() => setSelectedReceipt(null)}
+          onOpenGiftCard={(giftTx) => {
+            setSelectedReceipt(null);
+            setViewedGiftTx(giftTx);
+          }}
+        />
+      )}
+
+      {flightTx && flightTx.giftCard && (
+        <GiftCardFlightOverlay
+          open={true}
+          cardTitleBn={flightTx.giftCard.cardTitleBn}
+          cardTitleEn={flightTx.giftCard.cardTitleEn}
+          themeCategory={flightTx.giftCard.themeCategory}
+          receiverName={flightTx.receiverName}
+          amount={flightTx.amount}
+          lang={lang}
+          onComplete={() => setFlightTx(null)}
+        />
+      )}
+
+      {viewedGiftTx && viewedGiftTx.giftCard && (
+        <GiftCardReceiverOverlay
+          tx={viewedGiftTx}
+          lang={lang}
+          initialOpened
+          onOpened={() => {}}
+          onSkip={() => setViewedGiftTx(null)}
+          onViewReceipt={(receiptTx) => {
+            setViewedGiftTx(null);
+            setSelectedReceipt(receiptTx);
+          }}
         />
       )}
     </div>

@@ -23,6 +23,7 @@ import {
   isAccountNotificationRead,
   markAccountNotificationRead,
   markAllAccountNotificationsRead,
+  markGiftCardState,
   subscribeToAccountNotifications,
   subscribeToAdminActivityLogs,
   subscribeToAdminNotifications,
@@ -64,6 +65,7 @@ import {
 } from './components/common/AccountNotificationCenter';
 import { MobileBottomNav } from './components/common/MobileBottomNav';
 import { TransactionReceiptModal } from './components/common/TransactionReceiptModal';
+import { GiftCardReceiverOverlay } from './components/common/GiftCardExperience';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 import { initSoundboxAudioUnlock } from './lib/soundbox';
 
@@ -200,6 +202,12 @@ export default function App() {
   const [liveToasts, setLiveToasts] = useState<LiveToastItem[]>([]);
   const [notifModalOpen, setNotifModalOpen] = useState(false);
   const [notifReceiptTx, setNotifReceiptTx] = useState<AcashTransaction | null>(null);
+  const [activeGiftOverlayTx, setActiveGiftOverlayTx] = useState<{
+    tx: AcashTransaction;
+    initialOpened: boolean;
+  } | null>(null);
+  const [dismissedGiftIds, setDismissedGiftIds] = useState<Set<string>>(() => new Set());
+  const openedGiftIdsRef = useRef<Set<string>>(new Set());
   const [qrTriggerCount, setQrTriggerCount] = useState(0);
   const seenNotifsRef = useRef<Set<string> | null>(null);
   const isOnline = useOnlineStatus();
@@ -348,6 +356,29 @@ export default function App() {
       .length;
   }, [accountNotifications, currentUser]);
 
+  // Automatic full-screen festival celebration for incoming unopened Gift Cards
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== 'U') {
+      setActiveGiftOverlayTx(null);
+      return;
+    }
+    if (activeGiftOverlayTx) return;
+    const nextUnopened = userTransactions.find(
+      (tx) =>
+        tx.type === 'send_money' &&
+        tx.status === 'completed' &&
+        tx.receiverId === currentUser.accountId &&
+        Boolean(tx.giftCard) &&
+        !tx.giftCard?.openedAt &&
+        !tx.giftCard?.skippedAt &&
+        !dismissedGiftIds.has(tx.txId) &&
+        !openedGiftIdsRef.current.has(tx.txId)
+    );
+    if (nextUnopened) {
+      setActiveGiftOverlayTx({ tx: nextUnopened, initialOpened: false });
+    }
+  }, [currentUser, userTransactions, dismissedGiftIds, activeGiftOverlayTx]);
+
   // Real-time subscriptions for Separate Admin App
   useEffect(() => {
     if (appMode !== 'admin' || !adminSession) return;
@@ -416,6 +447,9 @@ export default function App() {
     }
     void signOutFirebase();
     setProfileOpen(false);
+    setActiveGiftOverlayTx(null);
+    setDismissedGiftIds(new Set());
+    openedGiftIdsRef.current = new Set();
     setUserSession(null);
     setCurrentUser(null);
   };
@@ -732,6 +766,47 @@ export default function App() {
           currentAccountId={currentUser.accountId}
           lang={lang}
           onClose={() => setNotifReceiptTx(null)}
+          onOpenGiftCard={(giftTx) => {
+            setNotifReceiptTx(null);
+            setActiveGiftOverlayTx({ tx: giftTx, initialOpened: true });
+          }}
+        />
+      )}
+
+      {currentUser && activeGiftOverlayTx && activeGiftOverlayTx.tx.giftCard && (
+        <GiftCardReceiverOverlay
+          key={activeGiftOverlayTx.tx.txId}
+          tx={activeGiftOverlayTx.tx}
+          lang={lang}
+          initialOpened={activeGiftOverlayTx.initialOpened}
+          onOpened={(txId) => {
+            openedGiftIdsRef.current.add(txId);
+            void markGiftCardState(txId, 'opened');
+          }}
+          onSkip={(txId) => {
+            const alreadyOpened =
+              activeGiftOverlayTx.initialOpened ||
+              openedGiftIdsRef.current.has(txId) ||
+              Boolean(activeGiftOverlayTx.tx.giftCard?.openedAt);
+            setDismissedGiftIds((prev) => {
+              const next = new Set(prev);
+              next.add(txId);
+              return next;
+            });
+            setActiveGiftOverlayTx(null);
+            if (!alreadyOpened) {
+              void markGiftCardState(txId, 'skipped');
+            }
+          }}
+          onViewReceipt={(receiptTx) => {
+            setDismissedGiftIds((prev) => {
+              const next = new Set(prev);
+              next.add(receiptTx.txId);
+              return next;
+            });
+            setActiveGiftOverlayTx(null);
+            setNotifReceiptTx(receiptTx);
+          }}
         />
       )}
 

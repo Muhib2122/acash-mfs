@@ -48,6 +48,7 @@ import {
   CreatorMapRole,
   FeeBreakdown,
   FeeConfig,
+  GiftCardPayload,
   IdentityLockType,
   KycInfo,
   KycSubmissionRecord,
@@ -62,6 +63,7 @@ import {
   UserMapLocation,
   UserRole,
 } from '../types/acash';
+import { countWords, GIFT_CARD_FEE_BDT, GIFT_CARD_MAX_WORDS } from './giftCards';
 
 const USERS_COL = 'acash_users';
 const KYC_SUBMISSIONS_COL = 'acash_kyc_submissions';
@@ -552,9 +554,9 @@ function normalizeAccountIdInput(input: string): string {
   return clean;
 }
 
-function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+function stripUndefined<T extends object>(obj: T): T {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
     if (v !== undefined) {
       out[k] = v;
     }
@@ -1165,7 +1167,7 @@ export function calculateFeeBreakdown(
   type: TransactionType,
   amount: number,
   feeConfig: FeeConfig,
-  options?: { targetIsAdmin?: boolean }
+  options?: { targetIsAdmin?: boolean; hasGiftCard?: boolean }
 ): { fee: number; breakdown: FeeBreakdown } {
   const safeAmount = Math.max(0, Number(amount) || 0);
   const cfg = normalizeFeeConfig(feeConfig);
@@ -1309,6 +1311,26 @@ export function calculateFeeBreakdown(
   }
 
   if (type === 'send_money') {
+    if (options?.hasGiftCard) {
+      const giftFee = safeAmount > 0 ? GIFT_CARD_FEE_BDT : 0;
+      const govtAmount = giftFee > 0 ? 0.3 : 0;
+      const adminAmount = Number((giftFee - govtAmount).toFixed(2));
+      return {
+        fee: giftFee,
+        breakdown: {
+          ratePer1000: GIFT_CARD_FEE_BDT,
+          chargeMode: 'flat',
+          agentShareRate: 0,
+          govtShareRate: govtAmount,
+          adminShareRate: adminAmount,
+          agentAmount: 0,
+          govtAmount,
+          adminAmount,
+          lockedAt: now,
+        },
+      };
+    }
+
     const totalRate = cfg.sendMoneyFeeRate;
     const totalShareSum = cfg.sendMoneyGovtShare + cfg.sendMoneyAdminShare;
     const withinFreeThreshold =
@@ -3186,6 +3208,7 @@ export async function executeFinancialTransaction(params: {
   billAccountNumber?: string;
   billMonth?: string;
   note?: string;
+  giftCard?: GiftCardPayload;
 }): Promise<AcashTransaction> {
   const amount = Number(params.amount);
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -3277,6 +3300,15 @@ export async function executeFinancialTransaction(params: {
     throw new Error('Only Merchant (M-) accounts can perform Merchant Cash-Out.');
   }
 
+  if (params.giftCard) {
+    if (params.type !== 'send_money' || senderLocal.role !== 'U' || receiverUser?.role !== 'U') {
+      throw new Error('Gift Cards can only be sent on Customer-to-Customer (U- to U-) Send Money.');
+    }
+    if (countWords(params.giftCard.message || '') > GIFT_CARD_MAX_WORDS) {
+      throw new Error(`Gift card letter cannot exceed ${GIFT_CARD_MAX_WORDS} words.`);
+    }
+  }
+
   const effectiveFeeConfig = normalizeFeeConfig(
     store.feeConfig && store.feeConfig.updatedAt >= (params.feeConfig?.updatedAt || 0)
       ? store.feeConfig
@@ -3285,6 +3317,7 @@ export async function executeFinancialTransaction(params: {
 
   const { fee, breakdown } = calculateFeeBreakdown(params.type, amount, effectiveFeeConfig, {
     targetIsAdmin: isAdminTarget,
+    hasGiftCard: Boolean(params.giftCard),
   });
   const totalDebited = Number((amount + fee).toFixed(2));
   const requiresAdminApproval = amount >= effectiveFeeConfig.highValueThreshold;
@@ -3356,6 +3389,7 @@ export async function executeFinancialTransaction(params: {
     ...(params.billAccountNumber ? { billAccountNumber: params.billAccountNumber } : {}),
     ...(params.billMonth ? { billMonth: params.billMonth } : {}),
     ...(params.note?.trim() ? { note: params.note.trim() } : {}),
+    ...(params.giftCard ? { giftCard: stripUndefined(params.giftCard) } : {}),
     createdAt: now,
   };
 
@@ -3568,12 +3602,17 @@ export async function executeFinancialTransaction(params: {
       })
     );
     if (committedReceiver) {
+      const hasGift = Boolean(committedTxRecord.giftCard);
       accountNotifs.push(
         buildAccountNotification({
           recipientId: (committedReceiver as AcashUser).accountId,
           recipientRole: (committedReceiver as AcashUser).role,
-          title: `Money Received · +৳${creditToReceiver.toLocaleString()}`,
-          message: `Received ৳${amount.toLocaleString()}${receiverCommInc > 0 ? ` (+৳${receiverCommInc.toFixed(2)} comm)` : ''} from ${committedTxRecord.senderName} (${committedTxRecord.senderId}) · ${txHash}`,
+          title: hasGift
+            ? `🎁 ${committedTxRecord.giftCard?.cardTitleBn || 'Gift Card'} · +৳${creditToReceiver.toLocaleString()}`
+            : `Money Received · +৳${creditToReceiver.toLocaleString()}`,
+          message: hasGift
+            ? `${committedTxRecord.senderName} (${committedTxRecord.senderId}) sent you ৳${amount.toLocaleString()} with a "${committedTxRecord.giftCard?.cardTitleEn}" Gift Card! Tap to open.`
+            : `Received ৳${amount.toLocaleString()}${receiverCommInc > 0 ? ` (+৳${receiverCommInc.toFixed(2)} comm)` : ''} from ${committedTxRecord.senderName} (${committedTxRecord.senderId}) · ${txHash}`,
           category: 'transaction',
           severity: 'success',
           amount: creditToReceiver,
@@ -5257,6 +5296,160 @@ export async function adminDeleteUser(
     adminEmail,
     reason,
   });
+}
+
+export async function markGiftCardState(
+  txId: string,
+  action: 'opened' | 'skipped'
+): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  const existingTx = store.transactions[txId];
+  let updatedGiftCard: GiftCardPayload | undefined;
+
+  if (existingTx?.giftCard) {
+    updatedGiftCard = {
+      ...existingTx.giftCard,
+      ...(action === 'opened' ? { openedAt: now } : { skippedAt: now }),
+    };
+    store.transactions[txId] = {
+      ...existingTx,
+      giftCard: updatedGiftCard,
+    };
+    writeLocalStore(store, true);
+  }
+
+  try {
+    const txRef = doc(db, TX_COL, txId);
+    const snap = await getDoc(txRef);
+    if (snap.exists()) {
+      const remoteTx = snap.data() as AcashTransaction;
+      if (remoteTx.giftCard) {
+        const mergedCard: GiftCardPayload = {
+          ...remoteTx.giftCard,
+          ...(action === 'opened' ? { openedAt: remoteTx.giftCard.openedAt || now } : {}),
+          ...(action === 'skipped' ? { skippedAt: now } : {}),
+        };
+        await updateDoc(txRef, { giftCard: stripUndefined(mergedCard) });
+        const latest = readLocalStore();
+        latest.transactions[txId] = { ...remoteTx, giftCard: mergedCard };
+        writeLocalStore(latest, true);
+      }
+    }
+  } catch (err) {
+    console.warn('Could not sync gift card state to cloud:', err);
+  }
+}
+
+export async function adminReviewKycSubmission(params: {
+  accountId: string;
+  decision: 'verified' | 'unverified';
+  reason?: string;
+  adminEmail: string;
+}): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  const localUser = store.users[params.accountId];
+  let targetUser: AcashUser | null = localUser || null;
+
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      targetUser = snap.data() as AcashUser;
+    }
+  } catch {
+    // use local fallback
+  }
+
+  if (!targetUser) {
+    throw new Error('Account not found.');
+  }
+
+  const baseKyc: KycInfo = targetUser.kyc || {
+    nidNumber: '',
+    dateOfBirth: '',
+    address: '',
+    occupation: '',
+    nomineeName: '',
+    nomineePhone: '',
+    status: 'unverified',
+    updatedAt: now,
+  };
+  const nextKyc: KycInfo = {
+    ...baseKyc,
+    status: params.decision,
+    updatedAt: now,
+  };
+  const updatedUser: AcashUser = {
+    ...targetUser,
+    kyc: nextKyc,
+    verified: params.decision === 'verified',
+    lastActiveAt: now,
+  };
+
+  store.users[params.accountId] = updatedUser;
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-KYC',
+    actionType: 'kyc_decision',
+    title:
+      params.decision === 'verified'
+        ? `KYC Verified · ${params.accountId}`
+        : `KYC Resubmission Requested · ${params.accountId}`,
+    details:
+      params.decision === 'verified'
+        ? `Verified identity KYC for ${updatedUser.businessName || updatedUser.name} (${params.accountId}).`
+        : `Reset KYC status to unverified for ${updatedUser.businessName || updatedUser.name} (${params.accountId}). Reason: ${params.reason?.trim() || 'Incomplete or unclear document'}`,
+    actorEmail: params.adminEmail,
+    targetIds: [params.accountId],
+    timestamp: now,
+  });
+  store.activityLogs[actEntry.id] = actEntry;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      updateDoc(doc(db, USERS_COL, params.accountId), {
+        kyc: stripUndefined(nextKyc),
+        verified: params.decision === 'verified',
+        lastActiveAt: now,
+      }),
+      setDoc(
+        doc(db, DIRECTORY_COL, params.accountId),
+        toDirectoryEntry(updatedUser),
+        { merge: true }
+      ).catch(() => {}),
+      setDoc(
+        doc(db, KYC_SUBMISSIONS_COL, params.accountId),
+        {
+          accountId: params.accountId,
+          kyc: stripUndefined(nextKyc),
+          updatedAt: now,
+        },
+        { merge: true }
+      ).catch(() => {}),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+  } catch (err) {
+    console.warn('KYC review cloud sync warning:', err);
+  }
+
+  const userNotif = buildAccountNotification({
+    recipientId: params.accountId,
+    recipientRole: updatedUser.role,
+    title:
+      params.decision === 'verified'
+        ? '✅ KYC Verification Approved'
+        : '⚠️ KYC Resubmission Required',
+    message:
+      params.decision === 'verified'
+        ? 'Your Acash identity KYC & dossier have been verified by Compliance Admin.'
+        : `Please update and re-submit your KYC documents. Reason: ${params.reason?.trim() || 'Document review required'}`,
+    category: 'kyc',
+    severity: params.decision === 'verified' ? 'success' : 'warning',
+    createdBy: params.adminEmail,
+    createdAt: now,
+  });
+  await persistAccountNotifications([userNotif]);
 }
 
 export async function adminResetAllAccountsAndTransactions(params: {

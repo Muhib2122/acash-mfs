@@ -46,7 +46,18 @@ service cloud.firestore {
         && data.totalDebited is number && data.totalDebited >= 0
         && data.status in ['completed', 'pending_admin_approval', 'rejected', 'refunded', 'partially_refunded']
         && data.refundedAmount is number && data.refundedAmount >= 0
-        && data.createdAt is number;
+        && data.createdAt is number
+        && (!('giftCard' in data) || (
+          data.giftCard is map
+          && data.giftCard.cardId is string && data.giftCard.cardId.size() > 0 && data.giftCard.cardId.size() <= 64
+          && data.giftCard.cardTitleBn is string && data.giftCard.cardTitleBn.size() <= 120
+          && data.giftCard.cardTitleEn is string && data.giftCard.cardTitleEn.size() <= 120
+          && data.giftCard.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration']
+          && data.giftCard.message is string && data.giftCard.message.size() <= 1000
+          && data.giftCard.signaturePrefix in ['bn', 'en']
+          && data.giftCard.senderDisplayName is string && data.giftCard.senderDisplayName.size() <= 140
+          && data.giftCard.isCustomEdited is bool
+        ));
     }
 
     function canReadPortalRecord() {

@@ -203,7 +203,8 @@ export type AdminActivityType =
   | 'aml_decision'
   | 'alert_settings'
   | 'security_update'
-  | 'account_alert';
+  | 'account_alert'
+  | 'kyc_decision';
 
 export interface AdminActivityLog {
   id: string;
@@ -214,6 +215,27 @@ export interface AdminActivityLog {
   targetIds?: string[];
   amount?: number;
   timestamp: number;
+}
+
+export type GiftCardThemeCategory =
+  | 'eid'
+  | 'boishakh'
+  | 'heritage'
+  | 'love'
+  | 'wishes'
+  | 'celebration';
+
+export interface GiftCardPayload {
+  cardId: string;
+  cardTitleBn: string;
+  cardTitleEn: string;
+  themeCategory: GiftCardThemeCategory;
+  message: string;
+  signaturePrefix: 'bn' | 'en';
+  senderDisplayName: string;
+  isCustomEdited: boolean;
+  openedAt?: number;
+  skippedAt?: number;
 }
 
 export interface AcashTransaction {
@@ -244,6 +266,7 @@ export interface AcashTransaction {
   billAccountNumber?: string;
   billMonth?: string;
   note?: string;
+  giftCard?: GiftCardPayload;
   createdAt: number;
   approvedBy?: string;
   approvedAt?: number;

@@ -39,6 +39,9 @@ import {
   VolumeX,
   Eye,
   Megaphone,
+  Command,
+  Download,
+  Gift,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -116,6 +119,13 @@ import { TransactionVolumeChart } from './TransactionVolumeChart';
 import { BoothLocatorMap } from '../common/BoothLocatorMap';
 import { RealLocationPickerMap, RealLocationValue } from '../common/RealLocationPickerMap';
 import { AdminAccountViewModal } from './AdminAccountViewModal';
+import {
+  AdminCommandPaletteModal,
+  AdminKycReviewQueuePanel,
+  AdminOverviewIntelligence,
+  exportLedgerToCsv,
+  exportUsersToCsv,
+} from './AdminExecutiveWidgets';
 
 interface AdminAppProps {
   lang: Language;
@@ -144,6 +154,7 @@ type AdminSection =
   | 'users'
   | 'treasury'
   | 'approvals'
+  | 'kyc_queue'
   | 'fees'
   | 'ledger'
   | 'activity'
@@ -215,6 +226,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [roleFilter, setRoleFilter] = useState<'ALL' | UserRole>('ALL');
   const [selectedDossierId, setSelectedDossierId] = useState<string | null>(null);
   const [viewedAccountId, setViewedAccountId] = useState<string | null>(null);
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState('');
 
@@ -352,6 +364,21 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [ledgerDateTo, setLedgerDateTo] = useState('');
   const [ledgerMinAmount, setLedgerMinAmount] = useState('');
   const [ledgerMaxAmount, setLedgerMaxAmount] = useState('');
+  const [ledgerGiftOnly, setLedgerGiftOnly] = useState(false);
+
+  useEffect(() => {
+    if (!adminSession) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCmdPaletteOpen((prev) => !prev);
+      } else if (e.key === 'Escape') {
+        setCmdPaletteOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [adminSession]);
 
   // Google Admin Login & Booth Map Management state
   const [googleAdminBusy, setGoogleAdminBusy] = useState(false);
@@ -637,6 +664,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       govtPool,
       agentPool,
       pendingHighValue,
+      pendingKycCount: users.filter((u) => u.kyc?.status === 'submitted').length,
       activeUsersCount: users.filter((u) => u.status === 'active').length,
     };
   }, [users, transactions]);
@@ -752,6 +780,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setLedgerDateTo('');
     setLedgerMinAmount('');
     setLedgerMaxAmount('');
+    setLedgerGiftOnly(false);
   };
 
   const hasActiveLedgerFilters =
@@ -761,7 +790,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     ledgerDateFrom !== '' ||
     ledgerDateTo !== '' ||
     ledgerMinAmount.trim() !== '' ||
-    ledgerMaxAmount.trim() !== '';
+    ledgerMaxAmount.trim() !== '' ||
+    ledgerGiftOnly;
 
   const parsedLedgerBounds = useMemo(() => {
     const fromTs = ledgerDateFrom ? new Date(`${ledgerDateFrom}T00:00:00`).getTime() : null;
@@ -796,6 +826,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     return transactions.filter((tx) => {
       if (ledgerTypeFilter !== 'ALL' && tx.type !== ledgerTypeFilter) return false;
       if (ledgerStatusFilter !== 'ALL' && tx.status !== ledgerStatusFilter) return false;
+      if (ledgerGiftOnly && !tx.giftCard) return false;
       if (fromTs !== null && tx.createdAt < fromTs) return false;
       if (toTs !== null && tx.createdAt > toTs) return false;
       if (minAmt !== null && tx.amount < minAmt) return false;
@@ -808,10 +839,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         tx.senderName.toLowerCase().includes(q) ||
         tx.receiverId.toLowerCase().includes(q) ||
         tx.receiverName.toLowerCase().includes(q) ||
-        (tx.note || '').toLowerCase().includes(q)
+        (tx.note || '').toLowerCase().includes(q) ||
+        (tx.giftCard?.cardTitleBn || '').toLowerCase().includes(q) ||
+        (tx.giftCard?.cardTitleEn || '').toLowerCase().includes(q)
       );
     });
-  }, [transactions, ledgerSearch, ledgerTypeFilter, ledgerStatusFilter, parsedLedgerBounds]);
+  }, [transactions, ledgerSearch, ledgerTypeFilter, ledgerStatusFilter, ledgerGiftOnly, parsedLedgerBounds]);
 
   const ledgerAuditStats = useMemo(() => {
     const totalVolume = filteredLedgerTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
@@ -1794,6 +1827,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 icon: AlertOctagon,
               },
               {
+                id: 'kyc_queue',
+                label:
+                  lang === 'bn'
+                    ? `কেওয়াইসি কিউ (${metrics.pendingKycCount})`
+                    : `KYC Queue (${metrics.pendingKycCount})`,
+                icon: FileBadge2,
+              },
+              {
                 id: 'booths',
                 label:
                   lang === 'bn'
@@ -1901,6 +1942,19 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">{t('adminSubtitle', lang)}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCmdPaletteOpen(true)}
+              className="min-h-[38px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors"
+              title="Quick Command Search (Ctrl+K / Cmd+K)"
+            >
+              <Command className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span className="hidden md:inline">Quick Jump</span>
+              <kbd className="hidden sm:inline px-1.5 py-0.5 rounded bg-white dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-[10px] font-mono-tabular text-slate-500">
+                ⌘K
+              </kbd>
+            </button>
+
             {!isCurrentMainAdmin && (
               <button
                 type="button"
@@ -2442,10 +2496,22 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         : `৳${feeConfig.sendMoneyFeeRate.toFixed(2)} (>৳${feeConfig.sendMoneyFreeThreshold})`}
                     </span>
                   </div>
+                  </div>
                 </div>
               </div>
+
+              <AdminOverviewIntelligence
+                users={users}
+                transactions={transactions}
+                lang={lang}
+                theme={theme}
+                onInspectAccount={(accId) => setViewedAccountId(accId)}
+                onOpenLedgerGifts={() => {
+                  setLedgerGiftOnly(true);
+                  setSection('ledger');
+                }}
+              />
             </div>
-          </div>
           )}
 
           {/* SECTION: Credit Add & Admin Treasury Transfer */}
@@ -3162,6 +3228,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     </div>
                     <button
                       type="button"
+                      disabled={filteredUsers.length === 0}
+                      onClick={() => exportUsersToCsv(filteredUsers)}
+                      className="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-40"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export CSV</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => downloadUsersDirectoryPdf(users, adminSession.adminEmail)}
                       className="px-3 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors"
                     >
@@ -3546,6 +3621,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 </div>
               )}
             </div>
+          )}
+
+          {/* SECTION: Dedicated KYC Verification Queue */}
+          {section === 'kyc_queue' && (
+            <AdminKycReviewQueuePanel
+              users={users}
+              adminEmail={adminSession.adminEmail}
+              lang={lang}
+              onInspectAccount={(accId) => setViewedAccountId(accId)}
+              onFeedback={(msg) => setFeedbackMsg(msg)}
+            />
           )}
 
           {/* SECTION: Dynamic Fee Engine */}
@@ -4392,6 +4478,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     <button
                       type="button"
                       disabled={filteredLedgerTransactions.length === 0}
+                      onClick={() => exportLedgerToCsv(filteredLedgerTransactions)}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/35 text-xs font-semibold text-emerald-700 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-500/25 disabled:opacity-40 inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export CSV</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={filteredLedgerTransactions.length === 0}
                       onClick={() =>
                         downloadGlobalLedgerPdf(
                           filteredLedgerTransactions,
@@ -4476,6 +4571,18 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                         {lang === 'bn'
                           ? `${(feeConfig.highValueThreshold / 1000).toFixed(0)}K+ হাই-ভ্যালু`
                           : `${(feeConfig.highValueThreshold / 1000).toFixed(0)}K+ AML`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLedgerGiftOnly((prev) => !prev)}
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border inline-flex items-center gap-1 transition ${
+                          ledgerGiftOnly
+                            ? 'bg-rose-600 border-rose-600 text-white shadow-sm'
+                            : 'bg-white dark:bg-[#121622] border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300 hover:border-rose-400'
+                        }`}
+                      >
+                        <Gift className="w-3 h-3" />
+                        <span>{lang === 'bn' ? 'গিফট কার্ড' : 'Gift Cards'}</span>
                       </button>
                     </div>
 
@@ -4670,7 +4777,13 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               {new Date(tx.createdAt).toLocaleString()}
                             </td>
                             <td className="py-3 px-4 text-slate-700 dark:text-slate-200 whitespace-nowrap font-medium">
-                              {tx.type.replace(/_/g, ' ').toUpperCase()}
+                              <div>{tx.type.replace(/_/g, ' ').toUpperCase()}</div>
+                              {tx.giftCard && (
+                                <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-[10px] font-bold text-rose-700 dark:text-rose-300">
+                                  <Gift className="w-3 h-3" />
+                                  <span>{tx.giftCard.cardTitleBn}</span>
+                                </span>
+                              )}
                             </td>
                             <td className="py-3 px-4 text-slate-900 dark:text-white">
                               {tx.senderName}{' '}
@@ -4856,6 +4969,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       { id: 'bulk_status_change', label: 'Bulk Status' },
                       { id: 'status_change', label: 'Account Status' },
                       { id: 'aml_decision', label: 'AML Decisions' },
+                      { id: 'kyc_decision', label: 'KYC Reviews' },
                       { id: 'account_alert', label: 'Account Alerts' },
                       { id: 'alert_settings', label: 'Alert Settings' },
                     ] as const
@@ -6029,6 +6143,32 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           </div>
         </div>
       )}
+
+      {/* Ctrl+K / Cmd+K Quick Command Palette */}
+      <AdminCommandPaletteModal
+        open={cmdPaletteOpen}
+        onClose={() => setCmdPaletteOpen(false)}
+        users={users}
+        transactions={transactions}
+        sections={[
+          { id: 'overview', label: 'Platform Overview' },
+          { id: 'treasury', label: 'Credit Add & Transfer' },
+          { id: 'users', label: t('globalUsers', lang) },
+          { id: 'approvals', label: `${t('highValueQueue', lang)} (${metrics.pendingHighValue.length})` },
+          { id: 'kyc_queue', label: `KYC Queue (${metrics.pendingKycCount})` },
+          { id: 'booths', label: 'Live Map & Booths' },
+          { id: 'fees', label: t('feeEngine', lang) },
+          { id: 'ledger', label: t('globalLedger', lang) },
+          { id: 'activity', label: `Activity Log (${activityLogs.length})` },
+        ]}
+        lang={lang}
+        onNavigateSection={(secId) => setSection(secId as AdminSection)}
+        onInspectAccount={(accId) => setViewedAccountId(accId)}
+        onJumpToLedgerTx={(txHash) => {
+          setLedgerSearch(txHash);
+          setSection('ledger');
+        }}
+      />
     </div>
   );
 };

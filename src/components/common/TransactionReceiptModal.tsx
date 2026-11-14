@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { CheckCircle2, Clock, Copy, Check, XCircle, X } from 'lucide-react';
+import { CheckCircle2, Clock, Copy, Check, Gift, XCircle, X } from 'lucide-react';
 import { AcashTransaction, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
+import { formatGiftSignature } from '../../lib/giftCards';
 import { ACASH_MAIN_LOGO_SRC } from './BrandLogo';
 import { OperatorLogo } from './OperatorLogo';
 
@@ -10,6 +11,7 @@ interface TransactionReceiptModalProps {
   currentAccountId: string;
   lang: Language;
   onClose: () => void;
+  onOpenGiftCard?: (tx: AcashTransaction) => void;
 }
 
 export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = ({
@@ -17,6 +19,7 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
   currentAccountId,
   lang,
   onClose,
+  onOpenGiftCard,
 }) => {
   const [copiedHash, setCopiedHash] = useState(false);
   const isIncoming = tx.receiverId === currentAccountId;
@@ -57,8 +60,8 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
   const StatusIcon = statusConfig.icon;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-4 overflow-y-auto">
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2.5">
             <img
@@ -138,9 +141,13 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 {tx.fee > 0 && (
                   <span className="ml-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                     (
-                    {tx.feeBreakdown.chargeMode === 'flat'
-                      ? `Flat ৳${tx.feeBreakdown.ratePer1000}`
-                      : `৳${tx.feeBreakdown.ratePer1000}/1k`}
+                    {tx.giftCard
+                      ? lang === 'bn'
+                        ? 'গিফট কার্ড ফ্ল্যাট ৳২'
+                        : 'Gift Card Flat ৳2'
+                      : tx.feeBreakdown.chargeMode === 'flat'
+                        ? `Flat ৳${tx.feeBreakdown.ratePer1000}`
+                        : `৳${tx.feeBreakdown.ratePer1000}/1k`}
                     )
                   </span>
                 )}
@@ -161,6 +168,34 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
               </div>
             )}
           </div>
+
+          {tx.giftCard && (
+            <div className="rounded-2xl bg-gradient-to-br from-rose-50 via-amber-50/60 to-white dark:from-[#1b1423] dark:via-[#141724] dark:to-[#0B0D14] border border-rose-200 dark:border-rose-500/30 p-4 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold text-rose-700 dark:text-rose-300">
+                  <Gift className="w-4 h-4 shrink-0" />
+                  <span>
+                    {tx.giftCard.cardTitleBn} · {tx.giftCard.cardTitleEn}
+                  </span>
+                </div>
+                {onOpenGiftCard && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenGiftCard(tx)}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] font-semibold text-white transition-colors"
+                  >
+                    {lang === 'bn' ? 'কার্ড খুলুন' : 'Open Card'}
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-wrap">
+                “{tx.giftCard.message}”
+              </p>
+              <div className="text-right font-display text-xs font-bold text-rose-700 dark:text-rose-300">
+                {formatGiftSignature(tx.giftCard.signaturePrefix, tx.giftCard.senderDisplayName)}
+              </div>
+            </div>
+          )}
 
           <button
             type="button"
