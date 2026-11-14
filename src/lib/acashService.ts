@@ -3046,6 +3046,16 @@ export async function executeFinancialTransaction(params: {
 
   writeLocalStore(store, true);
 
+  // Guarantee Global Ledger write immediately
+  try {
+    await setDoc(doc(db, TX_COL, txId), txRecord, { merge: true });
+    if (txNotif) {
+      await setDoc(doc(db, ADMIN_NOTIF_COL, txNotif.id), txNotif, { merge: true });
+    }
+  } catch (err) {
+    console.warn('Direct Global Ledger write warning:', err);
+  }
+
   // Sync atomically to Firestore when accessible (ensuring receiver doc is created/updated robustly)
   const runFirestoreSync = async (includeReceiverUpdate: boolean) => {
     await runTransaction(db, async (transaction) => {
@@ -3560,6 +3570,14 @@ export async function adminCreditAccount(params: {
   store.activityLogs[creditActivity.id] = creditActivity;
 
   writeLocalStore(store, true);
+
+  try {
+    await setDoc(doc(db, TX_COL, txId), txRecord, { merge: true });
+    await setDoc(doc(db, ADMIN_NOTIF_COL, creditNotif.id), creditNotif, { merge: true });
+    await setDoc(doc(db, ADMIN_ACTIVITY_COL, creditActivity.id), creditActivity, { merge: true });
+  } catch (err) {
+    console.warn('Direct admin credit write warning:', err);
+  }
 
   try {
     await runTransaction(db, async (transaction) => {
