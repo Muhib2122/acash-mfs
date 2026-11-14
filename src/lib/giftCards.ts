@@ -8,10 +8,16 @@ import march7Img from '../assets/images/gift_march_7_1794669658911.jpg';
 import valobasaImg from '../assets/images/gift_valobasa_dibos_1794669659155.jpg';
 import bondhuImg from '../assets/images/gift_bondhu_dibos_1794669658853.jpg';
 import shuvecchaImg from '../assets/images/gift_shuveccha_1794669660076.jpg';
-import { CustomGiftCardRecord, GiftCardParticleType, GiftCardThemeCategory } from '../types/acash';
+import {
+  CustomGiftCardRecord,
+  GiftCardCatalogPolicy,
+  GiftCardParticleType,
+  GiftCardThemeCategory,
+} from '../types/acash';
 
 export const GIFT_CARD_FEE_BDT = 2;
 export const GIFT_CARD_MAX_WORDS = 50;
+export const USER_GIFT_CARD_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type { GiftCardParticleType };
 
@@ -31,6 +37,16 @@ export interface GiftCardTemplate {
   featured: boolean;
   isCustomUploaded?: boolean;
   active?: boolean;
+  frozen?: boolean;
+  featuredFirst?: boolean;
+  pinnedOrder?: number;
+  deleted?: boolean;
+  isUserSubmitted?: boolean;
+  submittedByAccountId?: string;
+  submittedByName?: string;
+  expiresAt?: number;
+  createdBy?: string;
+  createdAt?: number;
 }
 
 export const GIFT_CARDS: GiftCardTemplate[] = [
@@ -276,7 +292,30 @@ export const GIFT_CARDS: GiftCardTemplate[] = [
   },
 ];
 
-let syncedCustomGiftCards: GiftCardTemplate[] = [];
+let syncedCustomCardRecords: CustomGiftCardRecord[] = [];
+let syncedGiftCardPolicy: GiftCardCatalogPolicy = {
+  overrides: {},
+  updatedAt: 0,
+  updatedBy: '',
+};
+
+export function isGiftCardExpired(
+  card: { expiresAt?: number },
+  now = Date.now()
+): boolean {
+  return typeof card.expiresAt === 'number' && card.expiresAt > 0 && card.expiresAt <= now;
+}
+
+export function formatRemaining24h(expiresAt?: number, now = Date.now()): string {
+  if (!expiresAt) return 'Permanent';
+  const diff = expiresAt - now;
+  if (diff <= 0) return 'Expired';
+  const totalMins = Math.floor(diff / 60000);
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (hours <= 0) return `${mins}m left`;
+  return `${hours}h ${mins}m left`;
+}
 
 export function customRecordToTemplate(rec: CustomGiftCardRecord): GiftCardTemplate {
   return {
@@ -295,29 +334,187 @@ export function customRecordToTemplate(rec: CustomGiftCardRecord): GiftCardTempl
     featured: rec.featured,
     isCustomUploaded: true,
     active: rec.active,
+    frozen: Boolean(rec.frozen || rec.active === false),
+    featuredFirst: Boolean(rec.featuredFirst),
+    pinnedOrder: rec.pinnedOrder || 0,
+    isUserSubmitted: Boolean(rec.isUserSubmitted),
+    submittedByAccountId: rec.submittedByAccountId,
+    submittedByName: rec.submittedByName,
+    expiresAt: rec.expiresAt,
+    createdBy: rec.createdBy,
+    createdAt: rec.createdAt,
   };
 }
 
 export function syncCustomGiftCardsRegistry(records: CustomGiftCardRecord[]): void {
-  syncedCustomGiftCards = records
-    .filter((r) => r.active !== false)
-    .map(customRecordToTemplate);
+  syncedCustomCardRecords = records;
 }
 
-export function getAllGiftCardTemplates(extraRecords?: CustomGiftCardRecord[]): GiftCardTemplate[] {
-  const customList = extraRecords
-    ? extraRecords.filter((r) => r.active !== false).map(customRecordToTemplate)
-    : syncedCustomGiftCards;
-  // Custom uploaded cards appear first in the carousel so newly uploaded seasonal cards stand out
-  return [...customList, ...GIFT_CARDS];
+export function syncGiftCardPolicyRegistry(policy: GiftCardCatalogPolicy): void {
+  syncedGiftCardPolicy = policy || { overrides: {}, updatedAt: 0, updatedBy: '' };
+}
+
+export function getAllGiftCardTemplates(
+  extraRecords?: CustomGiftCardRecord[],
+  policy?: GiftCardCatalogPolicy,
+  viewerAccountId?: string
+): GiftCardTemplate[] {
+  const now = Date.now();
+  const records = extraRecords ?? syncedCustomCardRecords;
+  const activePolicy = policy ?? syncedGiftCardPolicy;
+  const overrides = activePolicy?.overrides || {};
+
+  const customList = records
+    .filter((r) => !isGiftCardExpired(r, now))
+    .map((r) => {
+      const ov = overrides[r.cardId];
+      const tpl = customRecordToTemplate(r);
+      return {
+        ...tpl,
+        frozen: Boolean(tpl.frozen || ov?.frozen || r.active === false),
+        deleted: Boolean(ov?.deleted),
+        featuredFirst: Boolean(tpl.featuredFirst || ov?.featuredFirst),
+        pinnedOrder: Math.max(tpl.pinnedOrder || 0, ov?.pinnedOrder || 0),
+      };
+    })
+    .filter((t) => {
+      if (t.deleted || t.frozen || t.active === false) return false;
+      if (t.isUserSubmitted) {
+        return Boolean(viewerAccountId && t.submittedByAccountId === viewerAccountId);
+      }
+      return true;
+    });
+
+  const builtInList = GIFT_CARDS.map((card) => {
+    const ov = overrides[card.id];
+    return {
+      ...card,
+      frozen: Boolean(ov?.frozen),
+      deleted: Boolean(ov?.deleted),
+      featuredFirst: Boolean(ov?.featuredFirst),
+      pinnedOrder: ov?.pinnedOrder || 0,
+    };
+  }).filter((t) => !t.deleted && !t.frozen);
+
+  const combined = [...customList, ...builtInList];
+
+  return combined.sort((a, b) => {
+    const aPin = a.featuredFirst ? 1 : 0;
+    const bPin = b.featuredFirst ? 1 : 0;
+    if (aPin !== bPin) return bPin - aPin;
+    if (aPin === 1 && (b.pinnedOrder || 0) !== (a.pinnedOrder || 0)) {
+      return (b.pinnedOrder || 0) - (a.pinnedOrder || 0);
+    }
+    const aAdminCustom = a.isCustomUploaded && !a.isUserSubmitted ? 1 : 0;
+    const bAdminCustom = b.isCustomUploaded && !b.isUserSubmitted ? 1 : 0;
+    if (aAdminCustom !== bAdminCustom) return bAdminCustom - aAdminCustom;
+
+    const aUserCustom = a.isUserSubmitted ? 1 : 0;
+    const bUserCustom = b.isUserSubmitted ? 1 : 0;
+    if (aUserCustom !== bUserCustom) return bUserCustom - aUserCustom;
+
+    if (a.isCustomUploaded && b.isCustomUploaded) {
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    }
+    return 0;
+  });
+}
+
+export function getFullGovernanceCatalog(
+  extraRecords?: CustomGiftCardRecord[],
+  policy?: GiftCardCatalogPolicy
+): {
+  activeCatalog: GiftCardTemplate[];
+  userOthersCards: GiftCardTemplate[];
+  deletedBuiltInCards: GiftCardTemplate[];
+} {
+  const now = Date.now();
+  const records = extraRecords ?? syncedCustomCardRecords;
+  const activePolicy = policy ?? syncedGiftCardPolicy;
+  const overrides = activePolicy?.overrides || {};
+
+  const customTemplates = records
+    .filter((r) => !isGiftCardExpired(r, now))
+    .map((r) => {
+      const ov = overrides[r.cardId];
+      const tpl = customRecordToTemplate(r);
+      return {
+        ...tpl,
+        frozen: Boolean(tpl.frozen || ov?.frozen || r.active === false),
+        deleted: Boolean(ov?.deleted),
+        featuredFirst: Boolean(tpl.featuredFirst || ov?.featuredFirst),
+        pinnedOrder: Math.max(tpl.pinnedOrder || 0, ov?.pinnedOrder || 0),
+      };
+    })
+    .filter((t) => !t.deleted);
+
+  const userOthersCards = customTemplates
+    .filter((t) => t.isUserSubmitted)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  const adminCustomCards = customTemplates.filter((t) => !t.isUserSubmitted);
+
+  const allBuiltIns = GIFT_CARDS.map((card) => {
+    const ov = overrides[card.id];
+    return {
+      ...card,
+      frozen: Boolean(ov?.frozen),
+      deleted: Boolean(ov?.deleted),
+      featuredFirst: Boolean(ov?.featuredFirst),
+      pinnedOrder: ov?.pinnedOrder || 0,
+    };
+  });
+
+  const activeBuiltIns = allBuiltIns.filter((c) => !c.deleted);
+  const deletedBuiltInCards = allBuiltIns.filter((c) => c.deleted);
+
+  const activeCatalog = [...adminCustomCards, ...activeBuiltIns].sort((a, b) => {
+    const aPin = a.featuredFirst ? 1 : 0;
+    const bPin = b.featuredFirst ? 1 : 0;
+    if (aPin !== bPin) return bPin - aPin;
+    if (aPin === 1 && (b.pinnedOrder || 0) !== (a.pinnedOrder || 0)) {
+      return (b.pinnedOrder || 0) - (a.pinnedOrder || 0);
+    }
+    const aCustom = a.isCustomUploaded ? 1 : 0;
+    const bCustom = b.isCustomUploaded ? 1 : 0;
+    if (aCustom !== bCustom) return bCustom - aCustom;
+    if (a.isCustomUploaded && b.isCustomUploaded) {
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    }
+    return 0;
+  });
+
+  return {
+    activeCatalog,
+    userOthersCards,
+    deletedBuiltInCards,
+  };
 }
 
 export function getGiftCardTemplate(
   cardId?: string,
-  extraRecords?: CustomGiftCardRecord[]
+  extraRecords?: CustomGiftCardRecord[],
+  policy?: GiftCardCatalogPolicy
 ): GiftCardTemplate {
-  const catalog = getAllGiftCardTemplates(extraRecords);
-  return catalog.find((c) => c.id === cardId) || GIFT_CARDS[0];
+  const records = extraRecords ?? syncedCustomCardRecords;
+  const activePolicy = policy ?? syncedGiftCardPolicy;
+  const overrides = activePolicy?.overrides || {};
+
+  if (cardId) {
+    const customRec = records.find((r) => r.cardId === cardId);
+    if (customRec) return customRecordToTemplate(customRec);
+    const builtIn = GIFT_CARDS.find((c) => c.id === cardId);
+    if (builtIn) {
+      const ov = overrides[builtIn.id];
+      return {
+        ...builtIn,
+        frozen: Boolean(ov?.frozen),
+        featuredFirst: Boolean(ov?.featuredFirst),
+      };
+    }
+  }
+  const available = getAllGiftCardTemplates(records, activePolicy);
+  return available[0] || GIFT_CARDS[0];
 }
 
 export function countWords(text: string): number {

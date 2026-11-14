@@ -52,11 +52,12 @@ service cloud.firestore {
           && data.giftCard.cardId is string && data.giftCard.cardId.size() > 0 && data.giftCard.cardId.size() <= 64
           && data.giftCard.cardTitleBn is string && data.giftCard.cardTitleBn.size() <= 120
           && data.giftCard.cardTitleEn is string && data.giftCard.cardTitleEn.size() <= 120
-          && data.giftCard.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration']
+          && data.giftCard.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration', 'others']
           && data.giftCard.message is string && data.giftCard.message.size() <= 1000
           && data.giftCard.signaturePrefix in ['bn', 'en']
           && data.giftCard.senderDisplayName is string && data.giftCard.senderDisplayName.size() <= 140
           && data.giftCard.isCustomEdited is bool
+          && (!('customImageUrl' in data.giftCard) || (data.giftCard.customImageUrl is string && data.giftCard.customImageUrl.size() <= 450000))
         ));
     }
 
@@ -65,10 +66,15 @@ service cloud.firestore {
         && data.cardId == cardId
         && data.titleBn is string && data.titleBn.size() >= 1 && data.titleBn.size() <= 120
         && data.titleEn is string && data.titleEn.size() >= 1 && data.titleEn.size() <= 120
-        && data.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration']
+        && data.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration', 'others']
         && data.imageUrl is string && data.imageUrl.size() > 0 && data.imageUrl.size() <= 650000
         && data.featured is bool
         && data.active is bool
+        && (!('frozen' in data) || data.frozen is bool)
+        && (!('featuredFirst' in data) || data.featuredFirst is bool)
+        && (!('pinnedOrder' in data) || data.pinnedOrder is number)
+        && (!('isUserSubmitted' in data) || data.isUserSubmitted is bool)
+        && (!('expiresAt' in data) || data.expiresAt is number)
         && data.createdBy is string && data.createdBy.size() <= 160
         && data.createdAt is number
         && data.updatedAt is number;
@@ -150,7 +156,7 @@ service cloud.firestore {
       allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(creatorId)
         && incoming().creatorId == creatorId
-        && incoming().creatorRole in ['agent', 'merchant', 'second_admin']
+        && incoming().creatorRole in ['agent', 'merchant', 'admin', 'second_admin']
         && incoming().lat is number && incoming().lng is number;
       allow delete: if isValidId(creatorId);
     }
@@ -166,9 +172,9 @@ service cloud.firestore {
 
     match /acash_settings/{settingId} {
       allow get, list: if canReadPortalRecord();
-      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme']
+      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides']
         && incoming().updatedAt is number;
-      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme'];
+      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides'];
     }
 
     match /acash_gift_cards/{cardId} {

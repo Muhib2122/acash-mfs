@@ -27,6 +27,7 @@ import {
   BillerId,
   CustomGiftCardRecord,
   FeeConfig,
+  GiftCardCatalogPolicy,
   GiftCardPayload,
   Language,
   OperatorId,
@@ -61,6 +62,7 @@ interface CustomerPanelProps {
   unreadNotifications?: number;
   externalQrSignal?: number;
   customGiftCards?: CustomGiftCardRecord[];
+  giftCardPolicy?: GiftCardCatalogPolicy;
 }
 
 type ServiceTab = 'send_money' | 'cash_out' | 'mobile_recharge' | 'bill_pay' | 'merchant_payment';
@@ -86,6 +88,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   unreadNotifications = 0,
   externalQrSignal = 0,
   customGiftCards,
+  giftCardPolicy,
 }) => {
   const { preset } = usePortalTheme();
   const [showBalance, setShowBalance] = useState(false);
@@ -293,7 +296,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     try {
       let giftCardPayload: GiftCardPayload | undefined;
       if (activeService === 'send_money' && giftDraft.enabled) {
-        const tpl = getGiftCardTemplate(giftDraft.cardId);
+        const tpl = getGiftCardTemplate(giftDraft.cardId, customGiftCards, giftCardPolicy);
         const rawMsg = giftDraft.customMessage.trim();
         const defaultMsg = lang === 'bn' ? tpl.defaultMessageBn : tpl.defaultMessageEn;
         giftCardPayload = {
@@ -305,6 +308,13 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
           signaturePrefix: giftDraft.signaturePrefix,
           senderDisplayName: (giftDraft.senderDisplayName.trim() || user.name).slice(0, 60),
           isCustomEdited: Boolean(rawMsg),
+          ...(tpl.isCustomUploaded && tpl.imageUrl && tpl.imageUrl.length <= 420000
+            ? {
+                customImageUrl: tpl.imageUrl,
+                customGradientBg: tpl.gradientBg,
+                customAccentHex: tpl.accentHex,
+              }
+            : {}),
         };
       }
 
@@ -814,8 +824,10 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 <GiftCardSelectorStrip
                   lang={lang}
                   senderKycName={user.name}
+                  currentUserAccountId={user.accountId}
                   draft={giftDraft}
                   customCards={customGiftCards}
+                  giftCardPolicy={giftCardPolicy}
                   onChange={setGiftDraft}
                 />
               )}
@@ -941,30 +953,33 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     {formatBdt(totalDebit, lang)}
                   </span>
                 </div>
-                {hasGiftCardActive && (
-                  <div className="pt-2.5 border-t border-rose-200/70 dark:border-rose-500/20 space-y-1">
-                    <div className="flex items-center justify-between text-rose-700 dark:text-rose-300 font-semibold">
-                      <span className="inline-flex items-center gap-1.5">
-                        <Gift className="w-3.5 h-3.5" />
-                        <span>{getGiftCardTemplate(giftDraft.cardId).titleBn}</span>
-                      </span>
-                      <span>
-                        {formatGiftSignature(
-                          giftDraft.signaturePrefix,
-                          giftDraft.senderDisplayName.trim() || user.name
-                        )}
-                      </span>
+                {hasGiftCardActive && (() => {
+                  const confirmTpl = getGiftCardTemplate(giftDraft.cardId, customGiftCards, giftCardPolicy);
+                  return (
+                    <div className="pt-2.5 border-t border-rose-200/70 dark:border-rose-500/20 space-y-1">
+                      <div className="flex items-center justify-between text-rose-700 dark:text-rose-300 font-semibold">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Gift className="w-3.5 h-3.5" />
+                          <span>{confirmTpl.titleBn}</span>
+                        </span>
+                        <span>
+                          {formatGiftSignature(
+                            giftDraft.signaturePrefix,
+                            giftDraft.senderDisplayName.trim() || user.name
+                          )}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-300 line-clamp-2">
+                        “
+                        {giftDraft.customMessage.trim() ||
+                          (lang === 'bn'
+                            ? confirmTpl.defaultMessageBn
+                            : confirmTpl.defaultMessageEn)}
+                        ”
+                      </p>
                     </div>
-                    <p className="text-[11px] text-slate-600 dark:text-slate-300 line-clamp-2">
-                      “
-                      {giftDraft.customMessage.trim() ||
-                        (lang === 'bn'
-                          ? getGiftCardTemplate(giftDraft.cardId).defaultMessageBn
-                          : getGiftCardTemplate(giftDraft.cardId).defaultMessageEn)}
-                      ”
-                    </p>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
 
               <div>
@@ -1223,6 +1238,8 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         <GiftCardReceiverOverlay
           tx={viewedGiftTx}
           lang={lang}
+          customCards={customGiftCards}
+          giftCardPolicy={giftCardPolicy}
           initialOpened
           onOpened={() => {}}
           onSkip={() => setViewedGiftTx(null)}

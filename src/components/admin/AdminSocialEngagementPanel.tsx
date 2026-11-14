@@ -1,15 +1,18 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  ArrowUpToLine,
   Check,
   CheckCircle2,
+  Clock,
   Download,
   Eye,
-  EyeOff,
   Gift,
+  Globe,
   ImagePlus,
   Megaphone,
   Palette,
   RotateCcw,
+  Snowflake,
   Sparkles,
   Star,
   Trash2,
@@ -18,6 +21,7 @@ import {
 import {
   AcashTransaction,
   CustomGiftCardRecord,
+  GiftCardCatalogPolicy,
   GiftCardParticleType,
   GiftCardThemeCategory,
   Language,
@@ -32,7 +36,9 @@ import {
   GiftCardTemplate,
   clampToMaxWords,
   countWords,
+  formatRemaining24h,
   getAllGiftCardTemplates,
+  getFullGovernanceCatalog,
   getGiftCardTemplate,
 } from '../../lib/giftCards';
 import {
@@ -40,10 +46,10 @@ import {
   getPortalThemeDefinition,
 } from '../../lib/portalThemes';
 import {
-  adminDeleteCustomGiftCard,
+  adminGovernAnyGiftCard,
   adminSaveCustomGiftCard,
-  adminToggleCustomGiftCardStatus,
   adminUpdatePortalThemeConfig,
+  purgeExpiredUserGiftCards,
 } from '../../lib/acashService';
 import { GiftCardArtFrame } from '../common/GiftCardExperience';
 
@@ -52,12 +58,13 @@ interface AdminSocialEngagementPanelProps {
   adminEmail: string;
   transactions: AcashTransaction[];
   customGiftCards: CustomGiftCardRecord[];
+  giftCardPolicy: GiftCardCatalogPolicy;
   portalTheme: PortalThemeConfig;
   onInspectAccount: (accountId: string) => void;
   onFeedback: (msg: string) => void;
 }
 
-type SocialSubTab = 'accounting' | 'upload_cards' | 'portal_theme';
+type SocialSubTab = 'accounting' | 'upload_cards' | 'others_cards' | 'portal_theme';
 
 const CARD_CATEGORIES: Array<{ id: GiftCardThemeCategory; labelEn: string; labelBn: string }> = [
   { id: 'eid', labelEn: 'Eid & Islamic', labelBn: 'ঈদ ও ধর্মীয়' },
@@ -204,6 +211,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
   adminEmail,
   transactions,
   customGiftCards,
+  giftCardPolicy,
   portalTheme,
   onInspectAccount,
   onFeedback,
@@ -211,6 +219,8 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
   const [subTab, setSubTab] = useState<SocialSubTab>('accounting');
   const [cardLedgerSearch, setCardLedgerSearch] = useState('');
   const [cardStatusFilter, setCardStatusFilter] = useState<'ALL' | 'OPENED' | 'PENDING' | 'SKIPPED'>('ALL');
+  const [govSearch, setGovSearch] = useState('');
+  const [govBusyId, setGovBusyId] = useState<string | null>(null);
 
   // Card Upload Studio state
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
@@ -225,6 +235,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
   const [defaultMessageBn, setDefaultMessageBn] = useState('');
   const [defaultMessageEn, setDefaultMessageEn] = useState('');
   const [cardFeatured, setCardFeatured] = useState(true);
+  const [cardFeaturedFirst, setCardFeaturedFirst] = useState(true);
   const [cardActive, setCardActive] = useState(true);
   const [cardSaving, setCardSaving] = useState(false);
   const [cardError, setCardError] = useState('');
@@ -345,9 +356,9 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
       perCardMap.set(cId, existing);
     }
 
-    const catalog = getAllGiftCardTemplates(customGiftCards);
+    const catalog = getAllGiftCardTemplates(customGiftCards, giftCardPolicy);
     const catalogIds = new Set(catalog.map((c) => c.id));
-    // Include inactive custom cards in accounting breakdown as well
+    // Include inactive / user-submitted custom cards in accounting breakdown as well
     for (const c of customGiftCards) {
       if (!catalogIds.has(c.cardId)) {
         catalogIds.add(c.cardId);
@@ -355,7 +366,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
     }
 
     const perCardRows = Array.from(catalogIds).map((id) => {
-      const tpl = getGiftCardTemplate(id, customGiftCards);
+      const tpl = getGiftCardTemplate(id, customGiftCards, giftCardPolicy);
       const stats = perCardMap.get(id) || {
         cardId: id,
         count: 0,
@@ -374,7 +385,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
     for (const [id, stats] of perCardMap.entries()) {
       if (!catalogIds.has(id)) {
         perCardRows.push({
-          template: getGiftCardTemplate(id, customGiftCards),
+          template: getGiftCardTemplate(id, customGiftCards, giftCardPolicy),
           ...stats,
         });
       }
@@ -398,7 +409,24 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
       openRate,
       perCardRows,
     };
-  }, [giftTransactions, customGiftCards]);
+  }, [giftTransactions, customGiftCards, giftCardPolicy]);
+
+  const governanceCatalog = useMemo(
+    () => getFullGovernanceCatalog(customGiftCards, giftCardPolicy),
+    [customGiftCards, giftCardPolicy]
+  );
+
+  const filteredGovernanceCards = useMemo(() => {
+    const q = govSearch.trim().toLowerCase();
+    if (!q) return governanceCatalog.activeCatalog;
+    return governanceCatalog.activeCatalog.filter(
+      (c) =>
+        c.titleBn.toLowerCase().includes(q) ||
+        c.titleEn.toLowerCase().includes(q) ||
+        c.themeCategory.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q)
+    );
+  }, [governanceCatalog.activeCatalog, govSearch]);
 
   const filteredGiftTransactions = useMemo(() => {
     const q = cardLedgerSearch.trim().toLowerCase();
@@ -410,7 +438,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
       if (cardStatusFilter === 'PENDING' && (isOpened || isSkipped)) return false;
 
       if (!q) return true;
-      const tpl = getGiftCardTemplate(tx.giftCard?.cardId, customGiftCards);
+      const tpl = getGiftCardTemplate(tx.giftCard?.cardId, customGiftCards, giftCardPolicy);
       return (
         tx.txHash.toLowerCase().includes(q) ||
         tx.senderId.toLowerCase().includes(q) ||
@@ -422,7 +450,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
         (tx.giftCard?.message || '').toLowerCase().includes(q)
       );
     });
-  }, [giftTransactions, cardLedgerSearch, cardStatusFilter, customGiftCards]);
+  }, [giftTransactions, cardLedgerSearch, cardStatusFilter, customGiftCards, giftCardPolicy]);
 
   const activeDraftPreset = getPortalThemeDefinition(draftPresetId);
   const currentlyLivePreset = getPortalThemeDefinition(portalTheme.presetId);
@@ -452,8 +480,38 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
     setDefaultMessageBn('');
     setDefaultMessageEn('');
     setCardFeatured(true);
+    setCardFeaturedFirst(true);
     setCardActive(true);
     setCardError('');
+  };
+
+  const handleCardGovernance = async (
+    card: GiftCardTemplate,
+    action: 'freeze' | 'unfreeze' | 'feature_first' | 'unfeature' | 'delete' | 'restore' | 'promote_global'
+  ) => {
+    setGovBusyId(card.id);
+    try {
+      await adminGovernAnyGiftCard({
+        cardId: card.id,
+        cardTitleHint: card.titleBn,
+        action,
+        adminEmail,
+      });
+      const feedbackMap: Record<typeof action, string> = {
+        freeze: `"${card.titleEn}" is now frozen (hidden from Customer Send Money).`,
+        unfreeze: `"${card.titleEn}" is unfrozen and live across all accounts.`,
+        feature_first: `"${card.titleEn}" is now pinned at the front of Send Money!`,
+        unfeature: `"${card.titleEn}" removed from front pin.`,
+        delete: `"${card.titleEn}" has been deleted.`,
+        restore: `"${card.titleEn}" has been restored.`,
+        promote_global: `"${card.titleEn}" promoted live to ALL Customer accounts & pinned first!`,
+      };
+      onFeedback(feedbackMap[action]);
+    } catch (err) {
+      onFeedback(err instanceof Error ? err.message : 'Governance update failed.');
+    } finally {
+      setGovBusyId(null);
+    }
   };
 
   const handleSaveGiftCard = async (e: React.FormEvent) => {
@@ -491,13 +549,14 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
         defaultMessageBn,
         defaultMessageEn,
         featured: cardFeatured,
+        featuredFirst: cardFeaturedFirst,
         active: cardActive,
         adminEmail,
       });
       onFeedback(
         lang === 'bn'
-          ? `কার্ড "${saved.titleBn}" সফলভাবে যুক্ত ও লাইভ করা হয়েছে!`
-          : `Cultural card "${saved.titleEn}" published live to Send Money!`
+          ? `কার্ড "${saved.titleBn}" সফলভাবে সকল অ্যাকাউন্টে লাইভ করা হয়েছে!`
+          : `Cultural card "${saved.titleEn}" is now live across ALL Customer accounts!`
       );
       resetCardForm();
     } catch (err) {
@@ -602,8 +661,25 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
             <ImagePlus className="w-4 h-4" />
             <span>
               {lang === 'bn'
-                ? `নতুন কার্ড আপলোড (${customGiftCards.length})`
-                : `New Card Upload (${customGiftCards.length})`}
+                ? `কার্ড আপলোড ও কন্ট্রোল (${governanceCatalog.activeCatalog.length})`
+                : `Upload & Card Control (${governanceCatalog.activeCatalog.length})`}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSubTab('others_cards')}
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-2 border transition-colors whitespace-nowrap shrink-0 ${
+              subTab === 'others_cards'
+                ? 'bg-amber-500 border-amber-500 text-slate-950 shadow-sm'
+                : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-amber-400'
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            <span>
+              {lang === 'bn'
+                ? `Others · ইউজার ২৪ঘ. কার্ড (${governanceCatalog.userOthersCards.length})`
+                : `Others · User 24h Cards (${governanceCatalog.userOthersCards.length})`}
             </span>
           </button>
 
@@ -1153,11 +1229,20 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
                 <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer">
                   <input
                     type="checkbox"
+                    checked={cardFeaturedFirst}
+                    onChange={(e) => setCardFeaturedFirst(e.target.checked)}
+                    className="rounded border-slate-300 text-amber-500 focus:ring-amber-500"
+                  />
+                  <span>{lang === 'bn' ? 'প্রথমে পিন করুন (Feature First)' : 'Pin to Front (Feature First)'}</span>
+                </label>
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
                     checked={cardFeatured}
                     onChange={(e) => setCardFeatured(e.target.checked)}
                     className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                   />
-                  <span>{lang === 'bn' ? 'ফিচার্ড কার্ড হিসেবে দেখান' : 'Featured in Carousel'}</span>
+                  <span>{lang === 'bn' ? 'ফিচার্ড কার্ড' : 'Featured Badge'}</span>
                 </label>
                 <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer">
                   <input
@@ -1166,7 +1251,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
                     onChange={(e) => setCardActive(e.target.checked)}
                     className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                   />
-                  <span>{lang === 'bn' ? 'গ্রাহকদের জন্য সক্রিয় রাখুন' : 'Active for Customers'}</span>
+                  <span>{lang === 'bn' ? 'সকল অ্যাকাউন্টে লাইভ রাখুন' : 'Live Across All Accounts'}</span>
                 </label>
               </div>
 
@@ -1192,8 +1277,8 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
                         ? 'কার্ড আপডেট করুন'
                         : 'Save Card Changes'
                       : lang === 'bn'
-                        ? 'নতুন কার্ড লাইভ প্রকাশ করুন'
-                        : 'Publish New Gift Card Live'}
+                        ? 'নতুন কার্ড সকল অ্যাকাউন্টে লাইভ করুন'
+                        : 'Publish Card Live to All Accounts'}
                 </span>
               </button>
             </form>
@@ -1228,120 +1313,119 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
             </div>
           </div>
 
-          {/* Custom Uploaded Cards Library */}
+          {/* All Gift Cards Governance Matrix (Built-In + Admin Custom Cards: Feature First / Freeze / Delete) */}
           <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
-            <div className="p-5 sm:px-6 border-b border-slate-200 dark:border-slate-800">
-              <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white">
-                {lang === 'bn'
-                  ? `অ্যাডমিন আপলোডকৃত কার্ডসমূহ (${customGiftCards.length})`
-                  : `Admin Uploaded Gift Cards (${customGiftCards.length})`}
-              </h3>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                {lang === 'bn'
-                  ? 'এখান থেকে আপলোডকৃত কার্ড চালু/বন্ধ, এডিট বা মুছে ফেলতে পারবেন'
-                  : 'Toggle customer visibility, feature status, edit, or delete custom uploaded cards'}
-              </p>
+            <div className="p-5 sm:px-6 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn'
+                    ? `সকল গিফট কার্ড কন্ট্রোল (ডিলিট, ফ্রিজ ও প্রথমে পিন · ${governanceCatalog.activeCatalog.length})`
+                    : `Full Card Governance — Feature First, Freeze & Delete (${governanceCatalog.activeCatalog.length})`}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn'
+                    ? 'অ্যাডমিনের যেকোনো কার্ড ফ্রিজ করলে গ্রাহকদের তালিকা থেকে লুকানো থাকবে এবং ফিচার ফার্স্ট করলে সবার প্রথমে দেখাবে।'
+                    : 'Control built-in cultural & Admin live cards: Pin at Front, Freeze/Unfreeze, Edit, or Delete instantaneously.'}
+                </p>
+              </div>
+              <input
+                type="text"
+                value={govSearch}
+                onChange={(e) => setGovSearch(e.target.value)}
+                placeholder={lang === 'bn' ? 'কার্ড খুঁজুন...' : 'Filter cards...'}
+                className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+              />
             </div>
 
-            {customGiftCards.length === 0 ? (
-              <div className="p-10 text-center text-xs text-slate-500 dark:text-slate-400">
-                {lang === 'bn'
-                  ? 'এখনো কোনো কাস্টম কার্ড আপলোড করা হয়নি। উপরের ফর্ম থেকে নতুন উৎসব কার্ড যুক্ত করুন!'
-                  : 'No custom cards uploaded yet. Use the form above to upload your first cultural card.'}
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 p-5 sm:p-6">
-                {customGiftCards.map((rec) => {
-                  const tpl: GiftCardTemplate = {
-                    id: rec.cardId,
-                    titleBn: rec.titleBn,
-                    titleEn: rec.titleEn,
-                    subtitleBn: rec.subtitleBn,
-                    subtitleEn: rec.subtitleEn,
-                    themeCategory: rec.themeCategory,
-                    imageUrl: rec.imageUrl,
-                    gradientBg: rec.gradientBg,
-                    accentHex: rec.accentHex,
-                    particleType: rec.particleType,
-                    defaultMessageBn: rec.defaultMessageBn,
-                    defaultMessageEn: rec.defaultMessageEn,
-                    featured: rec.featured,
-                    isCustomUploaded: true,
-                    active: rec.active,
-                  };
-                  return (
-                    <div
-                      key={rec.cardId}
-                      className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 flex gap-3.5 items-start"
-                    >
-                      <GiftCardArtFrame
-                        template={tpl}
-                        lang={lang}
-                        compact
-                        className="w-20 aspect-[3/4] rounded-xl shrink-0 border border-slate-200 dark:border-slate-700"
-                      />
-                      <div className="flex-1 min-w-0 space-y-2">
-                        <div>
-                          <div className="font-bold text-sm text-slate-900 dark:text-white truncate">
-                            {rec.titleBn}
-                          </div>
-                          <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                            {rec.titleEn} · {rec.themeCategory}
-                          </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 p-5 sm:p-6">
+              {filteredGovernanceCards.map((card) => {
+                const isFrozen = Boolean(card.frozen);
+                const isPinned = Boolean(card.featuredFirst);
+                const isBusy = govBusyId === card.id;
+                return (
+                  <div
+                    key={card.id}
+                    className={`rounded-2xl border p-4 flex gap-3.5 items-start transition-colors ${
+                      isFrozen
+                        ? 'bg-sky-50/40 dark:bg-sky-950/20 border-sky-200 dark:border-sky-500/30 opacity-85'
+                        : isPinned
+                          ? 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-300 dark:border-amber-500/40'
+                          : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800'
+                    }`}
+                  >
+                    <GiftCardArtFrame
+                      template={card}
+                      lang={lang}
+                      compact
+                      className="w-20 aspect-[3/4] rounded-xl shrink-0 border border-slate-200 dark:border-slate-700"
+                    />
+                    <div className="flex-1 min-w-0 space-y-2">
+                      <div>
+                        <div className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                          {card.titleBn}
                         </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {card.titleEn} · {card.themeCategory}
+                        </div>
+                      </div>
 
-                        <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
-                          <span
-                            className={`px-2 py-0.5 rounded-md border ${
-                              rec.active
-                                ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
-                                : 'bg-slate-200 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
-                            }`}
-                          >
-                            {rec.active ? 'Live Active' : 'Hidden'}
+                      <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
+                        <span
+                          className={`px-2 py-0.5 rounded-md border ${
+                            isFrozen
+                              ? 'bg-sky-100 dark:bg-sky-500/20 border-sky-300 dark:border-sky-500/40 text-sky-800 dark:text-sky-300'
+                              : 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                          }`}
+                        >
+                          {isFrozen ? 'Frozen' : 'Live All'}
+                        </span>
+                        {isPinned && (
+                          <span className="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-800 dark:text-amber-300">
+                            Pinned First
                           </span>
-                          {rec.featured && (
-                            <span className="px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300">
-                              Featured
-                            </span>
-                          )}
-                        </div>
+                        )}
+                        <span className="px-2 py-0.5 rounded-md bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400">
+                          {card.isCustomUploaded ? 'Admin Upload' : 'Built-In'}
+                        </span>
+                      </div>
 
-                        <div className="flex flex-wrap gap-1.5 pt-1">
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminToggleCustomGiftCardStatus(
-                                rec.cardId,
-                                { active: !rec.active },
-                                adminEmail
-                              );
-                              onFeedback(
-                                `${rec.titleEn} is now ${!rec.active ? 'Live Active' : 'Hidden'}.`
-                              );
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400 inline-flex items-center gap-1"
-                          >
-                            {rec.active ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                            <span>{rec.active ? 'Hide' : 'Show'}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminToggleCustomGiftCardStatus(
-                                rec.cardId,
-                                { featured: !rec.featured },
-                                adminEmail
-                              );
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-amber-400 inline-flex items-center gap-1"
-                          >
-                            <Star className={`w-3 h-3 ${rec.featured ? 'text-amber-500 fill-amber-500' : ''}`} />
-                            <span>{rec.featured ? 'Unstar' : 'Star'}</span>
-                          </button>
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() =>
+                            handleCardGovernance(card, isPinned ? 'unfeature' : 'feature_first')
+                          }
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                            isPinned
+                              ? 'bg-amber-500 border-amber-500 text-slate-950'
+                              : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-amber-400'
+                          }`}
+                        >
+                          <ArrowUpToLine className="w-3 h-3" />
+                          <span>{isPinned ? 'Unpin' : 'Feature First'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleCardGovernance(card, isFrozen ? 'unfreeze' : 'freeze')}
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                            isFrozen
+                              ? 'bg-sky-600 border-sky-600 text-white'
+                              : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-sky-400'
+                          }`}
+                        >
+                          <Snowflake className="w-3 h-3" />
+                          <span>{isFrozen ? 'Unfreeze' : 'Freeze'}</span>
+                        </button>
+
+                        {card.isCustomUploaded && (
                           <button
                             type="button"
                             onClick={() => {
+                              const rec = customGiftCards.find((r) => r.cardId === card.id);
+                              if (!rec) return;
                               setEditingCardId(rec.cardId);
                               setTitleBn(rec.titleBn);
                               setTitleEn(rec.titleEn);
@@ -1353,6 +1437,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
                               setDefaultMessageBn(rec.defaultMessageBn);
                               setDefaultMessageEn(rec.defaultMessageEn);
                               setCardFeatured(rec.featured);
+                              setCardFeaturedFirst(Boolean(rec.featuredFirst));
                               setCardActive(rec.active);
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
@@ -1360,25 +1445,186 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
                           >
                             Edit
                           </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminDeleteCustomGiftCard(rec.cardId, adminEmail);
-                              onFeedback(`Deleted custom card "${rec.titleEn}".`);
-                            }}
-                            className="px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] font-semibold text-rose-700 dark:text-rose-300"
-                            title="Delete Card"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
+                        )}
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleCardGovernance(card, 'delete')}
+                          className="px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100"
+                          title="Delete Card"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                );
+              })}
+            </div>
+
+            {governanceCatalog.deletedBuiltInCards.length > 0 && (
+              <div className="px-6 py-4 bg-slate-50 dark:bg-[#0B0D14] border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  {lang === 'bn'
+                    ? `ডিলিটকৃত ডিফল্ট কার্ড (${governanceCatalog.deletedBuiltInCards.length}) — রিস্টোর করুন:`
+                    : `Deleted Built-in Cards (${governanceCatalog.deletedBuiltInCards.length}) — Restore:`}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {governanceCatalog.deletedBuiltInCards.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => handleCardGovernance(c, 'restore')}
+                      className="px-3 py-1.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-emerald-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>{c.titleBn} ({c.titleEn})</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ================================================================== */}
+      {/* TAB 2B: OTHERS — USER SUBMITTED 24-HOUR CARDS                      */}
+      {/* ================================================================== */}
+      {subTab === 'others_cards' && (
+        <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+          <div className="p-5 sm:px-6 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-display text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Clock className="w-4 h-4 text-amber-500" />
+                <span>
+                  {lang === 'bn'
+                    ? `Others · ইউজার আপলোডকৃত ২৪ ঘণ্টার কার্ড (${governanceCatalog.userOthersCards.length})`
+                    : `Others · User-Submitted 24-Hour Cards (${governanceCatalog.userOthersCards.length})`}
+                </span>
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                {lang === 'bn'
+                  ? 'কাস্টমারদের যুক্ত করা সকল কাস্টম কার্ড এখানে Others ক্যাটাগরিতে জমা হয় এবং ২৪ ঘণ্টা পর স্বয়ংক্রিয়ভাবে ডিলিট হয়ে যায়।'
+                  : 'All customer-created Send Money cards appear here under Others and auto-delete after 24 hours unless promoted Live to All Accounts.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                const count = await purgeExpiredUserGiftCards();
+                onFeedback(
+                  count > 0
+                    ? `Purged ${count} expired 24h user gift card(s).`
+                    : 'All active user cards are still within their 24-hour window.'
+                );
+              }}
+              className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 hover:border-amber-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-500" />
+              <span>{lang === 'bn' ? 'মেয়াদোত্তীর্ণ কার্ড মুছুন' : 'Purge Expired Now'}</span>
+            </button>
+          </div>
+
+          {governanceCatalog.userOthersCards.length === 0 ? (
+            <div className="p-12 text-center text-xs text-slate-500 dark:text-slate-400 space-y-1.5">
+              <div className="font-semibold text-slate-700 dark:text-slate-200">
+                {lang === 'bn' ? 'বর্তমানে কোনো সক্রিয় ২৪ ঘণ্টার ইউজার কার্ড নেই' : 'No active 24h User cards in Others right now'}
+              </div>
+              <p>
+                {lang === 'bn'
+                  ? 'কোনো কাস্টমার সেন্ড মানিতে "+ নিজের কার্ড (২৪ঘ.)" যুক্ত করলে সাথে সাথে এখানে দেখা যাবে।'
+                  : 'When a customer adds a card in Send Money, it shows up here with live countdown and moderation controls.'}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 p-5 sm:p-6">
+              {governanceCatalog.userOthersCards.map((card) => {
+                const isFrozen = Boolean(card.frozen);
+                const isBusy = govBusyId === card.id;
+                return (
+                  <div
+                    key={card.id}
+                    className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-amber-200/80 dark:border-amber-500/30 p-4 flex gap-3.5 items-start"
+                  >
+                    <GiftCardArtFrame
+                      template={card}
+                      lang={lang}
+                      compact
+                      className="w-20 aspect-[3/4] rounded-xl shrink-0 border border-slate-200 dark:border-slate-700"
+                    />
+                    <div className="flex-1 min-w-0 space-y-2">
+                      <div>
+                        <div className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                          {card.titleBn}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          By {card.submittedByName || card.createdBy} · {card.submittedByAccountId || ''}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
+                        <span className="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-800 dark:text-amber-300 font-mono-tabular inline-flex items-center gap-1">
+                          <Clock className="w-2.5 h-2.5" />
+                          <span>{formatRemaining24h(card.expiresAt)}</span>
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-md border ${
+                            isFrozen
+                              ? 'bg-sky-100 dark:bg-sky-500/20 border-sky-300 dark:border-sky-500/40 text-sky-800 dark:text-sky-300'
+                              : 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                          }`}
+                        >
+                          {isFrozen ? 'Frozen' : 'Active (Others)'}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleCardGovernance(card, 'promote_global')}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[11px] font-semibold text-white inline-flex items-center gap-1"
+                        >
+                          <Globe className="w-3 h-3" />
+                          <span>Promote Live All</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleCardGovernance(card, isFrozen ? 'unfreeze' : 'freeze')}
+                          className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-sky-400 inline-flex items-center gap-1"
+                        >
+                          <Snowflake className="w-3 h-3" />
+                          <span>{isFrozen ? 'Unfreeze' : 'Freeze'}</span>
+                        </button>
+                        {card.submittedByAccountId && (
+                          <button
+                            type="button"
+                            onClick={() => onInspectAccount(card.submittedByAccountId!)}
+                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-indigo-600 dark:text-indigo-300 inline-flex items-center gap-1"
+                          >
+                            <Eye className="w-3 h-3" />
+                            <span>User</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleCardGovernance(card, 'delete')}
+                          className="px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] font-semibold text-rose-700 dark:text-rose-300"
+                          title="Delete Card Now"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

@@ -12,6 +12,7 @@ import {
   AdminSession,
   CustomGiftCardRecord,
   FeeConfig,
+  GiftCardCatalogPolicy,
   Language,
   MainTreasuryVault,
   PortalThemeConfig,
@@ -20,12 +21,14 @@ import {
 } from './types/acash';
 import {
   DEFAULT_FEE_CONFIG,
+  DEFAULT_GIFT_CARD_POLICY,
   DEFAULT_TREASURY_VAULT,
   ensureDefaultPlatformData,
   isAccountNotificationRead,
   markAccountNotificationRead,
   markAllAccountNotificationsRead,
   markGiftCardState,
+  purgeExpiredUserGiftCards,
   subscribeToAccountNotifications,
   subscribeToAdminActivityLogs,
   subscribeToAdminNotifications,
@@ -34,12 +37,14 @@ import {
   subscribeToBooths,
   subscribeToCustomGiftCards,
   subscribeToFeeConfig,
+  subscribeToGiftCardPolicy,
   subscribeToMapLocations,
   subscribeToPortalTheme,
   subscribeToSecondAdmins,
   subscribeToTreasuryVault,
   subscribeToUser,
   subscribeToUserTransactions,
+  syncAutoIpMapLocation,
 } from './lib/acashService';
 import {
   DEFAULT_PORTAL_THEME_CONFIG,
@@ -201,6 +206,10 @@ export default function App() {
     DEFAULT_PORTAL_THEME_CONFIG
   );
   const [customGiftCards, setCustomGiftCards] = useState<CustomGiftCardRecord[]>([]);
+  const [giftCardPolicy, setGiftCardPolicy] = useState<GiftCardCatalogPolicy>(
+    DEFAULT_GIFT_CARD_POLICY
+  );
+  const ipSyncedAccountRef = useRef<string | null>(null);
 
   const [paymentIntent, setPaymentIntent] = useState<{
     to: string;
@@ -285,7 +294,13 @@ export default function App() {
     const unsubSecondAdmins = subscribeToSecondAdmins(setSecondAdmins);
     const unsubPortalTheme = subscribeToPortalTheme(setPortalThemeConfig);
     const unsubCustomGiftCards = subscribeToCustomGiftCards(setCustomGiftCards);
+    const unsubGiftCardPolicy = subscribeToGiftCardPolicy(setGiftCardPolicy);
+    void purgeExpiredUserGiftCards();
+    const purgeTimer = window.setInterval(() => {
+      void purgeExpiredUserGiftCards();
+    }, 60 * 1000);
     return () => {
+      window.clearInterval(purgeTimer);
       unsubAuth();
       unsubFee();
       unsubBooths();
@@ -293,6 +308,7 @@ export default function App() {
       unsubSecondAdmins();
       unsubPortalTheme();
       unsubCustomGiftCards();
+      unsubGiftCardPolicy();
     };
   }, []);
 
@@ -376,6 +392,26 @@ export default function App() {
       unsubNotifs();
     };
   }, [userSession]);
+
+  // Automatic IP geolocation pin sync for Agents (A-) & Merchants (M-) on session entry
+  useEffect(() => {
+    if (!currentUser) {
+      ipSyncedAccountRef.current = null;
+      return;
+    }
+    if (currentUser.role !== 'A' && currentUser.role !== 'M') return;
+    if (ipSyncedAccountRef.current === currentUser.accountId) return;
+    ipSyncedAccountRef.current = currentUser.accountId;
+    void syncAutoIpMapLocation({
+      creatorId: currentUser.accountId,
+      creatorRole: currentUser.role === 'A' ? 'agent' : 'merchant',
+      name: currentUser.name,
+      businessName: currentUser.businessName,
+      phone: currentUser.phone,
+      profilePhotoUrl: currentUser.profilePhotoUrl,
+      creatorUid: currentUser.firebaseUid,
+    });
+  }, [currentUser]);
 
   const unreadNotifCount = useMemo(() => {
     if (!currentUser) return 0;
@@ -523,6 +559,7 @@ export default function App() {
         feeConfig={feeConfig}
         treasuryVault={treasuryVault}
         customGiftCards={customGiftCards}
+        giftCardPolicy={giftCardPolicy}
         portalTheme={portalThemeConfig}
       />
     );
@@ -819,6 +856,8 @@ export default function App() {
           key={activeGiftOverlayTx.tx.txId}
           tx={activeGiftOverlayTx.tx}
           lang={lang}
+          customCards={customGiftCards}
+          giftCardPolicy={giftCardPolicy}
           initialOpened={activeGiftOverlayTx.initialOpened}
           onOpened={(txId) => {
             openedGiftIdsRef.current.add(txId);
@@ -878,6 +917,7 @@ export default function App() {
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
             customGiftCards={customGiftCards}
+            giftCardPolicy={giftCardPolicy}
           />
         ) : currentUser.role === 'A' ? (
           <AgentPanel

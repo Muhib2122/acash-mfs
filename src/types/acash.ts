@@ -225,7 +225,8 @@ export type GiftCardThemeCategory =
   | 'heritage'
   | 'love'
   | 'wishes'
-  | 'celebration';
+  | 'celebration'
+  | 'others';
 
 export type GiftCardParticleType =
   | 'crescent_lantern'
@@ -254,9 +255,31 @@ export interface CustomGiftCardRecord {
   defaultMessageEn: string;
   featured: boolean;
   active: boolean;
+  frozen?: boolean;
+  featuredFirst?: boolean;
+  pinnedOrder?: number;
+  isUserSubmitted?: boolean;
+  submittedByAccountId?: string;
+  submittedByName?: string;
+  expiresAt?: number;
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface GiftCardGovernanceEntry {
+  frozen?: boolean;
+  featuredFirst?: boolean;
+  pinnedOrder?: number;
+  deleted?: boolean;
+  updatedAt: number;
+  updatedBy?: string;
+}
+
+export interface GiftCardCatalogPolicy {
+  overrides: Record<string, GiftCardGovernanceEntry>;
+  updatedAt: number;
+  updatedBy: string;
 }
 
 export type PortalThemePresetId =
@@ -289,6 +312,9 @@ export interface GiftCardPayload {
   signaturePrefix: 'bn' | 'en';
   senderDisplayName: string;
   isCustomEdited: boolean;
+  customImageUrl?: string;
+  customGradientBg?: string;
+  customAccentHex?: string;
   openedAt?: number;
   skippedAt?: number;
 }
@@ -364,10 +390,10 @@ export interface AcashBooth {
   updatedAt: number;
 }
 
-export type CreatorMapRole = 'agent' | 'merchant' | 'second_admin';
+export type CreatorMapRole = 'agent' | 'merchant' | 'admin' | 'second_admin';
 
 export interface AcashMapLocation {
-  creatorId: string; // e.g. A-200001, M-300001, ADM-200001
+  creatorId: string; // e.g. A-200001, M-300001, ADM-MAIN, ADM-200001
   creatorUid?: string;
   creatorRole: CreatorMapRole;
   name: string;
@@ -380,6 +406,11 @@ export interface AcashMapLocation {
   lat: number;
   lng: number;
   isVisible: boolean;
+  locationSource?: 'ip_auto' | 'manual_pin';
+  ipAddress?: string;
+  isp?: string;
+  country?: string;
+  lastIpLocatedAt?: number;
   createdAt: number;
   updatedAt: number;
 }

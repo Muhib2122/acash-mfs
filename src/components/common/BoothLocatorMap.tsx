@@ -41,10 +41,10 @@ const TILE_URLS: Record<TileLayerMode, { url: string; attribution: string }> = {
 export interface UnifiedMapEntry {
   uid: string;
   source: 'creator' | 'booth';
-  category: 'agent' | 'merchant' | 'second_admin' | 'agent_booth' | 'support_booth';
+  category: 'agent' | 'merchant' | 'admin' | 'second_admin' | 'agent_booth' | 'support_booth';
   name: string;
   businessName?: string;
-  creatorId: string; // e.g. A-200001, M-300001, ADM-200001, BTH-AGT-01
+  creatorId: string; // e.g. A-200001, M-300001, ADM-MAIN, ADM-200001, BTH-AGT-01
   phone: string;
   profilePhotoUrl?: string;
   area: string;
@@ -58,6 +58,11 @@ export interface UnifiedMapEntry {
   queueWaitMinutes?: number;
   cashLiquidityLevel?: string;
   agentAccountId?: string;
+  locationSource?: 'ip_auto' | 'manual_pin';
+  ipAddress?: string;
+  isp?: string;
+  country?: string;
+  lastIpLocatedAt?: number;
   updatedAt: number;
   distanceKm: number | null;
 }
@@ -70,6 +75,7 @@ interface BoothLocatorMapProps {
   onSelectMerchantForPay?: (merchantAccountId: string, label: string) => void;
   initialFilter?: DirectoryFilter;
   embedded?: boolean;
+  showIpDetails?: boolean;
 }
 
 interface BoothLocatorModalProps extends BoothLocatorMapProps {
@@ -103,6 +109,8 @@ function getCategoryAccent(cat: UnifiedMapEntry['category'], status: UnifiedMapE
       return '#10B981'; // Emerald
     case 'merchant':
       return '#D946EF'; // Fuchsia
+    case 'admin':
+      return '#E11D48'; // Crimson (Main Admin)
     case 'second_admin':
       return '#F59E0B'; // Amber
     case 'support_booth':
@@ -117,6 +125,8 @@ function getCategoryShortBadge(cat: UnifiedMapEntry['category']): string {
       return 'AG';
     case 'merchant':
       return 'MC';
+    case 'admin':
+      return 'MA';
     case 'second_admin':
       return '2A';
     case 'agent_booth':
@@ -130,11 +140,13 @@ function getCategoryLabel(cat: UnifiedMapEntry['category'], lang: Language): str
   if (lang === 'bn') {
     switch (cat) {
       case 'agent':
-        return 'এজেন্ট (প্রোফাইল পিন)';
+        return 'এজেন্ট (লাইভ পিন)';
       case 'merchant':
-        return 'মার্চেন্ট (প্রোফাইল পিন)';
+        return 'মার্চেন্ট (লাইভ পিন)';
+      case 'admin':
+        return 'মেইন অ্যাডমিন (IP)';
       case 'second_admin':
-        return '২য় এডমিন ডেস্ক';
+        return '২য় অ্যাডমিন ডেস্ক';
       case 'agent_booth':
         return 'অফিশিয়াল এজেন্ট বুথ';
       case 'support_booth':
@@ -146,6 +158,8 @@ function getCategoryLabel(cat: UnifiedMapEntry['category'], lang: Language): str
       return 'Agent Live Location';
     case 'merchant':
       return 'Merchant Live Location';
+    case 'admin':
+      return 'Main Admin Node';
     case 'second_admin':
       return '2nd Admin Desk';
     case 'agent_booth':
@@ -200,6 +214,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
   onSelectMerchantForPay,
   initialFilter = 'all',
   embedded = false,
+  showIpDetails = false,
 }) => {
   const [filter, setFilter] = useState<DirectoryFilter>(initialFilter);
   const [openOnly, setOpenOnly] = useState(false);
@@ -233,14 +248,21 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
         lat: loc.lat,
         lng: loc.lng,
         status: 'open',
-        hours: 'Live Creator Profile Pin',
+        hours: loc.locationSource === 'ip_auto' ? 'Auto IP Geolocation' : 'Live Profile Pin',
         services:
           loc.creatorRole === 'agent'
             ? ['Cash-In', 'Cash-Out', 'Verified Agent']
             : loc.creatorRole === 'merchant'
               ? ['Merchant Payment', 'Store Checkout', 'QR Pay']
-              : ['2nd Admin Help', 'Verification Desk', 'Regional Support'],
+              : loc.creatorRole === 'admin'
+                ? ['Main Admin HQ', 'Live Oversight']
+                : ['2nd Admin Help', 'Verification Desk', 'Regional Support'],
         agentAccountId: loc.creatorRole === 'agent' ? loc.creatorId : undefined,
+        locationSource: loc.locationSource,
+        ipAddress: loc.ipAddress,
+        isp: loc.isp,
+        country: loc.country,
+        lastIpLocatedAt: loc.lastIpLocatedAt,
         updatedAt: loc.updatedAt,
         distanceKm: userCoords ? haversineKm(userCoords.lat, userCoords.lng, loc.lat, loc.lng) : null,
       }));
@@ -282,6 +304,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
       }
       if (
         filter === 'support_admin' &&
+        entry.category !== 'admin' &&
         entry.category !== 'second_admin' &&
         entry.category !== 'support_booth'
       ) {
@@ -295,7 +318,8 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
         entry.phone.toLowerCase().includes(q) ||
         entry.area.toLowerCase().includes(q) ||
         entry.city.toLowerCase().includes(q) ||
-        entry.address.toLowerCase().includes(q)
+        entry.address.toLowerCase().includes(q) ||
+        (showIpDetails && (entry.ipAddress || '').toLowerCase().includes(q))
       );
     });
 
@@ -303,7 +327,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
       list.sort((a, b) => (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999));
     }
     return list;
-  }, [allEntries, filter, openOnly, search, userCoords]);
+  }, [allEntries, filter, openOnly, search, userCoords, showIpDetails]);
 
   const selectedEntry = useMemo<UnifiedMapEntry | null>(() => {
     return (
@@ -320,7 +344,10 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
       agents: allEntries.filter((e) => e.category === 'agent' || e.category === 'agent_booth').length,
       merchants: allEntries.filter((e) => e.category === 'merchant').length,
       supportAdmin: allEntries.filter(
-        (e) => e.category === 'second_admin' || e.category === 'support_booth'
+        (e) =>
+          e.category === 'admin' ||
+          e.category === 'second_admin' ||
+          e.category === 'support_booth'
       ).length,
     };
   }, [allEntries]);
@@ -387,9 +414,24 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
         .addTo(layerGroup);
     }
 
+    const coordBucketCount = new Map<string, number>();
+
     for (const entry of filteredEntries) {
+      const bucketKey = `${entry.lat.toFixed(4)},${entry.lng.toFixed(4)}`;
+      const dupIndex = coordBucketCount.get(bucketKey) || 0;
+      coordBucketCount.set(bucketKey, dupIndex + 1);
+
+      let renderLat = entry.lat;
+      let renderLng = entry.lng;
+      if (dupIndex > 0) {
+        const angle = dupIndex * 2.1;
+        const radius = 0.0014 * (1 + Math.floor(dupIndex / 5));
+        renderLat = entry.lat + Math.sin(angle) * radius;
+        renderLng = entry.lng + Math.cos(angle) * radius;
+      }
+
       const isSelected = selectedEntry?.uid === entry.uid;
-      const marker = L.marker([entry.lat, entry.lng], {
+      const marker = L.marker([renderLat, renderLng], {
         icon: buildEntryMarkerIcon(entry, isSelected),
         zIndexOffset: isSelected ? 500 : 0,
       });
@@ -398,8 +440,13 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
         ? `<img src="${escapeHtml(entry.profilePhotoUrl)}" alt="" style="width:36px;height:36px;border-radius:10px;object-fit:cover;border:1px solid rgba(99,102,241,0.35);" />`
         : `<div style="width:36px;height:36px;border-radius:10px;background:#4F46E5;color:#fff;font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center;">${escapeHtml(getCategoryShortBadge(entry.category))}</div>`;
 
+      const ipRowHtml =
+        showIpDetails && entry.ipAddress
+          ? `<div style="font-size:10px;font-family:monospace;color:#0F766E;margin-top:4px;font-weight:600;">IP: ${escapeHtml(entry.ipAddress)} · ${escapeHtml(entry.locationSource === 'ip_auto' ? 'Auto IP' : 'Manual Pin')}</div>`
+          : '';
+
       const popupHtml = `
-        <div class="acash-popup-card" style="min-width:210px;font-family:Inter,sans-serif;">
+        <div class="acash-popup-card" style="min-width:220px;font-family:Inter,sans-serif;">
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
             ${avatarImg}
             <div>
@@ -416,6 +463,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
           <div class="acash-popup-muted" style="font-size:11px;margin-top:4px;">
             ${escapeHtml(entry.address)}
           </div>
+          ${ipRowHtml}
         </div>
       `;
 
@@ -425,7 +473,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
       });
       marker.addTo(layerGroup);
     }
-  }, [filteredEntries, selectedEntry, userCoords, lang]);
+  }, [filteredEntries, selectedEntry, userCoords, lang, showIpDetails]);
 
   const handleSelectEntry = (entry: UnifiedMapEntry) => {
     setSelectedUid(entry.uid);
@@ -626,6 +674,10 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                   <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block" />
                   <span>Merchant</span>
                 </span>
+                <span className="inline-flex items-center gap-1.5 text-rose-700 dark:text-rose-300 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block" />
+                  <span>Main Admin</span>
+                </span>
                 <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300 font-medium">
                   <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
                   <span>2nd Admin</span>
@@ -635,7 +687,7 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                   <span>Support Booth</span>
                 </span>
               </div>
-              <span className="text-slate-500 dark:text-slate-400">OpenStreetMap · Live Pins</span>
+              <span className="text-slate-500 dark:text-slate-400">OpenStreetMap · Live IP & GPS Pins</span>
             </div>
           </div>
 
@@ -665,9 +717,11 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                             ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/30'
                             : selectedEntry.category === 'merchant'
                               ? 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/30'
-                              : selectedEntry.category === 'second_admin'
-                                ? 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/30'
-                                : 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-500/30'
+                              : selectedEntry.category === 'admin'
+                                ? 'bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/30'
+                                : selectedEntry.category === 'second_admin'
+                                  ? 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/30'
+                                  : 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-500/30'
                         }`}
                       >
                         {getCategoryLabel(selectedEntry.category, lang)}
@@ -675,6 +729,11 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                       <span className="font-mono-tabular text-[11px] text-indigo-700 dark:text-indigo-300 font-bold bg-slate-50 dark:bg-[#0B0D14] px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800">
                         {selectedEntry.creatorId}
                       </span>
+                      {selectedEntry.locationSource && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-teal-50 dark:bg-teal-500/15 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-500/30">
+                          {selectedEntry.locationSource === 'ip_auto' ? 'Auto IP Pin' : 'Manual GPS'}
+                        </span>
+                      )}
                     </div>
                     <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
                       {selectedEntry.businessName || selectedEntry.name}
@@ -723,6 +782,17 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                     {selectedEntry.lat.toFixed(4)}, {selectedEntry.lng.toFixed(4)}
                   </div>
                 </div>
+                {showIpDetails && selectedEntry.ipAddress && (
+                  <div className="col-span-2 sm:col-span-3 rounded-xl bg-teal-50/70 dark:bg-teal-500/10 border border-teal-200/80 dark:border-teal-500/30 p-2.5 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] font-mono-tabular font-semibold text-teal-800 dark:text-teal-200">
+                      IP Address: {selectedEntry.ipAddress}
+                    </div>
+                    <div className="text-[11px] text-teal-700 dark:text-teal-300">
+                      {selectedEntry.isp || 'Detected Network'}
+                      {selectedEntry.country ? ` · ${selectedEntry.country}` : ''}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
@@ -905,20 +975,24 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                                 ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
                                 : entry.category === 'merchant'
                                   ? 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300'
-                                  : entry.category === 'second_admin'
-                                    ? 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                                    : 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300'
+                                  : entry.category === 'admin'
+                                    ? 'bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                    : entry.category === 'second_admin'
+                                      ? 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                      : 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300'
                             }`}
                           >
                             {entry.category === 'agent'
                               ? 'AGENT'
                               : entry.category === 'merchant'
                                 ? 'MERCHANT'
-                                : entry.category === 'second_admin'
-                                  ? '2ND ADMIN'
-                                  : entry.category === 'agent_booth'
-                                    ? 'AGENT BOOTH'
-                                    : 'SUPPORT'}
+                                : entry.category === 'admin'
+                                  ? 'MAIN ADMIN'
+                                  : entry.category === 'second_admin'
+                                    ? '2ND ADMIN'
+                                    : entry.category === 'agent_booth'
+                                      ? 'AGENT BOOTH'
+                                      : 'SUPPORT'}
                           </span>
                           <span className="font-mono-tabular text-[10px] text-slate-700 dark:text-slate-300 font-medium">
                             {entry.creatorId}
@@ -926,6 +1000,11 @@ export const BoothLocatorMap: React.FC<BoothLocatorMapProps> = ({
                           <span className="font-mono-tabular text-[10px] text-emerald-700 dark:text-emerald-300">
                             {entry.phone}
                           </span>
+                          {showIpDetails && entry.ipAddress && (
+                            <span className="font-mono-tabular text-[10px] text-teal-700 dark:text-teal-300 font-semibold">
+                              · IP {entry.ipAddress}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>

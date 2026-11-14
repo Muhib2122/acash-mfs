@@ -49,6 +49,8 @@ import {
   CustomGiftCardRecord,
   FeeBreakdown,
   FeeConfig,
+  GiftCardCatalogPolicy,
+  GiftCardGovernanceEntry,
   GiftCardPayload,
   IdentityLockType,
   KycInfo,
@@ -72,9 +74,13 @@ import {
   countWords,
   GIFT_CARD_FEE_BDT,
   GIFT_CARD_MAX_WORDS,
+  isGiftCardExpired,
   syncCustomGiftCardsRegistry,
+  syncGiftCardPolicyRegistry,
+  USER_GIFT_CARD_TTL_MS,
 } from './giftCards';
 import { DEFAULT_PORTAL_THEME_CONFIG, PORTAL_THEME_PRESETS } from './portalThemes';
+import { detectIpGeolocation } from './ipGeo';
 
 const USERS_COL = 'acash_users';
 const KYC_SUBMISSIONS_COL = 'acash_kyc_submissions';
@@ -94,10 +100,17 @@ const ADMIN_ALERT_DOC_ID = 'admin_alert';
 const MAIN_ADMIN_CREDS_DOC_ID = 'main_admin_credentials';
 const TREASURY_VAULT_DOC_ID = 'treasury_vault';
 const PORTAL_THEME_DOC_ID = 'portal_theme';
+const GIFT_CARD_OVERRIDES_DOC_ID = 'gift_card_overrides';
 const LOCAL_DB_KEY = 'acash_local_db_v1';
 const BOTS_PURGED_FLAG_KEY = 'acash_legacy_bots_purged_v1';
 const LAST_REG_TS_KEY = 'acash_last_registration_ts';
 const LOCAL_SYNC_EVENT = 'acash-db-sync';
+
+export const DEFAULT_GIFT_CARD_POLICY: GiftCardCatalogPolicy = {
+  overrides: {},
+  updatedAt: 0,
+  updatedBy: '',
+};
 
 export const MAIN_ADMIN_EMAIL = 'aiub.muhib@gmail.com';
 export const DEFAULT_MAIN_ADMIN_PASSWORD = '1111';
@@ -592,6 +605,7 @@ interface LocalStoreState {
   mainAdminCredentials: MainAdminCredentialConfig;
   treasuryVault: MainTreasuryVault;
   customGiftCards?: Record<string, CustomGiftCardRecord>;
+  giftCardPolicy?: GiftCardCatalogPolicy;
   portalTheme?: PortalThemeConfig;
 }
 
@@ -991,6 +1005,7 @@ function readLocalStore(): LocalStoreState {
         mainAdminCredentials: storedCreds,
         treasuryVault: normalizeTreasuryVault(parsed.treasuryVault),
         customGiftCards: parsed.customGiftCards || {},
+        giftCardPolicy: parsed.giftCardPolicy || DEFAULT_GIFT_CARD_POLICY,
         portalTheme: parsed.portalTheme || DEFAULT_PORTAL_THEME_CONFIG,
       };
       if (purgeLegacyBotRecords(hydrated)) {
@@ -1015,6 +1030,7 @@ function readLocalStore(): LocalStoreState {
     mainAdminCredentials: defaultCreds,
     treasuryVault: normalizeTreasuryVault(DEFAULT_TREASURY_VAULT),
     customGiftCards: {},
+    giftCardPolicy: DEFAULT_GIFT_CARD_POLICY,
     portalTheme: DEFAULT_PORTAL_THEME_CONFIG,
   };
   writeLocalStore(initial, false);
@@ -6198,6 +6214,11 @@ export async function saveUserMapLocation(params: {
     lat: mapLocation.lat,
     lng: mapLocation.lng,
     isVisible: params.isVisible,
+    locationSource: 'manual_pin',
+    ...(existingPin?.ipAddress ? { ipAddress: existingPin.ipAddress } : {}),
+    ...(existingPin?.isp ? { isp: existingPin.isp } : {}),
+    ...(existingPin?.country ? { country: existingPin.country } : {}),
+    ...(existingPin?.lastIpLocatedAt ? { lastIpLocatedAt: existingPin.lastIpLocatedAt } : {}),
     createdAt: existingPin?.createdAt || now,
     updatedAt: now,
   };
@@ -6216,6 +6237,91 @@ export async function saveUserMapLocation(params: {
   }
 
   return updatedUser;
+}
+
+export async function syncAutoIpMapLocation(params: {
+  creatorId: string;
+  creatorRole: CreatorMapRole;
+  name: string;
+  businessName?: string;
+  phone: string;
+  profilePhotoUrl?: string;
+  creatorUid?: string;
+  forceOverrideManualPin?: boolean;
+}): Promise<AcashMapLocation | null> {
+  const cleanCreatorId = params.creatorId.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+  if (!cleanCreatorId) return null;
+
+  try {
+    const geo = await detectIpGeolocation(Boolean(params.forceOverrideManualPin));
+    const now = Date.now();
+    const store = readLocalStore();
+    let existingPin = store.mapLocations[cleanCreatorId];
+
+    if (!existingPin) {
+      try {
+        const snap = await getDoc(doc(db, MAP_LOCATIONS_COL, cleanCreatorId));
+        if (snap.exists()) {
+          existingPin = snap.data() as AcashMapLocation;
+        }
+      } catch {
+        // ignore read error
+      }
+    }
+
+    const keepManual = existingPin?.locationSource === 'manual_pin' && !params.forceOverrideManualPin;
+
+    const mapPin: AcashMapLocation = {
+      creatorId: cleanCreatorId,
+      ...(params.creatorUid
+        ? { creatorUid: params.creatorUid }
+        : existingPin?.creatorUid
+          ? { creatorUid: existingPin.creatorUid }
+          : auth.currentUser?.uid
+            ? { creatorUid: auth.currentUser.uid }
+            : {}),
+      creatorRole: params.creatorRole,
+      name: (params.name.trim() || existingPin?.name || cleanCreatorId).slice(0, 120),
+      ...(params.businessName?.trim()
+        ? { businessName: params.businessName.trim().slice(0, 140) }
+        : existingPin?.businessName
+          ? { businessName: existingPin.businessName }
+          : {}),
+      phone: (params.phone.trim() || existingPin?.phone || 'N/A').slice(0, 30),
+      ...(params.profilePhotoUrl
+        ? { profilePhotoUrl: params.profilePhotoUrl }
+        : existingPin?.profilePhotoUrl
+          ? { profilePhotoUrl: existingPin.profilePhotoUrl }
+          : {}),
+      address: keepManual ? existingPin!.address : geo.address.slice(0, 240),
+      area: keepManual ? existingPin!.area : (geo.region || geo.city).slice(0, 80),
+      city: keepManual ? existingPin!.city : geo.city.slice(0, 60),
+      lat: keepManual ? existingPin!.lat : Number(geo.lat),
+      lng: keepManual ? existingPin!.lng : Number(geo.lng),
+      isVisible: keepManual ? existingPin!.isVisible : true,
+      locationSource: keepManual ? 'manual_pin' : 'ip_auto',
+      ipAddress: geo.ip.slice(0, 80),
+      isp: geo.isp.slice(0, 140),
+      country: geo.country.slice(0, 80),
+      lastIpLocatedAt: now,
+      createdAt: existingPin?.createdAt || now,
+      updatedAt: now,
+    };
+
+    store.mapLocations[cleanCreatorId] = mapPin;
+    writeLocalStore(store, true);
+
+    try {
+      await setDoc(doc(db, MAP_LOCATIONS_COL, cleanCreatorId), stripUndefined(mapPin), { merge: true });
+      firestoreBackendMode = 'firestore';
+    } catch {
+      firestoreBackendMode = 'local_sync';
+    }
+
+    return mapPin;
+  } catch {
+    return null;
+  }
 }
 
 export async function verifyAdminPasswordLogin(
@@ -6720,6 +6826,11 @@ export async function saveSecondAdminProfileAndLocation(params: {
       lat: nextLoc.lat,
       lng: nextLoc.lng,
       isVisible: nextLoc.isVisible,
+      locationSource: 'manual_pin',
+      ...(existingPin?.ipAddress ? { ipAddress: existingPin.ipAddress } : {}),
+      ...(existingPin?.isp ? { isp: existingPin.isp } : {}),
+      ...(existingPin?.country ? { country: existingPin.country } : {}),
+      ...(existingPin?.lastIpLocatedAt ? { lastIpLocatedAt: existingPin.lastIpLocatedAt } : {}),
       createdAt: existingPin?.createdAt || now,
       updatedAt: now,
     };
@@ -6809,14 +6920,124 @@ export function subscribeToPortalTheme(
   };
 }
 
+function normalizeGiftCardPolicy(raw?: Partial<GiftCardCatalogPolicy> | null): GiftCardCatalogPolicy {
+  const src = raw || {};
+  const rawOverrides = src.overrides && typeof src.overrides === 'object' ? src.overrides : {};
+  const cleanOverrides: Record<string, GiftCardGovernanceEntry> = {};
+  for (const [cardId, val] of Object.entries(rawOverrides)) {
+    if (!val || typeof val !== 'object') continue;
+    cleanOverrides[cardId] = {
+      ...(typeof val.frozen === 'boolean' ? { frozen: val.frozen } : {}),
+      ...(typeof val.featuredFirst === 'boolean' ? { featuredFirst: val.featuredFirst } : {}),
+      ...(typeof val.pinnedOrder === 'number' ? { pinnedOrder: val.pinnedOrder } : {}),
+      ...(typeof val.deleted === 'boolean' ? { deleted: val.deleted } : {}),
+      updatedAt: typeof val.updatedAt === 'number' ? val.updatedAt : Date.now(),
+      ...(typeof val.updatedBy === 'string' ? { updatedBy: val.updatedBy } : {}),
+    };
+  }
+  return {
+    overrides: cleanOverrides,
+    updatedAt: typeof src.updatedAt === 'number' ? src.updatedAt : Date.now(),
+    updatedBy: typeof src.updatedBy === 'string' ? src.updatedBy : '',
+  };
+}
+
+export function subscribeToGiftCardPolicy(
+  callback: (policy: GiftCardCatalogPolicy) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    const cfg = normalizeGiftCardPolicy(readLocalStore().giftCardPolicy);
+    syncGiftCardPolicyRegistry(cfg);
+    callback(cfg);
+  };
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  try {
+    unsubFs = onSnapshot(
+      doc(db, SETTINGS_COL, GIFT_CARD_OVERRIDES_DOC_ID),
+      (snap) => {
+        if (snap.exists()) {
+          const cfg = normalizeGiftCardPolicy(snap.data() as Partial<GiftCardCatalogPolicy>);
+          const store = readLocalStore();
+          store.giftCardPolicy = cfg;
+          writeLocalStore(store, false);
+          syncGiftCardPolicyRegistry(cfg);
+          callback(cfg);
+        }
+      },
+      () => {
+        emitLocal();
+      }
+    );
+  } catch {
+    // ignore
+  }
+
+  return () => {
+    unsubLocal();
+    unsubFs();
+  };
+}
+
+let isPurgingExpiredCards = false;
+
+export async function purgeExpiredUserGiftCards(): Promise<number> {
+  if (isPurgingExpiredCards) return 0;
+  isPurgingExpiredCards = true;
+  try {
+    const now = Date.now();
+    const store = readLocalStore();
+    const expiredIds = new Set<string>();
+
+    for (const [cardId, card] of Object.entries(store.customGiftCards || {})) {
+      if (isGiftCardExpired(card, now)) {
+        expiredIds.add(cardId);
+        delete store.customGiftCards![cardId];
+      }
+    }
+
+    try {
+      const snap = await getDocs(collection(db, GIFT_CARDS_COL));
+      for (const d of snap.docs) {
+        const data = d.data() as CustomGiftCardRecord;
+        if (isGiftCardExpired(data, now)) {
+          expiredIds.add(d.id);
+          await deleteDoc(doc(db, GIFT_CARDS_COL, d.id)).catch(() => {});
+        }
+      }
+    } catch {
+      // fallback to local cleanup only
+    }
+
+    if (expiredIds.size > 0) {
+      for (const id of expiredIds) {
+        if (store.customGiftCards?.[id]) {
+          delete store.customGiftCards[id];
+        }
+      }
+      syncCustomGiftCardsRegistry(Object.values(store.customGiftCards || {}));
+      writeLocalStore(store, true);
+    }
+
+    return expiredIds.size;
+  } finally {
+    isPurgingExpiredCards = false;
+  }
+}
+
 export function subscribeToCustomGiftCards(
   callback: (cards: CustomGiftCardRecord[]) => void
 ): Unsubscribe {
   const emitLocal = () => {
+    const now = Date.now();
     const map = readLocalStore().customGiftCards || {};
-    const list = Object.values(map).sort((a, b) => b.createdAt - a.createdAt);
-    syncCustomGiftCardsRegistry(list);
-    callback(list);
+    const activeList = Object.values(map)
+      .filter((c) => !isGiftCardExpired(c, now))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    syncCustomGiftCardsRegistry(activeList);
+    callback(activeList);
   };
   emitLocal();
   const unsubLocal = subscribeLocalStore(emitLocal);
@@ -6826,19 +7047,29 @@ export function subscribeToCustomGiftCards(
     unsubFs = onSnapshot(
       collection(db, GIFT_CARDS_COL),
       (snap) => {
+        const now = Date.now();
         const fsCards = snap.docs.map((d) => d.data() as CustomGiftCardRecord);
         const store = readLocalStore();
         const nextMap: Record<string, CustomGiftCardRecord> = {};
+        let foundExpired = false;
+
         for (const c of fsCards) {
-          if (c && c.cardId) {
-            nextMap[c.cardId] = c;
+          if (!c || !c.cardId) continue;
+          if (isGiftCardExpired(c, now)) {
+            foundExpired = true;
+            continue;
           }
+          nextMap[c.cardId] = c;
         }
         store.customGiftCards = nextMap;
         writeLocalStore(store, false);
         const sorted = Object.values(nextMap).sort((a, b) => b.createdAt - a.createdAt);
         syncCustomGiftCardsRegistry(sorted);
         callback(sorted);
+
+        if (foundExpired) {
+          void purgeExpiredUserGiftCards();
+        }
       },
       () => {
         emitLocal();
@@ -6920,6 +7151,7 @@ export async function adminSaveCustomGiftCard(params: {
   defaultMessageBn: string;
   defaultMessageEn: string;
   featured?: boolean;
+  featuredFirst?: boolean;
   active?: boolean;
   adminEmail: string;
 }): Promise<CustomGiftCardRecord> {
@@ -6935,11 +7167,12 @@ export async function adminSaveCustomGiftCard(params: {
   }
 
   const cardId =
-    params.cardId?.trim() ||
+    params.cardId?.trim().replace(/[^a-zA-Z0-9_-]/g, '_') ||
     `custom_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
   const store = readLocalStore();
   const existing = store.customGiftCards?.[cardId];
+  const isPinned = params.featuredFirst ?? existing?.featuredFirst ?? false;
 
   const record: CustomGiftCardRecord = {
     cardId,
@@ -6962,6 +7195,10 @@ export async function adminSaveCustomGiftCard(params: {
     ).slice(0, 600),
     featured: params.featured ?? true,
     active: params.active ?? true,
+    frozen: false,
+    featuredFirst: isPinned,
+    pinnedOrder: isPinned ? now : existing?.pinnedOrder || 0,
+    isUserSubmitted: false,
     createdBy: existing?.createdBy || params.adminEmail,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
@@ -6978,8 +7215,8 @@ export async function adminSaveCustomGiftCard(params: {
     actionType: 'social_engagement',
     title: existing
       ? `Gift Card Updated · ${record.titleBn}`
-      : `New Gift Card Uploaded · ${record.titleBn}`,
-    details: `Published custom cultural card "${record.titleBn} (${record.titleEn})" under ${record.themeCategory}. Active: ${record.active ? 'Yes' : 'Hidden'}.`,
+      : `New Live Gift Card Published · ${record.titleBn}`,
+    details: `Published global card "${record.titleBn} (${record.titleEn})" live to all accounts under ${record.themeCategory}.${isPinned ? ' Pinned to Front.' : ''}`,
     actorEmail: params.adminEmail,
     targetIds: [cardId],
     timestamp: now,
@@ -6989,7 +7226,7 @@ export async function adminSaveCustomGiftCard(params: {
 
   try {
     await Promise.all([
-      setDoc(doc(db, GIFT_CARDS_COL, cardId), record),
+      setDoc(doc(db, GIFT_CARDS_COL, cardId), stripUndefined(record)),
       setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
     ]);
     firestoreBackendMode = 'firestore';
@@ -7004,72 +7241,76 @@ export async function adminSaveCustomGiftCard(params: {
   return record;
 }
 
-export async function adminToggleCustomGiftCardStatus(
-  cardId: string,
-  updates: { active?: boolean; featured?: boolean },
-  adminEmail: string
-): Promise<void> {
+export async function userSubmitCustomGiftCard(params: {
+  accountId: string;
+  accountName: string;
+  titleBn: string;
+  titleEn?: string;
+  imageUrl: string;
+  defaultMessageBn?: string;
+  defaultMessageEn?: string;
+}): Promise<CustomGiftCardRecord> {
   const now = Date.now();
-  const store = readLocalStore();
-  let existing = store.customGiftCards?.[cardId];
-  if (!existing) {
-    try {
-      const snap = await getDoc(doc(db, GIFT_CARDS_COL, cardId));
-      if (snap.exists()) {
-        existing = snap.data() as CustomGiftCardRecord;
-      }
-    } catch {
-      // fall through
-    }
+  const titleBn = params.titleBn.trim().slice(0, 120);
+  const titleEn = (params.titleEn?.trim() || params.titleBn.trim()).slice(0, 120);
+  const imageUrl = params.imageUrl.trim();
+  if (!titleBn) {
+    throw new Error('Please enter a title for your Gift Card.');
   }
-  if (!existing) {
-    throw new Error('Custom gift card not found.');
+  if (!imageUrl || imageUrl.length > 640000) {
+    throw new Error('Please upload an image under 600KB.');
   }
-  const updated: CustomGiftCardRecord = {
-    ...existing,
-    ...(typeof updates.active === 'boolean' ? { active: updates.active } : {}),
-    ...(typeof updates.featured === 'boolean' ? { featured: updates.featured } : {}),
+
+  const cardId = `usr_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const expiresAt = now + USER_GIFT_CARD_TTL_MS;
+
+  const record: CustomGiftCardRecord = {
+    cardId,
+    titleBn,
+    titleEn,
+    subtitleBn: 'ইউজার কাস্টম কার্ড · ২৪ ঘণ্টা',
+    subtitleEn: 'User Custom Card · 24h',
+    themeCategory: 'others',
+    imageUrl,
+    gradientBg: 'from-slate-900 via-indigo-950 to-amber-900',
+    accentHex: '#F59E0B',
+    particleType: 'festive_confetti',
+    defaultMessageBn: clampToMaxWords(
+      params.defaultMessageBn?.trim() || `${titleBn}-এর আন্তরিক শুভেচ্ছা ও ভালোবাসা রইল।`,
+      GIFT_CARD_MAX_WORDS
+    ).slice(0, 600),
+    defaultMessageEn: clampToMaxWords(
+      params.defaultMessageEn?.trim() || `Warm wishes from ${params.accountName}!`,
+      GIFT_CARD_MAX_WORDS
+    ).slice(0, 600),
+    featured: false,
+    active: true,
+    frozen: false,
+    featuredFirst: false,
+    pinnedOrder: 0,
+    isUserSubmitted: true,
+    submittedByAccountId: params.accountId,
+    submittedByName: params.accountName.slice(0, 140),
+    expiresAt,
+    createdBy: `${params.accountName} (${params.accountId})`,
+    createdAt: now,
     updatedAt: now,
   };
+
+  const store = readLocalStore();
   store.customGiftCards = {
     ...(store.customGiftCards || {}),
-    [cardId]: updated,
+    [cardId]: record,
   };
   syncCustomGiftCardsRegistry(Object.values(store.customGiftCards));
-  writeLocalStore(store, true);
-
-  try {
-    await setDoc(doc(db, GIFT_CARDS_COL, cardId), updated, { merge: true });
-    firestoreBackendMode = 'firestore';
-  } catch (err) {
-    firestoreBackendMode = 'local_sync';
-    if (isPermissionError(err)) {
-      handleFirestoreError(err, OperationType.UPDATE, `${GIFT_CARDS_COL}/${cardId}`);
-    }
-    throw err;
-  }
-  void adminEmail;
-}
-
-export async function adminDeleteCustomGiftCard(
-  cardId: string,
-  adminEmail: string
-): Promise<void> {
-  const now = Date.now();
-  const store = readLocalStore();
-  const existing = store.customGiftCards?.[cardId];
-  if (store.customGiftCards?.[cardId]) {
-    delete store.customGiftCards[cardId];
-  }
-  syncCustomGiftCardsRegistry(Object.values(store.customGiftCards || {}));
 
   const actEntry = makeActivityEntry({
-    idPrefix: 'ACT-CARD-DEL',
+    idPrefix: 'ACT-USRCARD',
     actionType: 'social_engagement',
-    title: `Custom Gift Card Deleted · ${existing?.titleBn || cardId}`,
-    details: `Removed uploaded cultural card "${existing?.titleEn || cardId}" from Send Money gallery.`,
-    actorEmail: adminEmail,
-    targetIds: [cardId],
+    title: `User Added 24h Card (Others) · ${record.titleBn}`,
+    details: `${params.accountName} (${params.accountId}) uploaded a temporary 24h gift card in Others category. Auto-deletes after 24 hours.`,
+    actorEmail: params.accountId,
+    targetIds: [cardId, params.accountId],
     timestamp: now,
   });
   store.activityLogs[actEntry.id] = actEntry;
@@ -7077,17 +7318,229 @@ export async function adminDeleteCustomGiftCard(
 
   try {
     await Promise.all([
-      deleteDoc(doc(db, GIFT_CARDS_COL, cardId)),
+      setDoc(doc(db, GIFT_CARDS_COL, cardId), stripUndefined(record)),
       setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
     ]);
     firestoreBackendMode = 'firestore';
   } catch (err) {
     firestoreBackendMode = 'local_sync';
     if (isPermissionError(err)) {
-      handleFirestoreError(err, OperationType.DELETE, `${GIFT_CARDS_COL}/${cardId}`);
+      handleFirestoreError(err, OperationType.WRITE, `${GIFT_CARDS_COL}/${cardId}`);
     }
     throw err;
   }
+
+  return record;
+}
+
+export async function adminGovernAnyGiftCard(params: {
+  cardId: string;
+  cardTitleHint?: string;
+  action:
+    | 'freeze'
+    | 'unfreeze'
+    | 'feature_first'
+    | 'unfeature'
+    | 'delete'
+    | 'restore'
+    | 'promote_global';
+  adminEmail: string;
+}): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let customRec = store.customGiftCards?.[params.cardId];
+  if (!customRec) {
+    try {
+      const snap = await getDoc(doc(db, GIFT_CARDS_COL, params.cardId));
+      if (snap.exists()) {
+        customRec = snap.data() as CustomGiftCardRecord;
+      }
+    } catch {
+      // may be built-in
+    }
+  }
+
+  const label = customRec?.titleBn || params.cardTitleHint || params.cardId;
+  const actionLabelMap: Record<typeof params.action, string> = {
+    freeze: 'Frozen Card',
+    unfreeze: 'Unfrozen Card',
+    feature_first: 'Pinned Card to Front',
+    unfeature: 'Unpinned Front Feature',
+    delete: 'Deleted Card',
+    restore: 'Restored Card',
+    promote_global: 'Promoted 24h User Card Live to All Accounts',
+  };
+
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-GOV',
+    actionType: 'social_engagement',
+    title: `${actionLabelMap[params.action]} · ${label}`,
+    details: `Admin ${params.adminEmail} applied "${params.action}" on gift card "${label}" (${params.cardId}).`,
+    actorEmail: params.adminEmail,
+    targetIds: [params.cardId],
+    timestamp: now,
+  });
+  store.activityLogs[actEntry.id] = actEntry;
+
+  if (customRec) {
+    if (params.action === 'delete') {
+      if (store.customGiftCards?.[params.cardId]) {
+        delete store.customGiftCards[params.cardId];
+      }
+      syncCustomGiftCardsRegistry(Object.values(store.customGiftCards || {}));
+      writeLocalStore(store, true);
+
+      try {
+        await Promise.all([
+          deleteDoc(doc(db, GIFT_CARDS_COL, params.cardId)),
+          setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+        ]);
+        firestoreBackendMode = 'firestore';
+      } catch (err) {
+        firestoreBackendMode = 'local_sync';
+        if (isPermissionError(err)) {
+          handleFirestoreError(err, OperationType.DELETE, `${GIFT_CARDS_COL}/${params.cardId}`);
+        }
+        throw err;
+      }
+      return;
+    }
+
+    const updated: CustomGiftCardRecord = { ...customRec, updatedAt: now };
+    if (params.action === 'freeze') {
+      updated.frozen = true;
+      updated.active = false;
+    } else if (params.action === 'unfreeze') {
+      updated.frozen = false;
+      updated.active = true;
+    } else if (params.action === 'feature_first') {
+      updated.featuredFirst = true;
+      updated.pinnedOrder = now;
+      updated.featured = true;
+    } else if (params.action === 'unfeature') {
+      updated.featuredFirst = false;
+      updated.pinnedOrder = 0;
+    } else if (params.action === 'promote_global') {
+      updated.isUserSubmitted = false;
+      delete updated.expiresAt;
+      updated.frozen = false;
+      updated.active = true;
+      updated.featuredFirst = true;
+      updated.pinnedOrder = now;
+      updated.featured = true;
+      updated.subtitleBn = 'অ্যাডমিন অনুমোদিত লাইভ কার্ড';
+      updated.subtitleEn = 'Approved Global Live Card';
+    }
+
+    store.customGiftCards = {
+      ...(store.customGiftCards || {}),
+      [params.cardId]: updated,
+    };
+    syncCustomGiftCardsRegistry(Object.values(store.customGiftCards));
+    writeLocalStore(store, true);
+
+    try {
+      await Promise.all([
+        setDoc(doc(db, GIFT_CARDS_COL, params.cardId), stripUndefined(updated)),
+        setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+      ]);
+      firestoreBackendMode = 'firestore';
+    } catch (err) {
+      firestoreBackendMode = 'local_sync';
+      if (isPermissionError(err)) {
+        handleFirestoreError(err, OperationType.UPDATE, `${GIFT_CARDS_COL}/${params.cardId}`);
+      }
+      throw err;
+    }
+    return;
+  }
+
+  // Built-in card governance via acash_settings/gift_card_overrides
+  const policy = normalizeGiftCardPolicy(store.giftCardPolicy);
+  const prevOv = policy.overrides[params.cardId] || { updatedAt: now };
+  const nextOv: GiftCardGovernanceEntry = {
+    ...prevOv,
+    updatedAt: now,
+    updatedBy: params.adminEmail,
+  };
+
+  if (params.action === 'freeze') {
+    nextOv.frozen = true;
+  } else if (params.action === 'unfreeze') {
+    nextOv.frozen = false;
+  } else if (params.action === 'feature_first') {
+    nextOv.featuredFirst = true;
+    nextOv.pinnedOrder = now;
+  } else if (params.action === 'unfeature') {
+    nextOv.featuredFirst = false;
+    nextOv.pinnedOrder = 0;
+  } else if (params.action === 'delete') {
+    nextOv.deleted = true;
+    nextOv.featuredFirst = false;
+  } else if (params.action === 'restore') {
+    nextOv.deleted = false;
+    nextOv.frozen = false;
+  }
+
+  const nextPolicy: GiftCardCatalogPolicy = {
+    overrides: {
+      ...policy.overrides,
+      [params.cardId]: nextOv,
+    },
+    updatedAt: now,
+    updatedBy: params.adminEmail,
+  };
+
+  store.giftCardPolicy = nextPolicy;
+  syncGiftCardPolicyRegistry(nextPolicy);
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      setDoc(doc(db, SETTINGS_COL, GIFT_CARD_OVERRIDES_DOC_ID), stripUndefined(nextPolicy)),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.WRITE, `${SETTINGS_COL}/${GIFT_CARD_OVERRIDES_DOC_ID}`);
+    }
+    throw err;
+  }
+}
+
+export async function adminToggleCustomGiftCardStatus(
+  cardId: string,
+  updates: { active?: boolean; featured?: boolean },
+  adminEmail: string
+): Promise<void> {
+  if (typeof updates.active === 'boolean') {
+    await adminGovernAnyGiftCard({
+      cardId,
+      action: updates.active ? 'unfreeze' : 'freeze',
+      adminEmail,
+    });
+    return;
+  }
+  if (typeof updates.featured === 'boolean') {
+    await adminGovernAnyGiftCard({
+      cardId,
+      action: updates.featured ? 'feature_first' : 'unfeature',
+      adminEmail,
+    });
+  }
+}
+
+export async function adminDeleteCustomGiftCard(
+  cardId: string,
+  adminEmail: string
+): Promise<void> {
+  await adminGovernAnyGiftCard({
+    cardId,
+    action: 'delete',
+    adminEmail,
+  });
 }
 
 

@@ -393,7 +393,7 @@
         },
         "creatorRole": {
           "type": "string",
-          "enum": ["agent", "merchant", "second_admin"]
+          "enum": ["agent", "merchant", "admin", "second_admin"]
         },
         "name": {
           "type": "string",
@@ -431,6 +431,25 @@
         },
         "isVisible": {
           "type": "boolean"
+        },
+        "locationSource": {
+          "type": "string",
+          "enum": ["ip_auto", "manual_pin"]
+        },
+        "ipAddress": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "isp": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "country": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "lastIpLocatedAt": {
+          "type": "number"
         },
         "createdAt": {
           "type": "number"
@@ -686,7 +705,7 @@
         },
         "themeCategory": {
           "type": "string",
-          "enum": ["eid", "boishakh", "heritage", "love", "wishes", "celebration"]
+          "enum": ["eid", "boishakh", "heritage", "love", "wishes", "celebration", "others"]
         },
         "imageUrl": {
           "type": "string",
@@ -717,6 +736,29 @@
         },
         "active": {
           "type": "boolean"
+        },
+        "frozen": {
+          "type": "boolean"
+        },
+        "featuredFirst": {
+          "type": "boolean"
+        },
+        "pinnedOrder": {
+          "type": "number"
+        },
+        "isUserSubmitted": {
+          "type": "boolean"
+        },
+        "submittedByAccountId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "submittedByName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "expiresAt": {
+          "type": "number"
         },
         "createdBy": {
           "type": "string",

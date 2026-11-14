@@ -43,6 +43,8 @@ import {
   Download,
   Gift,
   Sparkles,
+  Globe,
+  Crosshair,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -57,6 +59,7 @@ import {
   BoothType,
   CustomGiftCardRecord,
   FeeConfig,
+  GiftCardCatalogPolicy,
   Language,
   MainTreasuryVault,
   PortalThemeConfig,
@@ -108,6 +111,7 @@ import {
   saveSecondAdminProfileAndLocation,
   setAdminAlertEmail,
   subscribeToAdminAlertEmail,
+  syncAutoIpMapLocation,
   verifyAdminPasswordLogin,
 } from '../../lib/acashService';
 import { sendAccountStatusEmail } from '../../lib/emailjs';
@@ -152,6 +156,7 @@ interface AdminAppProps {
   feeConfig: FeeConfig;
   treasuryVault: MainTreasuryVault;
   customGiftCards: CustomGiftCardRecord[];
+  giftCardPolicy: GiftCardCatalogPolicy;
   portalTheme: PortalThemeConfig;
 }
 
@@ -224,6 +229,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   feeConfig,
   treasuryVault,
   customGiftCards,
+  giftCardPolicy,
   portalTheme,
 }) => {
   const [adminEmail, setAdminEmail] = useState(DEFAULT_ADMIN_ALERT_EMAIL);
@@ -279,6 +285,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     txHash: string;
   } | null>(null);
   const seenAdminTxIdsRef = useRef<Set<string> | null>(null);
+  const adminIpSyncedRef = useRef<string | null>(null);
+  const [syncingAdminIp, setSyncingAdminIp] = useState(false);
 
   useEffect(() => {
     const unsub = subscribeToAdminAlertEmail((email) => setAlertEmailInput(email));
@@ -288,6 +296,32 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   useEffect(() => {
     seenAdminTxIdsRef.current = null;
   }, [adminSession?.adminEmail]);
+
+  useEffect(() => {
+    if (!adminSession) {
+      adminIpSyncedRef.current = null;
+      return;
+    }
+    const creatorId =
+      adminSession.adminRole === 'main_admin' ? 'ADM-MAIN' : adminSession.adminId || '';
+    if (!creatorId || adminIpSyncedRef.current === creatorId) return;
+    adminIpSyncedRef.current = creatorId;
+    const creatorRole = adminSession.adminRole === 'main_admin' ? 'admin' : 'second_admin';
+    void syncAutoIpMapLocation({
+      creatorId,
+      creatorRole,
+      name:
+        adminSession.adminName ||
+        (adminSession.adminRole === 'main_admin' ? 'Main Admin' : '2nd Admin'),
+      businessName:
+        adminSession.adminRole === 'main_admin'
+          ? 'Acash Main Admin Command'
+          : 'Acash 2nd Admin Desk',
+      phone: adminSession.phone || adminSession.adminEmail,
+      profilePhotoUrl: adminSession.profilePhotoUrl,
+      creatorUid: adminSession.firebaseUid,
+    });
+  }, [adminSession]);
 
   useEffect(() => {
     if (!adminSession) return;
@@ -3658,6 +3692,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               adminEmail={adminSession.adminEmail}
               transactions={transactions}
               customGiftCards={customGiftCards}
+              giftCardPolicy={giftCardPolicy}
               portalTheme={portalTheme}
               onInspectAccount={(accId) => setViewedAccountId(accId)}
               onFeedback={(msg) => setFeedbackMsg(msg)}
@@ -5114,15 +5149,117 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <MapPin className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                       <span>
                         {lang === 'bn'
-                          ? 'এজেন্ট বুথ ও কাস্টমার সাপোর্ট ম্যাপ'
-                          : 'Agent Booth & Customer Support Booth Network Map'}
+                          ? 'এজেন্ট, মার্চেন্ট, অ্যাডমিন আইপি জিও-ম্যাপ ও বুথ নেটওয়ার্ক'
+                          : 'Agent, Merchant, Admin IP Geo-Map & Booth Network'}
                       </span>
                     </h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                       {lang === 'bn'
-                        ? 'ফায়ারস্টোর সিঙ্ক করা সব ফিজিক্যাল এজেন্ট ও সাপোর্ট বুথ পরিচালনা করুন।'
-                        : 'Interactive geo-map & live Firestore management for all Agent Cash points and Customer Support centers.'}
+                        ? 'এজেন্ট (A-), মার্চেন্ট (M-) ও অ্যাডমিন (ADM) লগইন করলে অটো IP লোকেশন ম্যাপে পিন হয় এবং বুথ নেটওয়ার্কের সাথে লাইভ দেখায়।'
+                        : 'Agents (A-), Merchants (M-), and Admins auto-locate by IP on login and render live alongside physical cash & support booths.'}
                     </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={syncingAdminIp}
+                    onClick={async () => {
+                      if (!adminSession) return;
+                      const creatorId =
+                        adminSession.adminRole === 'main_admin'
+                          ? 'ADM-MAIN'
+                          : adminSession.adminId || '';
+                      if (!creatorId) return;
+                      setSyncingAdminIp(true);
+                      try {
+                        const pin = await syncAutoIpMapLocation({
+                          creatorId,
+                          creatorRole:
+                            adminSession.adminRole === 'main_admin' ? 'admin' : 'second_admin',
+                          name:
+                            adminSession.adminName ||
+                            (adminSession.adminRole === 'main_admin' ? 'Main Admin' : '2nd Admin'),
+                          businessName:
+                            adminSession.adminRole === 'main_admin'
+                              ? 'Acash Main Admin Command'
+                              : 'Acash 2nd Admin Desk',
+                          phone: adminSession.phone || adminSession.adminEmail,
+                          profilePhotoUrl: adminSession.profilePhotoUrl,
+                          creatorUid: adminSession.firebaseUid,
+                          forceOverrideManualPin: true,
+                        });
+                        if (pin) {
+                          setFeedbackMsg(
+                            lang === 'bn'
+                              ? `IP লোকেশন সিঙ্ক হয়েছে (${pin.ipAddress} · ${pin.city})`
+                              : `IP location synced (${pin.ipAddress} · ${pin.city})`
+                          );
+                        }
+                      } finally {
+                        setSyncingAdminIp(false);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>
+                      {syncingAdminIp
+                        ? lang === 'bn'
+                          ? 'সিঙ্ক হচ্ছে...'
+                          : 'Locating IP...'
+                        : lang === 'bn'
+                          ? 'আমার IP লোকেশন সিঙ্ক করুন'
+                          : 'Sync My IP Pin Now'}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Live IP Geolocation Coverage Strip */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 px-3 py-2.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {lang === 'bn' ? 'এজেন্ট পিন' : 'Agent Pins'}
+                    </div>
+                    <div className="font-mono-tabular text-base font-bold text-indigo-600 dark:text-indigo-400 mt-0.5">
+                      {creatorLocations.filter((l) => l.creatorRole === 'agent').length}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 px-3 py-2.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {lang === 'bn' ? 'মার্চেন্ট পিন' : 'Merchant Pins'}
+                    </div>
+                    <div className="font-mono-tabular text-base font-bold text-violet-600 dark:text-violet-400 mt-0.5">
+                      {creatorLocations.filter((l) => l.creatorRole === 'merchant').length}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 px-3 py-2.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {lang === 'bn' ? 'অ্যাডমিন পিন' : 'Admin Pins'}
+                    </div>
+                    <div className="font-mono-tabular text-base font-bold text-rose-600 dark:text-rose-400 mt-0.5">
+                      {
+                        creatorLocations.filter(
+                          (l) => l.creatorRole === 'admin' || l.creatorRole === 'second_admin'
+                        ).length
+                      }
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 px-3 py-2.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Globe className="w-3 h-3 text-cyan-500" />
+                      <span>{lang === 'bn' ? 'অটো-IP পিন' : 'Auto IP Pins'}</span>
+                    </div>
+                    <div className="font-mono-tabular text-base font-bold text-cyan-600 dark:text-cyan-400 mt-0.5">
+                      {creatorLocations.filter((l) => l.locationSource === 'ip_auto').length}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 px-3 py-2.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {lang === 'bn' ? 'ম্যানুয়াল GPS' : 'Manual GPS'}
+                    </div>
+                    <div className="font-mono-tabular text-base font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                      {creatorLocations.filter((l) => l.locationSource === 'manual_pin').length}
+                    </div>
                   </div>
                 </div>
 
@@ -5131,10 +5268,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   creatorLocations={creatorLocations}
                   lang={lang}
                   embedded
+                  showIpDetails
                 />
               </div>
 
-              {/* 2nd Admin Registry (Main Admin can register 2nd Admins; Main Admin is exempt from personal pinning) */}
+              {/* 2nd Admin Registry */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 <form
                   onSubmit={handleCreateSecondAdmin}
@@ -5146,11 +5284,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       <span>2nd Admin Accounts & Map Access</span>
                     </h3>
                     <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-indigo-700 dark:text-indigo-300">
-                      Main Admin Exempt
+                      Auto-IP + GPS
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Main Admin ({DEFAULT_ADMIN_ALERT_EMAIL}) does not set a personal location. Add 2nd Admins below so they can upload their pic & pin their live location directly on the map.
+                    Main Admin ({DEFAULT_ADMIN_ALERT_EMAIL}) & 2nd Admins auto-locate by IP on login. Register 2nd Admins below so they can also refine their GPS pin manually.
                   </p>
                   <div className="grid grid-cols-2 gap-2.5">
                     <input
