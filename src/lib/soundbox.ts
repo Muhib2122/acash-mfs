@@ -8,9 +8,12 @@ const MALE_VOICE_REGEX =
 const FEMALE_VOICE_REGEX =
   /\b(female|woman|zira|hazel|susan|samantha|victoria|karen|moira|tessa|fiona|veena|lekha|nabanita|tanisha|heera|kalpana|swara|aria|jenny|michelle|ana|emma|sonia|libby|maisie|clara|sara|neerja|katja|asha)\b/i;
 
+const SOUND_UNLOCKED_KEY = 'acash_sound_unlocked_v1';
+
 let sharedAudioCtx: AudioContext | null = null;
 let cachedVoices: SpeechSynthesisVoice[] = [];
 let unlockListenersAttached = false;
+let audioGestureUnlocked = false;
 
 function refreshVoices(): SpeechSynthesisVoice[] {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return [];
@@ -23,6 +26,75 @@ function refreshVoices(): SpeechSynthesisVoice[] {
     // ignore
   }
   return cachedVoices;
+}
+
+function ensureAudioContextResumed(): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return false;
+    if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+      sharedAudioCtx = new AudioCtx();
+    }
+    if (sharedAudioCtx.state === 'suspended') {
+      void sharedAudioCtx.resume();
+    }
+    audioGestureUnlocked = sharedAudioCtx.state === 'running' || audioGestureUnlocked;
+    refreshVoices();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isAudioContextUnlocked(): boolean {
+  if (sharedAudioCtx && sharedAudioCtx.state === 'running') return true;
+  if (audioGestureUnlocked) return true;
+  try {
+    return localStorage.getItem(SOUND_UNLOCKED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export async function unlockSoundAndVoiceGesture(playConfirmation = true): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+  try {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (AudioCtx) {
+      if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+        sharedAudioCtx = new AudioCtx();
+      }
+      if (sharedAudioCtx.state === 'suspended') {
+        await sharedAudioCtx.resume();
+      }
+      // Play a subtle zero/soft buffer to warm iOS Safari & Chrome mobile WebAudio pipeline
+      const buffer = sharedAudioCtx.createBuffer(1, 1, 22050);
+      const source = sharedAudioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(sharedAudioCtx.destination);
+      source.start(0);
+    }
+
+    refreshVoices();
+    audioGestureUnlocked = true;
+    try {
+      localStorage.setItem(SOUND_UNLOCKED_KEY, 'true');
+    } catch {
+      // ignore storage errors
+    }
+
+    if (playConfirmation && !getVoiceMuted()) {
+      playNotificationChime('credit');
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function initSoundboxAudioUnlock(): void {
@@ -42,25 +114,19 @@ export function initSoundboxAudioUnlock(): void {
   unlockListenersAttached = true;
 
   const unlock = () => {
-    try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (AudioCtx) {
-        if (!sharedAudioCtx) {
-          sharedAudioCtx = new AudioCtx();
-        }
-        if (sharedAudioCtx.state === 'suspended') {
-          void sharedAudioCtx.resume();
-        }
+    const ok = ensureAudioContextResumed();
+    if (ok) {
+      audioGestureUnlocked = true;
+      try {
+        localStorage.setItem(SOUND_UNLOCKED_KEY, 'true');
+      } catch {
+        // ignore
       }
-      refreshVoices();
-    } catch {
-      // ignore autoplay errors
     }
   };
 
   window.addEventListener('pointerdown', unlock, { passive: true });
+  window.addEventListener('touchstart', unlock, { passive: true });
   window.addEventListener('keydown', unlock, { passive: true });
 }
 

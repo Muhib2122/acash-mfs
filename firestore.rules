@@ -18,6 +18,18 @@ service cloud.firestore {
       return request.resource.data;
     }
 
+    function existing() {
+      return resource.data;
+    }
+
+    function isSafeImageString(val, maxLen) {
+      return val is string
+        && val.size() > 0
+        && val.size() <= maxLen
+        && !val.matches('(?i)^data:(image/svg|text/html).*')
+        && !val.matches('(?i).*<\\s*script.*');
+    }
+
     function isValidAcashUser(data, accountId) {
       return data.keys().hasAll(['accountId', 'role', 'name', 'phone', 'email', 'pinHash', 'balance', 'commissionBalance', 'status', 'verified', 'createdAt', 'lastActiveAt'])
         && data.accountId == accountId
@@ -25,28 +37,42 @@ service cloud.firestore {
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
         && data.phone is string && data.phone.size() <= 30
         && data.email is string && data.email.size() <= 160
-        && data.pinHash is string && data.pinHash.size() <= 64
-        && data.balance is number && data.balance >= 0
-        && data.commissionBalance is number && data.commissionBalance >= 0
+        && data.pinHash is string && data.pinHash.size() >= 4 && data.pinHash.size() <= 128
+        && (!('staffPinHash' in data) || (data.staffPinHash is string && data.staffPinHash.size() >= 4 && data.staffPinHash.size() <= 128))
+        && (!('profilePhotoUrl' in data) || isSafeImageString(data.profilePhotoUrl, 550000))
+        && data.balance is number && data.balance >= 0 && data.balance <= 100000000
+        && data.commissionBalance is number && data.commissionBalance >= 0 && data.commissionBalance <= 50000000
         && data.status in ['active', 'disabled']
         && data.verified is bool
         && data.createdAt is number
         && data.lastActiveAt is number;
     }
 
+    function isValidInitialUserBalance(data) {
+      return data.commissionBalance == 0
+        && data.verified == true
+        && data.status == 'active'
+        && (
+          (data.role == 'U' && data.balance <= 10000)
+          || (data.role == 'A' && data.balance <= 100000)
+          || (data.role == 'M' && data.balance <= 15000)
+        );
+    }
+
     function isValidAcashTransaction(data, txId) {
       return data.keys().hasAll(['txId', 'txHash', 'type', 'senderId', 'receiverId', 'amount', 'fee', 'totalDebited', 'status', 'refundedAmount', 'createdAt'])
         && data.txId == txId
-        && data.txHash is string && data.txHash.size() <= 64
+        && data.txHash is string && data.txHash.size() >= 4 && data.txHash.size() <= 64
         && data.type in ['send_money', 'cash_out', 'cash_in', 'agent_cash_out', 'merchant_cash_out', 'mobile_recharge', 'bill_pay', 'merchant_payment', 'b2b_transfer', 'refund', 'admin_credit', 'admin_transfer']
-        && data.senderId is string && data.senderId.size() <= 32
-        && data.receiverId is string && data.receiverId.size() <= 32
-        && data.amount is number && data.amount > 0
-        && data.fee is number && data.fee >= 0
-        && data.totalDebited is number && data.totalDebited >= 0
+        && data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 32
+        && data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 32
+        && data.amount is number && data.amount > 0 && data.amount <= 5000000
+        && data.fee is number && data.fee >= 0 && data.fee <= 500000
+        && data.totalDebited is number && data.totalDebited >= 0 && data.totalDebited <= 5500000
         && data.status in ['completed', 'pending_admin_approval', 'rejected', 'refunded', 'partially_refunded']
-        && data.refundedAmount is number && data.refundedAmount >= 0
+        && data.refundedAmount is number && data.refundedAmount >= 0 && data.refundedAmount <= data.amount
         && data.createdAt is number
+        && (!('note' in data) || (data.note is string && data.note.size() <= 300))
         && (!('giftCard' in data) || (
           data.giftCard is map
           && data.giftCard.cardId is string && data.giftCard.cardId.size() > 0 && data.giftCard.cardId.size() <= 64
@@ -57,8 +83,24 @@ service cloud.firestore {
           && data.giftCard.signaturePrefix in ['bn', 'en']
           && data.giftCard.senderDisplayName is string && data.giftCard.senderDisplayName.size() <= 140
           && data.giftCard.isCustomEdited is bool
-          && (!('customImageUrl' in data.giftCard) || (data.giftCard.customImageUrl is string && data.giftCard.customImageUrl.size() <= 450000))
+          && (!('customImageUrl' in data.giftCard) || isSafeImageString(data.giftCard.customImageUrl, 450000))
         ));
+    }
+
+    function isImmutableTransactionCorePreserved(inData, exData) {
+      return inData.txId == exData.txId
+        && inData.txHash == exData.txHash
+        && inData.type == exData.type
+        && inData.senderId == exData.senderId
+        && inData.receiverId == exData.receiverId
+        && inData.amount == exData.amount
+        && inData.fee == exData.fee
+        && inData.totalDebited == exData.totalDebited
+        && inData.createdAt == exData.createdAt
+        && (
+          !(exData.status in ['rejected', 'refunded'])
+          || inData.status == exData.status
+        );
     }
 
     function isValidCustomGiftCard(data, cardId) {
@@ -67,17 +109,31 @@ service cloud.firestore {
         && data.titleBn is string && data.titleBn.size() >= 1 && data.titleBn.size() <= 120
         && data.titleEn is string && data.titleEn.size() >= 1 && data.titleEn.size() <= 120
         && data.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration', 'others']
-        && data.imageUrl is string && data.imageUrl.size() > 0 && data.imageUrl.size() <= 650000
+        && isSafeImageString(data.imageUrl, 650000)
         && data.featured is bool
         && data.active is bool
         && (!('frozen' in data) || data.frozen is bool)
         && (!('featuredFirst' in data) || data.featuredFirst is bool)
-        && (!('pinnedOrder' in data) || data.pinnedOrder is number)
+        && (!('pinnedOrder' in data) || (data.pinnedOrder is number && data.pinnedOrder >= 0))
         && (!('isUserSubmitted' in data) || data.isUserSubmitted is bool)
         && (!('expiresAt' in data) || data.expiresAt is number)
         && data.createdBy is string && data.createdBy.size() <= 160
         && data.createdAt is number
         && data.updatedAt is number;
+    }
+
+    function isValidSecurityEvent(data, eventId) {
+      return data.keys().hasAll(['id', 'portal', 'eventType', 'severity', 'targetIdentifier', 'details', 'timestamp'])
+        && data.keys().hasOnly(['id', 'portal', 'eventType', 'severity', 'targetIdentifier', 'details', 'blockedUntil', 'resolved', 'timestamp'])
+        && data.id == eventId
+        && data.portal in ['unified', 'admin']
+        && data.eventType in ['brute_force_lockout', 'spam_flood_blocked', 'session_tamper', 'xss_payload_blocked', 'otp_abuse', 'admin_unlock', 'policy_change']
+        && data.severity in ['low', 'medium', 'high', 'critical']
+        && data.targetIdentifier is string && data.targetIdentifier.size() >= 1 && data.targetIdentifier.size() <= 160
+        && data.details is string && data.details.size() >= 1 && data.details.size() <= 600
+        && (!('blockedUntil' in data) || data.blockedUntil is number)
+        && (!('resolved' in data) || data.resolved is bool)
+        && data.timestamp is number;
     }
 
     function canReadPortalRecord() {
@@ -95,14 +151,17 @@ service cloud.firestore {
 
     match /acash_users/{accountId} {
       allow get, list: if canReadPortalRecord();
-      allow create: if isValidAccountId(accountId) && isValidAcashUser(incoming(), accountId);
+      allow create: if isValidAccountId(accountId)
+        && isValidAcashUser(incoming(), accountId)
+        && isValidInitialUserBalance(incoming());
       allow update: if isValidAccountId(accountId)
         && incoming().accountId == accountId
-        && incoming().role == resource.data.role
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
         && (
           isValidAcashUser(incoming(), accountId)
           || (
-            incoming().balance is number && incoming().balance >= 0
+            incoming().balance is number && incoming().balance >= 0 && incoming().balance <= 100000000
             && incoming().lastActiveAt is number
           )
         );
@@ -114,7 +173,7 @@ service cloud.firestore {
       allow create, update: if isValidAccountId(accountId)
         && incoming().accountId == accountId
         && incoming().role in ['U', 'A', 'M']
-        && incoming().name is string && incoming().name.size() <= 160;
+        && incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 160;
       allow delete: if isValidAccountId(accountId);
     }
 
@@ -132,14 +191,17 @@ service cloud.firestore {
       allow create, update: if isValidId(lockId)
         && incoming().lockId == lockId
         && incoming().lockType in ['email', 'phone', 'nid', 'tax']
-        && incoming().accountId is string
+        && incoming().accountId is string && incoming().accountId.size() <= 20
         && incoming().createdAt is number;
       allow delete: if isValidId(lockId);
     }
 
     match /acash_transactions/{txId} {
       allow get, list: if canReadPortalRecord();
-      allow create, update: if isValidId(txId) && isValidAcashTransaction(incoming(), txId);
+      allow create: if isValidId(txId) && isValidAcashTransaction(incoming(), txId);
+      allow update: if isValidId(txId)
+        && isValidAcashTransaction(incoming(), txId)
+        && isImmutableTransactionCorePreserved(incoming(), existing());
       allow delete: if isValidId(txId);
     }
 
@@ -157,6 +219,7 @@ service cloud.firestore {
       allow create, update: if isValidId(creatorId)
         && incoming().creatorId == creatorId
         && incoming().creatorRole in ['agent', 'merchant', 'admin', 'second_admin']
+        && (!('profilePhotoUrl' in incoming()) || isSafeImageString(incoming().profilePhotoUrl, 550000))
         && incoming().lat is number && incoming().lng is number;
       allow delete: if isValidId(creatorId);
     }
@@ -165,16 +228,17 @@ service cloud.firestore {
       allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(adminId)
         && incoming().adminId == adminId
-        && incoming().email is string
+        && incoming().email is string && incoming().email.size() <= 160
+        && (!('passwordHash' in incoming()) || (incoming().passwordHash is string && incoming().passwordHash.size() <= 128))
         && incoming().status in ['active', 'disabled'];
       allow delete: if isValidId(adminId);
     }
 
     match /acash_settings/{settingId} {
       allow get, list: if canReadPortalRecord();
-      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides']
+      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides', 'security_policy']
         && incoming().updatedAt is number;
-      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides'];
+      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme', 'gift_card_overrides', 'security_policy'];
     }
 
     match /acash_gift_cards/{cardId} {
@@ -187,6 +251,8 @@ service cloud.firestore {
       allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(notifId)
         && incoming().id == notifId
+        && incoming().title is string && incoming().title.size() <= 200
+        && incoming().message is string && incoming().message.size() <= 1000
         && incoming().createdAt is number;
       allow delete: if isValidId(notifId);
     }
@@ -195,6 +261,8 @@ service cloud.firestore {
       allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(logId)
         && incoming().id == logId
+        && incoming().title is string && incoming().title.size() <= 200
+        && incoming().details is string && incoming().details.size() <= 1000
         && incoming().timestamp is number;
       allow delete: if isValidId(logId);
     }
@@ -209,6 +277,12 @@ service cloud.firestore {
         && incoming().read is bool
         && incoming().createdAt is number;
       allow delete: if isValidId(notifId);
+    }
+
+    match /acash_security_events/{eventId} {
+      allow get, list: if canReadPortalRecord();
+      allow create, update: if isValidId(eventId) && isValidSecurityEvent(incoming(), eventId);
+      allow delete: if isValidId(eventId);
     }
 
     match /admins/{uid} {

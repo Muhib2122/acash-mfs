@@ -444,6 +444,7 @@ export interface AcashSession {
   email: string;
   firebaseUid?: string;
   loggedInAt: number;
+  integritySig?: string;
 }
 
 export interface AdminSession {
@@ -456,6 +457,42 @@ export interface AdminSession {
   profilePhotoUrl?: string;
   firebaseUid?: string;
   loggedInAt: number;
+  integritySig?: string;
+}
+
+export type SecurityEventType =
+  | 'brute_force_lockout'
+  | 'spam_flood_blocked'
+  | 'session_tamper'
+  | 'xss_payload_blocked'
+  | 'otp_abuse'
+  | 'admin_unlock'
+  | 'policy_change';
+
+export type SecuritySeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface SecurityEventRecord {
+  id: string;
+  portal: 'unified' | 'admin';
+  eventType: SecurityEventType;
+  severity: SecuritySeverity;
+  targetIdentifier: string;
+  details: string;
+  blockedUntil?: number;
+  resolved?: boolean;
+  timestamp: number;
+}
+
+export interface SecurityPolicyConfig {
+  strictAntiSpamMode: boolean;
+  maxTxPerMinute: number;
+  maxLoginFailures: number;
+  lockoutMinutes: number;
+  adminIdleTimeoutMinutes: number;
+  accountIdleTimeoutMinutes: number;
+  requireChallengeOnAdminFail: boolean;
+  updatedAt: number;
+  updatedBy: string;
 }
 
 export interface TreasuryMintHistoryEntry {
@@ -488,4 +525,5 @@ export interface KycSubmissionRecord {
   kyc: KycInfo;
   updatedAt: number;
 }
+
 

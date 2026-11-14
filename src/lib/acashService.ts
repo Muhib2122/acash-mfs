@@ -63,6 +63,10 @@ import {
   PortalThemeSurfacePreference,
   ReferralSource,
   SecondAdminProfile,
+  SecurityEventRecord,
+  SecurityEventType,
+  SecurityPolicyConfig,
+  SecuritySeverity,
   TransactionType,
   TreasuryMintHistoryEntry,
   UserGender,
@@ -81,6 +85,25 @@ import {
 } from './giftCards';
 import { DEFAULT_PORTAL_THEME_CONFIG, PORTAL_THEME_PRESETS } from './portalThemes';
 import { detectIpGeolocation } from './ipGeo';
+import {
+  assertSafeImageDataUrl,
+  checkAndRecordRegistrationBurst,
+  checkAndRecordTxFlood,
+  checkAttemptLockout,
+  checkGiftCardSubmissionQuota,
+  clearSecurityAttempts,
+  containsDangerousMarkup,
+  DEFAULT_SECURITY_POLICY,
+  formatDurationRemaining,
+  hashSecretStrong,
+  normalizeSecurityPolicy,
+  recordFailedSecurityAttempt,
+  sanitizePlainText,
+  secureRandomDigits,
+  secureRandomHex,
+  unlockRateLimitEntry,
+  verifySecretAgainstStored,
+} from './securityGuard';
 
 const USERS_COL = 'acash_users';
 const KYC_SUBMISSIONS_COL = 'acash_kyc_submissions';
@@ -95,12 +118,14 @@ const GIFT_CARDS_COL = 'acash_gift_cards';
 const ADMIN_NOTIF_COL = 'acash_admin_notifications';
 const ACCOUNT_NOTIF_COL = 'acash_account_notifications';
 const ADMIN_ACTIVITY_COL = 'acash_admin_activity_logs';
+const SECURITY_EVENTS_COL = 'acash_security_events';
 const FEE_DOC_ID = 'fee_config';
 const ADMIN_ALERT_DOC_ID = 'admin_alert';
 const MAIN_ADMIN_CREDS_DOC_ID = 'main_admin_credentials';
 const TREASURY_VAULT_DOC_ID = 'treasury_vault';
 const PORTAL_THEME_DOC_ID = 'portal_theme';
 const GIFT_CARD_OVERRIDES_DOC_ID = 'gift_card_overrides';
+const SECURITY_POLICY_DOC_ID = 'security_policy';
 const LOCAL_DB_KEY = 'acash_local_db_v1';
 const BOTS_PURGED_FLAG_KEY = 'acash_legacy_bots_purged_v1';
 const LAST_REG_TS_KEY = 'acash_last_registration_ts';
@@ -286,22 +311,19 @@ export function hashPin(pin: string): string {
 }
 
 export function generateAccountId(role: UserRole): string {
-  const num = Math.floor(100000 + Math.random() * 900000);
-  return `${role}-${num}`;
+  // CSPRNG 6-digit account ID with non-zero leading digit
+  const first = String(1 + (Number(secureRandomDigits(1)) % 9));
+  const rest = secureRandomDigits(5);
+  return `${role}-${first}${rest}`;
 }
 
 export function generateTxHash(): string {
-  const chars = '0123456789ABCDEF';
-  let hash = '0xAC';
-  for (let i = 0; i < 12; i++) {
-    hash += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return hash;
+  return `0xAC${secureRandomHex(6).toUpperCase()}`;
 }
 
 export function generateTxId(): string {
   const ts = Date.now().toString(36).toUpperCase();
-  const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const rand = secureRandomHex(2).toUpperCase();
   return `TXN-${ts}-${rand}`;
 }
 
@@ -607,6 +629,8 @@ interface LocalStoreState {
   customGiftCards?: Record<string, CustomGiftCardRecord>;
   giftCardPolicy?: GiftCardCatalogPolicy;
   portalTheme?: PortalThemeConfig;
+  securityEvents?: Record<string, SecurityEventRecord>;
+  securityPolicy?: SecurityPolicyConfig;
 }
 
 let firestoreBackendMode: 'firestore' | 'local_sync' = 'firestore';
@@ -1007,6 +1031,8 @@ function readLocalStore(): LocalStoreState {
         customGiftCards: parsed.customGiftCards || {},
         giftCardPolicy: parsed.giftCardPolicy || DEFAULT_GIFT_CARD_POLICY,
         portalTheme: parsed.portalTheme || DEFAULT_PORTAL_THEME_CONFIG,
+        securityEvents: parsed.securityEvents || {},
+        securityPolicy: normalizeSecurityPolicy(parsed.securityPolicy),
       };
       if (purgeLegacyBotRecords(hydrated)) {
         writeLocalStore(hydrated, false);
@@ -1032,6 +1058,8 @@ function readLocalStore(): LocalStoreState {
     customGiftCards: {},
     giftCardPolicy: DEFAULT_GIFT_CARD_POLICY,
     portalTheme: DEFAULT_PORTAL_THEME_CONFIG,
+    securityEvents: {},
+    securityPolicy: DEFAULT_SECURITY_POLICY,
   };
   writeLocalStore(initial, false);
   return initial;
@@ -1887,6 +1915,21 @@ export async function registerAcashUser(params: {
   const email = params.email.trim().toLowerCase();
 
   const cleanName = params.name.trim();
+  const rawNameCheck = params.name.trim();
+  const rawBizCheck = (params.businessName || '').trim();
+  if (containsDangerousMarkup(rawNameCheck) || containsDangerousMarkup(rawBizCheck)) {
+    void logSecurityEvent({
+      eventType: 'xss_payload_blocked',
+      severity: 'critical',
+      title: 'Blocked Unsafe Markup During Registration',
+      details: `Rejected HTML/script payload in registration profile for ${email}.`,
+      targetIdentifier: email,
+    });
+    throw new Error('Blocked potentially unsafe characters in name fields.');
+  }
+
+  const cleanName = sanitizePlainText(rawNameCheck, 120);
+  const cleanBusinessName = sanitizePlainText(rawBizCheck, 140);
   if (cleanName.length < 2 || /^\d+$/.test(cleanName)) {
     throw new Error('Enter your genuine full name (minimum 2 characters, not numeric only).');
   }
@@ -1900,12 +1943,35 @@ export async function registerAcashUser(params: {
     throw new Error('Gender selection is required.');
   }
 
-  // Anti-spam per-device registration cooldown (45s)
+  let safePhotoUrl: string | undefined;
+  if (params.profilePhotoUrl) {
+    try {
+      safePhotoUrl = assertSafeImageDataUrl(params.profilePhotoUrl, 360000);
+    } catch (imgErr) {
+      void logSecurityEvent({
+        eventType: 'xss_payload_blocked',
+        severity: 'critical',
+        title: 'Blocked Unsafe Avatar Payload',
+        details: `Blocked invalid/SVG avatar payload during signup for ${email}.`,
+        targetIdentifier: email,
+      });
+      throw imgErr;
+    }
+  }
+
+  // Anti-spam per-device registration cooldown (45s) + hourly burst limiter
   try {
     const lastRegRaw = localStorage.getItem(LAST_REG_TS_KEY);
     const lastRegTs = lastRegRaw ? Number(lastRegRaw) : 0;
     const elapsedSec = Math.floor((Date.now() - lastRegTs) / 1000);
     if (lastRegTs && elapsedSec >= 0 && elapsedSec < 45) {
+      void logSecurityEvent({
+        eventType: 'registration_spam_blocked',
+        severity: 'warning',
+        title: 'Registration Cooldown Enforced',
+        details: `Blocked rapid signup attempt (${45 - elapsedSec}s remaining) for ${email}.`,
+        targetIdentifier: email,
+      });
       throw new Error(
         `Anti-Spam Protection: Please wait ${45 - elapsedSec} seconds before creating another account from this device.`
       );
@@ -1913,6 +1979,21 @@ export async function registerAcashUser(params: {
   } catch (err) {
     if (err instanceof Error && err.message.includes('Anti-Spam')) {
       throw err;
+    }
+  }
+
+  const activeSecPolicy = getEffectiveSecurityPolicy();
+  if (activeSecPolicy.strictAntiSpamMode) {
+    const burst = checkAndRecordRegistrationBurst();
+    if (!burst.allowed) {
+      void logSecurityEvent({
+        eventType: 'registration_spam_blocked',
+        severity: 'critical',
+        title: 'Hourly Registration Flood Blocked',
+        details: `${burst.reason} Target: ${email}`,
+        targetIdentifier: email,
+      });
+      throw new Error(burst.reason || 'Too many registrations from this device.');
     }
   }
 
@@ -2006,19 +2087,24 @@ export async function registerAcashUser(params: {
       ? params.firebaseUid || fbSession?.uid
       : undefined;
 
+  const [strongPinHash, strongStaffPinHash] = await Promise.all([
+    hashSecretStrong(params.pin),
+    params.role === 'M' ? hashSecretStrong('0000') : Promise.resolve(undefined),
+  ]);
+
   const newUser: AcashUser = {
     accountId,
     ...(activeUid ? { firebaseUid: activeUid } : {}),
     role: params.role,
-    name: params.name.trim(),
-    ...(params.businessName?.trim() ? { businessName: params.businessName.trim() } : {}),
+    name: cleanName,
+    ...(cleanBusinessName ? { businessName: cleanBusinessName } : {}),
     gender: params.gender,
     termsAcceptedAt: params.termsAcceptedAt || now,
     phone,
     email,
-    pinHash: hashPin(params.pin),
-    ...(params.role === 'M' ? { staffPinHash: hashPin('0000') } : {}),
-    ...(params.profilePhotoUrl ? { profilePhotoUrl: params.profilePhotoUrl } : {}),
+    pinHash: strongPinHash,
+    ...(strongStaffPinHash ? { staffPinHash: strongStaffPinHash } : {}),
+    ...(safePhotoUrl ? { profilePhotoUrl: safePhotoUrl } : {}),
     balance: initialBalance,
     commissionBalance: 0,
     status: 'active',
@@ -2120,27 +2206,96 @@ export async function authenticateAcashUser(params: {
   pin: string;
   expectedRole?: UserRole;
 }): Promise<AcashUser> {
+  const cleanIdKey = params.identifier.trim().toLowerCase() || 'unknown';
+  const secPolicy = getEffectiveSecurityPolicy();
+
+  const preLock = checkAttemptLockout('user_login', cleanIdKey);
+  if (!preLock.allowed) {
+    throw new Error(
+      `Security Lockout Active: Too many wrong PIN attempts. Try again in ${formatDurationRemaining(preLock.remainingMs)}.`
+    );
+  }
+
   const user = await findUserByIdentifier(params.identifier);
   if (!user) {
+    recordFailedSecurityAttempt(
+      'user_login',
+      cleanIdKey,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
     throw new Error('Account not found. Check your Acash ID (e.g. U-123456), phone, or Gmail.');
   }
+
+  const acctLock = checkAttemptLockout('user_login', user.accountId);
+  if (!acctLock.allowed) {
+    throw new Error(
+      `Account Login Temporarily Locked: Try again in ${formatDurationRemaining(acctLock.remainingMs)}.`
+    );
+  }
+
   if (!user.pinHash) {
     throw new Error(
       'Account found in Acash Cloud. On a new browser or device, click "Continue with Google" to verify and load your wallet.'
     );
   }
-  if (user.pinHash !== hashPin(params.pin)) {
-    throw new Error('Invalid security PIN.');
+
+  const check = await verifySecretAgainstStored(params.pin, user.pinHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'user_login',
+      user.accountId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    recordFailedSecurityAttempt(
+      'user_login',
+      cleanIdKey,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Brute-Force Login Lockout · ${user.accountId}`,
+        details: `${res.attempts} consecutive invalid PIN attempts triggered exponential lockout for ${user.name} (${user.accountId}).`,
+        targetIdentifier: user.accountId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Security Lockout Triggered (${res.attempts} wrong PINs). Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    throw new Error(
+      `Invalid security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left before lockout)`
+    );
   }
 
+  clearSecurityAttempts('user_login', user.accountId);
+  clearSecurityAttempts('user_login', cleanIdKey);
+
   const now = Date.now();
-  const updated = { ...user, lastActiveAt: now };
+  let nextPinHash = user.pinHash;
+  if (check.needsUpgrade) {
+    nextPinHash = await hashSecretStrong(params.pin);
+  }
+
+  const updated: AcashUser = {
+    ...user,
+    pinHash: nextPinHash,
+    lastActiveAt: now,
+  };
   const store = readLocalStore();
   store.users[user.accountId] = updated;
   writeLocalStore(store, true);
 
   try {
-    await updateDoc(doc(db, USERS_COL, user.accountId), { lastActiveAt: now });
+    await updateDoc(doc(db, USERS_COL, user.accountId), {
+      ...(check.needsUpgrade ? { pinHash: nextPinHash } : {}),
+      lastActiveAt: now,
+    });
   } catch {
     // non-fatal if Firestore rules restrict direct update
   }
@@ -3109,8 +3264,15 @@ export async function adminSendAccountNotification(params: {
   severity?: 'info' | 'success' | 'warning' | 'critical';
   adminEmail: string;
 }): Promise<AccountNotification> {
-  const cleanTitle = params.title.trim();
-  const cleanMessage = params.message.trim();
+  if (
+    containsDangerousMarkup(params.title) ||
+    containsDangerousMarkup(params.message)
+  ) {
+    throw new Error('Blocked unsafe HTML/script tags in notification content.');
+  }
+
+  const cleanTitle = sanitizePlainText(params.title, 180);
+  const cleanMessage = sanitizePlainText(params.message, 900);
   if (!cleanTitle || !cleanMessage) {
     throw new Error('Alert title and message are required.');
   }
@@ -3249,6 +3411,54 @@ export async function executeFinancialTransaction(params: {
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error('Enter a valid amount greater than 0 BDT.');
   }
+  if (amount > 5000000) {
+    throw new Error('Single transaction limit exceeded (max ৳5,000,000 per transaction).');
+  }
+
+  const secPolicy = getEffectiveSecurityPolicy();
+
+  // Check Transaction PIN lockout before proceeding
+  const txLock = checkAttemptLockout('tx_pin', params.senderId);
+  if (!txLock.allowed) {
+    throw new Error(
+      `Transaction PIN Locked: Wait ${formatDurationRemaining(txLock.remainingMs)} before retrying.`
+    );
+  }
+
+  // XSS/script guard on note & gift card text
+  if (
+    containsDangerousMarkup(params.note || '') ||
+    containsDangerousMarkup(params.giftCard?.message || '') ||
+    containsDangerousMarkup(params.giftCard?.senderDisplayName || '')
+  ) {
+    void logSecurityEvent({
+      eventType: 'xss_payload_blocked',
+      severity: 'critical',
+      title: `Blocked Unsafe Script in Transaction Note · ${params.senderId}`,
+      details: `Blocked dangerous HTML/script payload on ${params.type} from ${params.senderId}.`,
+      targetIdentifier: params.senderId,
+    });
+    throw new Error('Blocked potentially unsafe characters in message or note.');
+  }
+
+  const sanitizedNote = params.note ? sanitizePlainText(params.note, 260) : '';
+  let sanitizedGiftCard = params.giftCard;
+  if (sanitizedGiftCard) {
+    if (sanitizedGiftCard.customImageUrl) {
+      assertSafeImageDataUrl(sanitizedGiftCard.customImageUrl, 640000);
+    }
+    sanitizedGiftCard = {
+      ...sanitizedGiftCard,
+      message: clampToMaxWords(
+        sanitizePlainText(sanitizedGiftCard.message || '', 550),
+        GIFT_CARD_MAX_WORDS
+      ),
+      senderDisplayName: sanitizePlainText(
+        sanitizedGiftCard.senderDisplayName || '',
+        80
+      ),
+    };
+  }
 
   const isExternalUtility = params.type === 'mobile_recharge' || params.type === 'bill_pay';
   const cleanReceiverInput = params.receiverIdentifier.trim().toUpperCase();
@@ -3270,7 +3480,53 @@ export async function executeFinancialTransaction(params: {
 
   if (!senderLocal) throw new Error('Sender account does not exist.');
   if (senderLocal.status !== 'active') throw new Error('Your account is currently disabled by Admin.');
-  if (senderLocal.pinHash !== hashPin(params.pin)) throw new Error('Incorrect Security PIN.');
+
+  const pinCheck = await verifySecretAgainstStored(params.pin, senderLocal.pinHash, hashPin);
+  if (!pinCheck.valid) {
+    const res = recordFailedSecurityAttempt(
+      'tx_pin',
+      params.senderId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Transaction PIN Lockout · ${params.senderId}`,
+        details: `${res.attempts} invalid Transaction PIN attempts triggered lockout on ${params.type} (৳${amount}).`,
+        targetIdentifier: params.senderId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Transaction PIN Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    throw new Error(
+      `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+    );
+  }
+  clearSecurityAttempts('tx_pin', params.senderId);
+
+  // Anti-Spam Transaction Flood & Idempotency Shield (after PIN verified so wrong PIN doesn't consume quota)
+  if (secPolicy.strictAntiSpamMode) {
+    const fpTarget = isExternalUtility
+      ? params.rechargeNumber || params.billAccountNumber || cleanReceiverInput
+      : cleanReceiverInput;
+    const fingerprint = `${params.senderId}|${params.type}|${fpTarget}|${amount.toFixed(2)}`;
+    const flood = checkAndRecordTxFlood(params.senderId, fingerprint, secPolicy);
+    if (!flood.allowed) {
+      void logSecurityEvent({
+        eventType: 'spam_tx_blocked',
+        severity: 'warning',
+        title: `Transaction Flood / Replay Blocked · ${params.senderId}`,
+        details: `${flood.reason} (${params.type} ৳${amount} -> ${fpTarget})`,
+        targetIdentifier: params.senderId,
+      });
+      throw new Error(flood.reason || 'Transaction throttled by Anti-Spam Shield.');
+    }
+  }
 
   let receiverUser: AcashUser | null = null;
 
@@ -3423,8 +3679,8 @@ export async function executeFinancialTransaction(params: {
     ...(params.biller ? { biller: params.biller } : {}),
     ...(params.billAccountNumber ? { billAccountNumber: params.billAccountNumber } : {}),
     ...(params.billMonth ? { billMonth: params.billMonth } : {}),
-    ...(params.note?.trim() ? { note: params.note.trim() } : {}),
-    ...(params.giftCard ? { giftCard: stripUndefined(params.giftCard) } : {}),
+    ...(sanitizedNote ? { note: sanitizedNote } : {}),
+    ...(sanitizedGiftCard ? { giftCard: stripUndefined(sanitizedGiftCard) } : {}),
     createdAt: now,
   };
 
@@ -3720,13 +3976,44 @@ export async function executeMerchantRefund(params: {
     throw new Error(`Refund exceeds remaining refundable amount (৳${remaining.toFixed(2)}).`);
   }
 
+  const refundLock = checkAttemptLockout('tx_pin', params.merchantId);
+  if (!refundLock.allowed) {
+    throw new Error(
+      `Merchant PIN Locked: Try again in ${formatDurationRemaining(refundLock.remainingMs)}.`
+    );
+  }
+
   let merchant = store.users[params.merchantId];
   if (!merchant) {
-    merchant = (await findUserByIdentifier(params.merchantId)) ?? undefined as unknown as AcashUser;
+    merchant = (await findUserByIdentifier(params.merchantId)) ?? (undefined as unknown as AcashUser);
   }
   if (!merchant) throw new Error('Merchant account not found.');
   if (merchant.status !== 'active') throw new Error('Merchant account is disabled.');
-  if (merchant.pinHash !== hashPin(params.pin)) throw new Error('Incorrect Security PIN.');
+
+  const secPolicy = getEffectiveSecurityPolicy();
+  const refundPinCheck = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
+  if (!refundPinCheck.valid) {
+    const res = recordFailedSecurityAttempt(
+      'tx_pin',
+      params.merchantId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Merchant Refund PIN Lockout · ${params.merchantId}`,
+        details: `${res.attempts} invalid PIN attempts on refund request.`,
+        targetIdentifier: params.merchantId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+    }
+    throw new Error('Incorrect Security PIN.');
+  }
+  clearSecurityAttempts('tx_pin', params.merchantId);
+
   if (merchant.balance < refundAmt) {
     throw new Error('Insufficient Merchant balance to process this refund.');
   }
@@ -3771,7 +4058,7 @@ export async function executeMerchantRefund(params: {
     status: 'completed',
     refundedAmount: 0,
     parentTxHash: orig.txHash,
-    note: params.note?.trim() || `Refund for ${orig.txHash}`,
+    note: sanitizePlainText(params.note || '', 240) || `Refund for ${orig.txHash}`,
     createdAt: now,
   };
 
@@ -5637,15 +5924,16 @@ export async function adminUpdateFeeConfig(config: Omit<FeeConfig, 'updatedAt'>)
 }
 
 export async function updateUserPin(accountId: string, newPin: string): Promise<void> {
-  const pinHash = hashPin(newPin);
+  const pinHash = await hashSecretStrong(newPin);
+  const now = Date.now();
   const store = readLocalStore();
   if (store.users[accountId]) {
-    store.users[accountId] = { ...store.users[accountId], pinHash, lastActiveAt: Date.now() };
+    store.users[accountId] = { ...store.users[accountId], pinHash, lastActiveAt: now };
     writeLocalStore(store, true);
   }
 
   try {
-    await updateDoc(doc(db, USERS_COL, accountId), { pinHash, lastActiveAt: Date.now() });
+    await updateDoc(doc(db, USERS_COL, accountId), { pinHash, lastActiveAt: now });
   } catch {
     firestoreBackendMode = 'local_sync';
   }
@@ -5659,19 +5947,95 @@ export async function changeUserSecurityPin(
   if (!/^\d{4,5}$/.test(newPin.trim())) {
     throw new Error('New Security PIN must be 4 or 5 digits.');
   }
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lock = checkAttemptLockout('tx_pin', accountId);
+  if (!lock.allowed) {
+    throw new Error(
+      `Security PIN Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
+    );
+  }
   const store = readLocalStore();
   const user = store.users[accountId];
   if (!user) throw new Error('Account not found.');
-  if (user.pinHash !== hashPin(currentPin)) {
+  const check = await verifySecretAgainstStored(currentPin, user.pinHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'tx_pin',
+      accountId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `PIN Change Lockout · ${accountId}`,
+        details: `${res.attempts} invalid current PIN attempts during PIN reset.`,
+        targetIdentifier: accountId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+    }
     throw new Error('Current Security PIN is incorrect.');
   }
+  clearSecurityAttempts('tx_pin', accountId);
   await updateUserPin(accountId, newPin.trim());
+}
+
+export async function verifyMerchantOwnerPin(accountId: string, pin: string): Promise<boolean> {
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lock = checkAttemptLockout('merchant_unlock', accountId);
+  if (!lock.allowed) {
+    throw new Error(
+      `Owner Unlock Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
+    );
+  }
+
+  const store = readLocalStore();
+  let user = store.users[accountId];
+  if (!user) {
+    const fetched = await findUserByIdentifier(accountId);
+    if (fetched) user = fetched;
+  }
+  if (!user) throw new Error('Merchant account not found.');
+
+  const check = await verifySecretAgainstStored(pin, user.pinHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'merchant_unlock',
+      accountId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Merchant Owner Unlock Lockout · ${accountId}`,
+        details: `${res.attempts} wrong owner PIN attempts from Cashier terminal.`,
+        targetIdentifier: accountId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Owner Unlock Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    return false;
+  }
+
+  clearSecurityAttempts('merchant_unlock', accountId);
+  if (check.needsUpgrade) {
+    void updateUserPin(accountId, pin);
+  }
+  return true;
 }
 
 export async function updateUserProfilePhoto(
   accountId: string,
   profilePhotoUrl: string
 ): Promise<AcashUser | null> {
+  const safePhotoUrl = assertSafeImageDataUrl(profilePhotoUrl, 360000);
   const now = Date.now();
   const store = readLocalStore();
   const user = store.users[accountId];
@@ -5679,7 +6043,7 @@ export async function updateUserProfilePhoto(
 
   const updated: AcashUser = {
     ...user,
-    profilePhotoUrl,
+    profilePhotoUrl: safePhotoUrl,
     lastActiveAt: now,
   };
   store.users[accountId] = updated;
@@ -5689,7 +6053,7 @@ export async function updateUserProfilePhoto(
   if (existingPin) {
     updatedPin = {
       ...existingPin,
-      profilePhotoUrl,
+      profilePhotoUrl: safePhotoUrl,
       updatedAt: now,
     };
     store.mapLocations[accountId] = updatedPin;
@@ -6344,6 +6708,14 @@ export async function verifyAdminPasswordLogin(
     throw new Error('Enter your Admin password.');
   }
 
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lockCheck = checkAttemptLockout('admin_login', cleanEmail);
+  if (!lockCheck.allowed) {
+    throw new Error(
+      `Admin Security Lockout: Too many failed attempts. Retry in ${formatDurationRemaining(lockCheck.remainingMs)}.`
+    );
+  }
+
   const store = readLocalStore();
 
   if (isMainAdminEmail(cleanEmail)) {
@@ -6363,9 +6735,47 @@ export async function verifyAdminPasswordLogin(
         // use local synced credentials
       }
     }
-    if (hashPin(cleanPass) !== creds.passwordHash) {
-      throw new Error('Invalid Main Admin password.');
+    const check = await verifySecretAgainstStored(cleanPass, creds.passwordHash, hashPin);
+    if (!check.valid) {
+      const res = recordFailedSecurityAttempt(
+        'admin_login',
+        cleanEmail,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'admin_login_lockout',
+          severity: 'critical',
+          title: `Main Admin Brute-Force Lockout`,
+          details: `${res.attempts} invalid password attempts targeting Main Admin (${cleanEmail}).`,
+          targetIdentifier: cleanEmail,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+        throw new Error(
+          `Admin Security Lockout Triggered (${res.attempts} failures). Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
+      throw new Error(
+        `Invalid Main Admin password. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} before lockout)`
+      );
     }
+
+    clearSecurityAttempts('admin_login', cleanEmail);
+    if (check.needsUpgrade) {
+      const upgradedHash = await hashSecretStrong(cleanPass);
+      const upgradedCreds: MainAdminCredentialConfig = {
+        ...creds,
+        passwordHash: upgradedHash,
+        updatedAt: Date.now(),
+        updatedBy: 'Auto Crypto Upgrade (SEC2)',
+      };
+      store.mainAdminCredentials = upgradedCreds;
+      writeLocalStore(store, true);
+      void setDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID), upgradedCreds).catch(() => {});
+    }
+
     return {
       adminEmail: MAIN_ADMIN_EMAIL,
       adminName: 'Main Admin (Root)',
@@ -6396,6 +6806,12 @@ export async function verifyAdminPasswordLogin(
   }
 
   if (!matched) {
+    recordFailedSecurityAttempt(
+      'admin_login',
+      cleanEmail,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
     throw new Error(
       `Account not authorized. 2nd Admin accounts must first be created by the Main Admin (${MAIN_ADMIN_EMAIL}).`
     );
@@ -6405,8 +6821,46 @@ export async function verifyAdminPasswordLogin(
   }
 
   const expectedHash = matched.passwordHash || hashPin('Acash2nd@2026');
-  if (hashPin(cleanPass) !== expectedHash) {
-    throw new Error('Invalid 2nd Admin password.');
+  const check = await verifySecretAgainstStored(cleanPass, expectedHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'admin_login',
+      cleanEmail,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'admin_login_lockout',
+        severity: 'critical',
+        title: `2nd Admin Login Lockout · ${matched.adminId}`,
+        details: `${res.attempts} invalid password attempts targeting ${cleanEmail}.`,
+        targetIdentifier: cleanEmail,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Admin Security Lockout Triggered. Retry in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    throw new Error(
+      `Invalid 2nd Admin password. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left)`
+    );
+  }
+
+  clearSecurityAttempts('admin_login', cleanEmail);
+  if (check.needsUpgrade) {
+    const upgradedHash = await hashSecretStrong(cleanPass);
+    const updatedMatched: SecondAdminProfile = {
+      ...matched,
+      passwordHash: upgradedHash,
+      updatedAt: Date.now(),
+    };
+    store.secondAdmins[matched.adminId] = updatedMatched;
+    writeLocalStore(store, true);
+    void setDoc(doc(db, SECOND_ADMINS_COL, matched.adminId), updatedMatched, { merge: true }).catch(
+      () => {}
+    );
   }
 
   return {
@@ -6515,14 +6969,20 @@ export async function changeMainAdminPassword(params: {
   }
 
   const store = readLocalStore();
-  if (hashPin(cleanCurrent) !== store.mainAdminCredentials.passwordHash) {
+  const check = await verifySecretAgainstStored(
+    cleanCurrent,
+    store.mainAdminCredentials.passwordHash,
+    hashPin
+  );
+  if (!check.valid) {
     throw new Error('Current Main Admin password is incorrect.');
   }
 
   const now = Date.now();
+  const strongPasswordHash = await hashSecretStrong(cleanNew);
   const updatedCreds: MainAdminCredentialConfig = {
     email: MAIN_ADMIN_EMAIL,
-    passwordHash: hashPin(cleanNew),
+    passwordHash: strongPasswordHash,
     updatedAt: now,
     updatedBy: params.actorEmail,
   };
@@ -6577,20 +7037,21 @@ export async function adminCreateSecondAdmin(params: {
     throw new Error(`A 2nd Admin (${duplicate.adminId}) already uses ${cleanEmail}.`);
   }
 
-  let randomNum = Math.floor(200003 + Math.random() * 790000);
+  let randomNum = 200003 + (Number(secureRandomDigits(6)) % 790000);
   let adminId = `ADM-${randomNum}`;
   while (store.secondAdmins[adminId]) {
-    randomNum = Math.floor(200003 + Math.random() * 790000);
+    randomNum = 200003 + (Number(secureRandomDigits(6)) % 790000);
     adminId = `ADM-${randomNum}`;
   }
 
+  const strongPasswordHash = await hashSecretStrong(params.password.trim());
   const profile: SecondAdminProfile = {
     adminId,
-    name: params.name.trim().slice(0, 120),
-    title: (params.title || '2nd Admin Regional Desk').trim().slice(0, 140),
+    name: sanitizePlainText(params.name, 120),
+    title: sanitizePlainText(params.title || '2nd Admin Regional Desk', 140),
     email: cleanEmail.slice(0, 160),
     phone: (normalizeBdPhone(params.phone) || params.phone.trim()).slice(0, 30),
-    passwordHash: hashPin(params.password.trim()),
+    passwordHash: strongPasswordHash,
     createdBy: params.actorEmail,
     status: 'active',
     createdAt: now,
@@ -6689,9 +7150,10 @@ export async function adminResetSecondAdminPassword(
   const existing = store.secondAdmins[adminId];
   if (!existing) throw new Error('2nd Admin not found.');
 
+  const strongPasswordHash = await hashSecretStrong(newPassword.trim());
   const updated: SecondAdminProfile = {
     ...existing,
-    passwordHash: hashPin(newPassword.trim()),
+    passwordHash: strongPasswordHash,
     updatedAt: now,
   };
   store.secondAdmins[adminId] = updated;
@@ -7156,19 +7618,16 @@ export async function adminSaveCustomGiftCard(params: {
   adminEmail: string;
 }): Promise<CustomGiftCardRecord> {
   const now = Date.now();
-  const titleBn = params.titleBn.trim().slice(0, 120);
-  const titleEn = params.titleEn.trim().slice(0, 120);
-  const imageUrl = params.imageUrl.trim();
+  const titleBn = sanitizePlainText(params.titleBn, 120);
+  const titleEn = sanitizePlainText(params.titleEn, 120);
   if (!titleBn || !titleEn) {
     throw new Error('Both Bangla and English card titles are required.');
   }
-  if (!imageUrl || imageUrl.length > 640000) {
-    throw new Error('Please upload a valid card image (compressed under 600KB).');
-  }
+  const imageUrl = assertSafeImageDataUrl(params.imageUrl, 640000);
 
   const cardId =
     params.cardId?.trim().replace(/[^a-zA-Z0-9_-]/g, '_') ||
-    `custom_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    `custom_${now.toString(36)}_${secureRandomHex(2)}`;
 
   const store = readLocalStore();
   const existing = store.customGiftCards?.[cardId];
@@ -7251,17 +7710,53 @@ export async function userSubmitCustomGiftCard(params: {
   defaultMessageEn?: string;
 }): Promise<CustomGiftCardRecord> {
   const now = Date.now();
-  const titleBn = params.titleBn.trim().slice(0, 120);
-  const titleEn = (params.titleEn?.trim() || params.titleBn.trim()).slice(0, 120);
-  const imageUrl = params.imageUrl.trim();
+  if (
+    containsDangerousMarkup(params.titleBn) ||
+    containsDangerousMarkup(params.titleEn || '') ||
+    containsDangerousMarkup(params.defaultMessageBn || '') ||
+    containsDangerousMarkup(params.defaultMessageEn || '')
+  ) {
+    void logSecurityEvent({
+      eventType: 'xss_payload_blocked',
+      severity: 'critical',
+      title: `Blocked Unsafe Markup in User Gift Card · ${params.accountId}`,
+      details: `Rejected dangerous script/HTML in custom card submission by ${params.accountId}.`,
+      targetIdentifier: params.accountId,
+    });
+    throw new Error('Blocked potentially unsafe HTML or script markup.');
+  }
+
+  const titleBn = sanitizePlainText(params.titleBn, 120);
+  const titleEn = sanitizePlainText(params.titleEn || params.titleBn, 120);
   if (!titleBn) {
     throw new Error('Please enter a title for your Gift Card.');
   }
-  if (!imageUrl || imageUrl.length > 640000) {
-    throw new Error('Please upload an image under 600KB.');
+
+  let imageUrl = '';
+  try {
+    imageUrl = assertSafeImageDataUrl(params.imageUrl, 640000);
+  } catch (err) {
+    void logSecurityEvent({
+      eventType: 'xss_payload_blocked',
+      severity: 'critical',
+      title: `Blocked Unsafe Gift Card Image · ${params.accountId}`,
+      details: `Blocked invalid or SVG image payload on gift card by ${params.accountId}.`,
+      targetIdentifier: params.accountId,
+    });
+    throw err;
   }
 
-  const cardId = `usr_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  // Enforce per-user 24h custom gift card quota (max 3 active, 45s cooldown)
+  const storeSnap = readLocalStore();
+  const activeCount = Object.values(storeSnap.customGiftCards || {}).filter(
+    (c) => c.submittedByAccountId === params.accountId && !isGiftCardExpired(c, now)
+  ).length;
+  const quota = checkGiftCardSubmissionQuota(params.accountId, activeCount);
+  if (!quota.allowed) {
+    throw new Error(quota.reason || 'Custom gift card submission limit reached.');
+  }
+
+  const cardId = `usr_${now.toString(36)}_${secureRandomHex(3)}`;
   const expiresAt = now + USER_GIFT_CARD_TTL_MS;
 
   const record: CustomGiftCardRecord = {
@@ -7540,6 +8035,292 @@ export async function adminDeleteCustomGiftCard(
     cardId,
     action: 'delete',
     adminEmail,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*  10x Security Fortress: Threat Logging, Policy Sync & Brute-Force Recovery */
+/* -------------------------------------------------------------------------- */
+
+export function getEffectiveSecurityPolicy(): SecurityPolicyConfig {
+  return normalizeSecurityPolicy(readLocalStore().securityPolicy);
+}
+
+export function subscribeToSecurityPolicy(
+  callback: (policy: SecurityPolicyConfig) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    callback(normalizeSecurityPolicy(readLocalStore().securityPolicy));
+  };
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  try {
+    unsubFs = onSnapshot(
+      doc(db, SETTINGS_COL, SECURITY_POLICY_DOC_ID),
+      (snap) => {
+        if (snap.exists()) {
+          const cfg = normalizeSecurityPolicy(snap.data() as Partial<SecurityPolicyConfig>);
+          const store = readLocalStore();
+          store.securityPolicy = cfg;
+          writeLocalStore(store, false);
+          callback(cfg);
+        }
+      },
+      () => emitLocal()
+    );
+  } catch {
+    // ignore
+  }
+
+  return () => {
+    unsubLocal();
+    unsubFs();
+  };
+}
+
+export async function adminUpdateSecurityPolicy(
+  policyInput: Partial<SecurityPolicyConfig>,
+  adminEmail: string
+): Promise<SecurityPolicyConfig> {
+  const now = Date.now();
+  const cfg = normalizeSecurityPolicy({
+    ...getEffectiveSecurityPolicy(),
+    ...policyInput,
+    updatedAt: now,
+    updatedBy: adminEmail,
+  });
+
+  const store = readLocalStore();
+  store.securityPolicy = cfg;
+
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-SECPOL',
+    actionType: 'security_update',
+    title: 'Security & Anti-Spam Policy Updated',
+    details: `Strict Anti-Spam: ${cfg.strictAntiSpamMode ? 'ON' : 'OFF'} · Max Tx/min: ${cfg.maxTxPerMinute} · Max Failures: ${cfg.maxLoginFailures} (${cfg.lockoutMinutes}m lock) · Idle Timeout: Admin ${cfg.adminIdleTimeoutMinutes}m / Account ${cfg.accountIdleTimeoutMinutes}m.`,
+    actorEmail: adminEmail,
+    timestamp: now,
+  });
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      setDoc(doc(db, SETTINGS_COL, SECURITY_POLICY_DOC_ID), stripUndefined(cfg)),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.WRITE, `${SETTINGS_COL}/${SECURITY_POLICY_DOC_ID}`);
+    }
+    throw err;
+  }
+
+  return cfg;
+}
+
+export async function logSecurityEvent(params: {
+  eventType: SecurityEventType;
+  severity: SecuritySeverity;
+  title: string;
+  details: string;
+  targetIdentifier: string;
+  attempts?: number;
+  blockedUntil?: number;
+}): Promise<SecurityEventRecord> {
+  const now = Date.now();
+  const id = `SEC-${now.toString(36).toUpperCase()}-${secureRandomHex(3).toUpperCase()}`;
+  const cleanTarget = sanitizePlainText(params.targetIdentifier, 160) || 'unknown';
+  const cleanTitle = sanitizePlainText(params.title, 180) || 'Security Alert';
+  const cleanDetails = sanitizePlainText(params.details, 600) || cleanTitle;
+
+  const record: SecurityEventRecord = stripUndefined({
+    id,
+    eventType: params.eventType,
+    severity: params.severity,
+    title: cleanTitle,
+    details: cleanDetails,
+    targetIdentifier: cleanTarget,
+    ...(typeof params.attempts === 'number' ? { attempts: params.attempts } : {}),
+    ...(typeof params.blockedUntil === 'number' ? { blockedUntil: params.blockedUntil } : {}),
+    createdAt: now,
+    resolved: false,
+  });
+
+  const store = readLocalStore();
+  store.securityEvents = {
+    ...(store.securityEvents || {}),
+    [id]: record,
+  };
+
+  if (params.severity === 'critical') {
+    const adminNotif: AdminNotification = {
+      id: `NTF-SEC-${now.toString(36).toUpperCase()}-${secureRandomHex(2).toUpperCase()}`,
+      title: cleanTitle.slice(0, 180),
+      message: cleanDetails.slice(0, 500),
+      category: 'security',
+      severity: 'critical',
+      createdAt: now,
+      read: false,
+      targetSection: 'security',
+    };
+    store.notifications[adminNotif.id] = adminNotif;
+    void setDoc(doc(db, ADMIN_NOTIF_COL, adminNotif.id), adminNotif).catch(() => {});
+  }
+
+  writeLocalStore(store, true);
+
+  try {
+    await setDoc(doc(db, SECURITY_EVENTS_COL, id), record);
+  } catch {
+    // fallback safely stored locally
+  }
+
+  return record;
+}
+
+export function subscribeToSecurityEvents(
+  callback: (events: SecurityEventRecord[]) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    const store = readLocalStore();
+    callback(
+      Object.values(store.securityEvents || {}).sort((a, b) => b.createdAt - a.createdAt)
+    );
+  };
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  const attachFs = () => {
+    unsubFs();
+    try {
+      const q = query(collection(db, SECURITY_EVENTS_COL), orderBy('createdAt', 'desc'), limit(250));
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const store = readLocalStore();
+          store.securityEvents = store.securityEvents || {};
+          for (const d of snap.docs) {
+            const ev = d.data() as SecurityEventRecord;
+            if (ev?.id) {
+              store.securityEvents[ev.id] = ev;
+            }
+          }
+          writeLocalStore(store, false);
+          emitLocal();
+        },
+        () => emitLocal()
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachFs();
+  let lastUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastUid) {
+      lastUid = nextUid;
+      attachFs();
+    } else if (!nextUid) {
+      lastUid = '';
+    }
+  });
+
+  return () => {
+    unsubLocal();
+    unsubAuth();
+    unsubFs();
+  };
+}
+
+export async function adminResolveAndUnlockSecurityTarget(params: {
+  eventId?: string;
+  scope?: string;
+  targetIdentifier: string;
+  adminEmail: string;
+}): Promise<void> {
+  const now = Date.now();
+  const cleanTarget = params.targetIdentifier.trim().toLowerCase();
+
+  if (params.scope) {
+    unlockRateLimitEntry(params.scope, cleanTarget);
+  } else {
+    unlockRateLimitEntry('user_login', cleanTarget);
+    unlockRateLimitEntry('tx_pin', cleanTarget);
+    unlockRateLimitEntry('merchant_unlock', cleanTarget);
+    unlockRateLimitEntry('admin_login', cleanTarget);
+  }
+
+  const store = readLocalStore();
+  store.securityEvents = store.securityEvents || {};
+  const updatedEvents: SecurityEventRecord[] = [];
+
+  for (const [id, ev] of Object.entries(store.securityEvents)) {
+    const matches =
+      (params.eventId && id === params.eventId) ||
+      (!params.eventId && ev.targetIdentifier.toLowerCase() === cleanTarget && !ev.resolved);
+    if (matches) {
+      const resolvedEv: SecurityEventRecord = {
+        ...ev,
+        resolved: true,
+        resolvedAt: now,
+        resolvedBy: params.adminEmail,
+      };
+      store.securityEvents[id] = resolvedEv;
+      updatedEvents.push(resolvedEv);
+    }
+  }
+
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-UNBLK',
+    actionType: 'security_update',
+    title: `Security Target Unblocked · ${params.targetIdentifier}`,
+    details: `Admin ${params.adminEmail} cleared active lockouts and resolved security incident(s) for ${params.targetIdentifier}.`,
+    actorEmail: params.adminEmail,
+    targetIds: [params.targetIdentifier],
+    timestamp: now,
+  });
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      ...updatedEvents.map((ev) =>
+        setDoc(doc(db, SECURITY_EVENTS_COL, ev.id), stripUndefined(ev), { merge: true }).catch(
+          () => {}
+        )
+      ),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act).catch(() => {}),
+    ]);
+  } catch {
+    // ignore offline sync fallback
+  }
+}
+
+export function recordOtpAbuseEvent(email: string, reason: string): void {
+  void logSecurityEvent({
+    eventType: 'otp_abuse',
+    severity: 'warning',
+    title: `OTP Rate/Attempt Abuse Blocked · ${email}`,
+    details: reason,
+    targetIdentifier: email,
+  });
+}
+
+export function recordSessionTamperEvent(identifier: string, portal: 'admin' | 'account'): void {
+  void logSecurityEvent({
+    eventType: 'session_tamper_detected',
+    severity: 'critical',
+    title: `Session Integrity Mismatch (${portal.toUpperCase()})`,
+    details: `Blocked tampered local session storage token on ${portal} portal for ${identifier}.`,
+    targetIdentifier: identifier,
   });
 }
 

@@ -47,11 +47,11 @@
         },
         "pinHash": {
           "type": "string",
-          "maxLength": 64
+          "maxLength": 128
         },
         "staffPinHash": {
           "type": "string",
-          "maxLength": 64
+          "maxLength": 128
         },
         "profilePhotoUrl": {
           "type": "string",
@@ -493,7 +493,7 @@
         },
         "passwordHash": {
           "type": "string",
-          "maxLength": 64
+          "maxLength": 128
         },
         "createdBy": {
           "type": "string",
@@ -772,6 +772,48 @@
         }
       },
       "required": ["cardId", "titleBn", "titleEn", "themeCategory", "imageUrl", "featured", "active", "createdBy", "createdAt", "updatedAt"]
+    },
+    "SecurityEvent": {
+      "title": "SecurityEvent",
+      "description": "Real-time intrusion detection, brute-force lockout, spam flood block, and session tamper audit event.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "portal": {
+          "type": "string",
+          "enum": ["unified", "admin"]
+        },
+        "eventType": {
+          "type": "string",
+          "enum": ["brute_force_lockout", "spam_flood_blocked", "session_tamper", "xss_payload_blocked", "otp_abuse", "admin_unlock", "policy_change"]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "targetIdentifier": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "blockedUntil": {
+          "type": "number"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "timestamp": {
+          "type": "number"
+        }
+      },
+      "required": ["id", "portal", "eventType", "severity", "targetIdentifier", "details", "timestamp"]
     }
   },
   "firestore": {
@@ -809,7 +851,7 @@
     },
     "/acash_settings/{settingId}": {
       "schema": { "$ref": "#/entities/AcashSetting" },
-      "description": "Global Fee Engine, Portal Theme, and Admin Alert configuration documents."
+      "description": "Global Fee Engine, Portal Theme, Security Policy, and Admin Alert configuration documents."
     },
     "/acash_gift_cards/{cardId}": {
       "schema": { "$ref": "#/entities/CustomGiftCard" },
@@ -826,6 +868,10 @@
     "/acash_account_notifications/{notifId}": {
       "schema": { "$ref": "#/entities/AccountNotification" },
       "description": "Real-time per-account and broadcast alerts for Customers, Agents, and Merchants."
+    },
+    "/acash_security_events/{eventId}": {
+      "schema": { "$ref": "#/entities/SecurityEvent" },
+      "description": "Real-time brute-force lockouts, spam blocks, XSS rejections, and session tamper logs."
     },
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminUser" },

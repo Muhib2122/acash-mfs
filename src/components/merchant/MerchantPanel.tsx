@@ -27,7 +27,7 @@ import {
   calculateFeeBreakdown,
   executeFinancialTransaction,
   executeMerchantRefund,
-  hashPin,
+  verifyMerchantOwnerPin,
 } from '../../lib/acashService';
 import {
   downloadAccountStatementPdf,
@@ -269,16 +269,28 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
     playMerchantSoundbox(sampleAmt, 'Walk-in Customer', lang, user.gender);
   };
 
-  const handleUnlockOwner = (e: React.FormEvent) => {
+  const handleUnlockOwner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (hashPin(unlockPin) !== user.pinHash) {
-      setUnlockError(lang === 'bn' ? 'ভুল ওনার পিন!' : 'Invalid Owner PIN.');
-      return;
-    }
-    setCashierMode(false);
-    setUnlockModalOpen(false);
-    setUnlockPin('');
     setUnlockError('');
+    try {
+      const ok = await verifyMerchantOwnerPin(user.accountId, unlockPin);
+      if (!ok) {
+        setUnlockError(lang === 'bn' ? 'ভুল ওনার পিন!' : 'Invalid Owner PIN.');
+        return;
+      }
+      setCashierMode(false);
+      setUnlockModalOpen(false);
+      setUnlockPin('');
+      setUnlockError('');
+    } catch (err) {
+      setUnlockError(
+        err instanceof Error
+          ? err.message
+          : lang === 'bn'
+            ? 'ওনার পিন যাচাই করা যায়নি।'
+            : 'Unable to verify Owner PIN.'
+      );
+    }
   };
 
   const handleRefundConfirm = async () => {

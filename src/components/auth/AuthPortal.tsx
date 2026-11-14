@@ -35,10 +35,20 @@ import {
   findUserByIdentifier,
   formatUserReferralSource,
   getBackendSyncMode,
+  recordOtpAbuseEvent,
   registerAcashUser,
   resolveAcashUserForGoogleAuth,
   syncAcashUserToCloud,
 } from '../../lib/acashService';
+import {
+  checkAndRecordOtpSendQuota,
+  containsDangerousMarkup,
+  createSecurityChallenge,
+  sanitizePlainText,
+  secureRandomDigits,
+  SecurityChallenge,
+  timingSafeEqual,
+} from '../../lib/securityGuard';
 import { BrandLogo } from '../common/BrandLogo';
 
 interface AuthPortalProps {
@@ -73,12 +83,20 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [otpStep, setOtpStep] = useState(false);
   const [generatedOtp, setGeneratedOtp] = useState('');
   const [otpExpiresAt, setOtpExpiresAt] = useState(0);
+  const [otpAttempts, setOtpAttempts] = useState(0);
+  const [otpCooldownSec, setOtpCooldownSec] = useState(0);
   const [otpInput, setOtpInput] = useState('');
   const [otpStatusMsg, setOtpStatusMsg] = useState('');
   const [pendingLoginUser, setPendingLoginUser] = useState<AcashUser | null>(null);
   const [newlyCreatedUser, setNewlyCreatedUser] = useState<AcashUser | null>(null);
   const [cloudSynced, setCloudSynced] = useState(false);
   const [syncingCloud, setSyncingCloud] = useState(false);
+
+  // Anti-bot human security challenge on registration
+  const [humanChallenge, setHumanChallenge] = useState<SecurityChallenge>(() =>
+    createSecurityChallenge(lang)
+  );
+  const [challengeInput, setChallengeInput] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
@@ -90,6 +108,19 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     photoURL?: string;
   } | null>(null);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    setHumanChallenge(createSecurityChallenge(lang));
+    setChallengeInput('');
+  }, [lang]);
+
+  useEffect(() => {
+    if (otpCooldownSec <= 0) return;
+    const timer = window.setInterval(() => {
+      setOtpCooldownSec((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [otpCooldownSec]);
 
   const isValidGmail = (value: string) =>
     /^[a-zA-Z0-9._%+-]+@(gmail|googlemail)\.com$/i.test(value.trim());
@@ -198,15 +229,27 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
   const triggerOtpSend = async (targetEmail: string, targetName: string, targetRole: UserRole) => {
     const normalizedEmail = targetEmail.trim().toLowerCase();
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const quota = checkAndRecordOtpSendQuota(normalizedEmail);
+    if (!quota.allowed) {
+      setOtpCooldownSec(quota.cooldownRemainingSec);
+      recordOtpAbuseEvent(normalizedEmail, quota.reason || 'OTP rate limit exceeded.');
+      throw new Error(
+        lang === 'bn'
+          ? `ওটিপি সুরক্ষা সীমা: অনুগ্রহ করে ${quota.cooldownRemainingSec} সেকেন্ড অপেক্ষা করে আবার চেষ্টা করুন।`
+          : quota.reason || `Please wait ${quota.cooldownRemainingSec}s before requesting another OTP.`
+      );
+    }
+
+    const code = secureRandomDigits(6);
     setOtpInput('');
+    setOtpAttempts(0);
     setOtpStatusMsg('');
 
     const roleLabel =
       targetRole === 'U' ? 'Customer (U)' : targetRole === 'A' ? 'Agent (A)' : 'Merchant (M)';
     const res = await sendOtpEmail({
       toEmail: normalizedEmail,
-      toName: targetName.trim(),
+      toName: sanitizePlainText(targetName, 100),
       otp: code,
       roleLabel,
     });
@@ -224,6 +267,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setGeneratedOtp(code);
     setOtpExpiresAt(Date.now() + 10 * 60 * 1000);
+    setOtpCooldownSec(45);
     setOtpStatusMsg(`${t('otpSentTo', lang)} ${normalizedEmail}`);
     setOtpStep(true);
   };
@@ -256,11 +300,20 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     e.preventDefault();
     setError('');
 
-    if (!name.trim()) {
+    if (containsDangerousMarkup(name) || containsDangerousMarkup(businessName)) {
+      setError(
+        lang === 'bn'
+          ? 'নামের ঘরে অনিরাপদ HTML বা স্ক্রিপ্ট অক্ষর ব্যবহার করা যাবে না।'
+          : 'Unsafe HTML or script characters are blocked.'
+      );
+      return;
+    }
+
+    if (!sanitizePlainText(name, 120)) {
       setError(lang === 'bn' ? 'পূর্ণ নাম আবশ্যক।' : 'Full name is required.');
       return;
     }
-    if ((role === 'A' || role === 'M') && !businessName.trim()) {
+    if ((role === 'A' || role === 'M') && !sanitizePlainText(businessName, 140)) {
       setError(
         lang === 'bn'
           ? 'এজেন্ট বা মার্চেন্ট অ্যাকাউন্টের জন্য ব্যবসা / দোকানের নাম আবশ্যক।'
@@ -330,6 +383,17 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
         lang === 'bn'
           ? 'অ্যাকাউন্ট খুলতে শর্তাবলী ও নীতিমালা (TCA) সম্মতি বক্সে টিক দিন।'
           : 'You must agree to the Acash Terms & Conditions Agreement (TCA) before verification.'
+      );
+      return;
+    }
+
+    if (Number(challengeInput.trim()) !== humanChallenge.expectedAnswer) {
+      setHumanChallenge(createSecurityChallenge(lang));
+      setChallengeInput('');
+      setError(
+        lang === 'bn'
+          ? 'বট সুরক্ষা প্রশ্নের উত্তর সঠিক নয়। নতুন গণিতটি সমাধান করে আবার চেষ্টা করুন।'
+          : 'Incorrect security verification answer. Please solve the new math check.'
       );
       return;
     }
@@ -406,15 +470,37 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     e.preventDefault();
     setError('');
 
-    if (generatedOtp.length !== 6 || otpInput.trim() !== generatedOtp) {
-      setError(lang === 'bn' ? 'ভুল ওটিপি কোড। আপনার জিমেইল চেক করে সঠিক ৬-সংখ্যার কোড দিন।' : 'Invalid 6-digit OTP code. Please enter the code sent to your Gmail.');
-      return;
-    }
+    const targetEmail = (pendingLoginUser ? pendingLoginUser.email : email).trim().toLowerCase();
     if (!otpExpiresAt || Date.now() > otpExpiresAt) {
       setError(
         lang === 'bn'
           ? 'ওটিপি কোডের মেয়াদ শেষ হয়ে গেছে। অনুগ্রহ করে Resend OTP চাপুন।'
           : 'This OTP has expired. Please tap Resend OTP to receive a fresh code.'
+      );
+      return;
+    }
+
+    if (generatedOtp.length !== 6 || !timingSafeEqual(otpInput.trim(), generatedOtp)) {
+      const nextAttempts = otpAttempts + 1;
+      setOtpAttempts(nextAttempts);
+      if (nextAttempts >= 5) {
+        setGeneratedOtp('');
+        setOtpExpiresAt(0);
+        recordOtpAbuseEvent(
+          targetEmail,
+          `5 consecutive failed OTP verification attempts for ${targetEmail}; active OTP invalidated.`
+        );
+        setError(
+          lang === 'bn'
+            ? '৫ বার ভুল ওটিপি দেওয়ায় কোডটি বাতিল করা হয়েছে। অনুগ্রহ করে Resend OTP চাপুন।'
+            : '5 wrong OTP attempts detected. Current code invalidated — request a fresh OTP.'
+        );
+        return;
+      }
+      setError(
+        lang === 'bn'
+          ? `ভুল ওটিপি কোড (${5 - nextAttempts} বার বাকি)। আপনার জিমেইল চেক করে সঠিক ৬-সংখ্যার কোড দিন।`
+          : `Invalid 6-digit OTP code (${5 - nextAttempts} attempts remaining).`
       );
       return;
     }
@@ -1115,6 +1201,29 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     </button>
                   </div>
 
+                  {/* Anti-Bot Human Security Check */}
+                  <div className="p-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <span>{humanChallenge.question}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {lang === 'bn' ? 'অটোমেটেড স্প্যাম প্রতিরোধ যাচাই' : 'Anti-Bot Spam Shield'}
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      inputMode="numeric"
+                      maxLength={3}
+                      value={challengeInput}
+                      onChange={(e) => setChallengeInput(e.target.value.replace(/\D/g, ''))}
+                      placeholder="?"
+                      className="w-20 px-3 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-center font-mono-tabular text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 shrink-0"
+                    />
+                  </div>
+
                   {error && (
                     <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
                       {error}
@@ -1194,7 +1303,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={loading}
+                  disabled={loading || otpCooldownSec > 0}
                   onClick={async () => {
                     setLoading(true);
                     setError('');
@@ -1209,10 +1318,14 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       setLoading(false);
                     }
                   }}
-                  className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60"
+                  className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60 whitespace-nowrap shrink-0"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                  <span>{t('resendOtp', lang)}</span>
+                  <span>
+                    {otpCooldownSec > 0
+                      ? `${t('resendOtp', lang)} (${otpCooldownSec}s)`
+                      : t('resendOtp', lang)}
+                  </span>
                 </button>
               </div>
             </form>
