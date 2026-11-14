@@ -19,6 +19,7 @@ import {
   ArrowDownLeft,
   Search,
   MapPin,
+  Bell,
 } from 'lucide-react';
 import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
@@ -36,6 +37,7 @@ import { playMerchantSoundbox, playTransactionVoiceAlert } from '../../lib/sound
 import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { ACASH_MAIN_LOGO_SRC } from '../common/BrandLogo';
+import { Wallet3DCard } from '../common/Wallet3DCard';
 
 interface MerchantPanelProps {
   user: AcashUser;
@@ -43,6 +45,9 @@ interface MerchantPanelProps {
   feeConfig: FeeConfig;
   lang: Language;
   onOpenMapLocationPicker?: () => void;
+  onOpenNotifications?: () => void;
+  unreadNotifications?: number;
+  externalQrSignal?: number;
 }
 
 type MerchantTab = 'checkout' | 'cashout' | 'refunds' | 'b2b' | 'analytics' | 'statement';
@@ -53,6 +58,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   feeConfig,
   lang,
   onOpenMapLocationPicker,
+  onOpenNotifications,
+  unreadNotifications = 0,
+  externalQrSignal = 0,
 }) => {
   const [activeTab, setActiveTab] = useState<MerchantTab>('checkout');
   const [statementQuery, setStatementQuery] = useState('');
@@ -121,6 +129,13 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   useEffect(() => {
     seenTxIdsRef.current = null;
   }, [user.accountId]);
+
+  useEffect(() => {
+    if (externalQrSignal > 0) {
+      setActiveTab('checkout');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [externalQrSignal]);
 
   // Listen for new transactions to trigger Opposite-Gender Voice & Visual Soundbox Alert
   useEffect(() => {
@@ -385,75 +400,15 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
         </div>
       )}
 
-      {/* Merchant Header Summary & Cashier Mode Toggle */}
-      <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-6 text-white shadow-lg">
-        <div className="space-y-1">
-          <div className="text-xs font-medium text-indigo-300 flex items-center gap-2">
-            <span>{t('roleMerchant', lang)}</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono-tabular">{user.accountId}</span>
-            <span aria-hidden="true">·</span>
-            <span>{cashierMode ? t('cashierMode', lang) : t('ownerMode', lang)}</span>
-          </div>
-          <h2 className="font-display text-2xl font-bold text-white">
-            {user.businessName || user.name}
-          </h2>
-          {!cashierMode ? (
-            <div className="font-mono-tabular text-3xl font-bold text-emerald-400 pt-1">
-              {formatBdt(user.balance, lang)}
-            </div>
-          ) : (
-            <div className="text-xs text-amber-300 pt-1 inline-flex items-center gap-1.5">
-              <Lock className="w-3.5 h-3.5" />
-              <span>
-                {lang === 'bn'
-                  ? 'ক্যাশিয়ার মোড সক্রিয় — মোট ব্যালেন্স, রিফান্ড ও বিটুবি লক করা আছে'
-                  : 'Cashier Staff Mode active — Owner balance, Refunds & B2B transfers restricted'}
-              </span>
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={handleTestSoundbox}
-            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white/10 border border-white/15 hover:bg-white/15 text-xs font-semibold text-white inline-flex items-center gap-2 transition-colors whitespace-nowrap"
-          >
-            <Volume2 className="w-4 h-4 text-indigo-300" />
-            <span>{t('soundboxTest', lang)}</span>
-          </button>
-
-          {!cashierMode && onOpenMapLocationPicker && (
-            <button
-              type="button"
-              onClick={onOpenMapLocationPicker}
-              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 inline-flex items-center gap-2 transition-colors whitespace-nowrap"
-            >
-              <MapPin className="w-4 h-4 text-emerald-400" />
-              <span>
-                {user.mapLocation
-                  ? lang === 'bn'
-                    ? 'ম্যাপ লোকেশন আপডেট'
-                    : 'Update Map Pin'
-                  : lang === 'bn'
-                    ? 'ম্যাপে লোকেশন দিন'
-                    : 'Set Map Location'}
-              </span>
-            </button>
-          )}
-
-          {!cashierMode && (
-            <button
-              type="button"
-              onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white/10 border border-white/15 hover:bg-white/15 text-xs font-semibold text-slate-100 inline-flex items-center gap-2 transition-colors whitespace-nowrap"
-            >
-              <FileText className="w-4 h-4 text-indigo-300" />
-              <span>{t('downloadStatement', lang)}</span>
-            </button>
-          )}
-
+      {/* 3D Merchant Header Card & Quick Controls */}
+      <Wallet3DCard
+        user={user}
+        lang={lang}
+        balanceLabel={cashierMode ? t('cashierMode', lang) : t('ownerMode', lang)}
+        alwaysVisibleBalance
+        cashierMode={cashierMode}
+        accentVariant="merchant"
+        topRightActions={
           <button
             type="button"
             onClick={() => {
@@ -464,26 +419,84 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                 setCashierMode(true);
               }
             }}
-            className={`min-h-[40px] px-4 py-2 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap ${
+            className={`min-h-[38px] px-3.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
               cashierMode
                 ? 'bg-amber-500/20 border-amber-400/50 text-amber-200 hover:bg-amber-500/30'
-                : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500 text-white'
+                : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-400/50 text-white shadow-sm'
             }`}
           >
-            {cashierMode ? <Unlock className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-            <span>{cashierMode ? 'Unlock Owner Mode' : 'Switch to Cashier View'}</span>
+            {cashierMode ? <Unlock className="w-3.5 h-3.5" /> : <Shield className="w-3.5 h-3.5" />}
+            <span>{cashierMode ? 'Unlock Owner' : 'Cashier View'}</span>
           </button>
-        </div>
-      </div>
+        }
+        footerActions={
+          <>
+            <button
+              type="button"
+              onClick={handleTestSoundbox}
+              className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <Volume2 className="w-3.5 h-3.5 text-indigo-300" />
+              <span>{t('soundboxTest', lang)}</span>
+            </button>
 
-      {/* Merchant Sub-Navigation Tabs */}
+            {onOpenNotifications && (
+              <button
+                type="button"
+                onClick={onOpenNotifications}
+                className="px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <Bell className="w-3.5 h-3.5 text-indigo-300" />
+                <span>{lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Alerts'}</span>
+                {unreadNotifications > 0 && (
+                  <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
+                    {unreadNotifications}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {!cashierMode && onOpenMapLocationPicker && (
+              <button
+                type="button"
+                onClick={onOpenMapLocationPicker}
+                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                <span>
+                  {user.mapLocation
+                    ? lang === 'bn'
+                      ? 'ম্যাপ লোকেশন আপডেট'
+                      : 'Update Map Pin'
+                    : lang === 'bn'
+                      ? 'ম্যাপে লোকেশন দিন'
+                      : 'Set Map Location'}
+                </span>
+              </button>
+            )}
+
+            {!cashierMode && (
+              <button
+                type="button"
+                onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-slate-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <FileText className="w-3.5 h-3.5 text-indigo-300" />
+                <span>{t('downloadStatement', lang)}</span>
+              </button>
+            )}
+          </>
+        }
+      />
+
+      {/* Tactile 3D Merchant Sub-Navigation Tabs */}
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
           onClick={() => setActiveTab('checkout')}
-          className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border transition-colors ${
+          className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 ${
             activeTab === 'checkout'
-              ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+              ? 'bg-indigo-600 border-indigo-600 text-white'
               : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
@@ -495,9 +508,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('cashout')}
-              className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
+              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'cashout'
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -507,9 +520,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('refunds')}
-              className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
+              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'refunds'
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -519,9 +532,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('b2b')}
-              className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
+              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'b2b'
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -531,9 +544,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('analytics')}
-              className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
+              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'analytics'
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -543,9 +556,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('statement')}
-              className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
+              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'statement'
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                  ? 'bg-indigo-600 border-indigo-600 text-white'
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -559,7 +572,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
       {/* TAB 1: Smart Checkout & Dynamic QR */}
       {activeTab === 'checkout' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <div className="lg:col-span-5 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-5 shadow-sm">
+          <div className="lg:col-span-5 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-5">
             <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
               {t('smartCheckout', lang)}
             </h3>
@@ -660,7 +673,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
           </div>
 
           {/* Incoming Counter Feed */}
-          <div className="lg:col-span-7 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+          <div className="lg:col-span-7 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
               <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
                 {lang === 'bn' ? 'প্রাপ্ত পেমেন্টসমূহ' : 'Incoming Counter Payments'}
@@ -732,7 +745,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
       {/* TAB 1B: Merchant Cash-Out (Agent A- or Admin Treasury) */}
       {activeTab === 'cashout' && !cashierMode && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <div className="lg:col-span-6 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-4 shadow-sm">
+          <div className="lg:col-span-6 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-4">
             <div>
               <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
                 {t('merchantCashOut', lang)}
@@ -1292,7 +1305,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
 
       {/* TAB 3: B2B Supplier Transfer */}
       {activeTab === 'b2b' && !cashierMode && (
-        <div className="max-w-xl rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-4 shadow-sm">
+        <div className="max-w-xl acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-4">
           <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">{t('b2bTransfer', lang)}</h3>
 
           {b2bStep === 'form' && (
@@ -1443,25 +1456,25 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
       {activeTab === 'analytics' && !cashierMode && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5">
               <div className="text-xs text-slate-500 dark:text-slate-400">Gross Sales Volume</div>
               <div className="font-mono-tabular text-2xl font-bold text-slate-900 dark:text-white mt-1.5">
                 {formatBdt(analytics.grossSales, lang)}
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5">
               <div className="text-xs text-slate-500 dark:text-slate-400">Net Settled Revenue</div>
               <div className="font-mono-tabular text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1.5">
                 {formatBdt(analytics.netSales, lang)}
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5">
               <div className="text-xs text-slate-500 dark:text-slate-400">Average Ticket Size</div>
               <div className="font-mono-tabular text-2xl font-bold text-indigo-600 dark:text-indigo-400 mt-1.5">
                 {formatBdt(analytics.avgTicket, lang)}
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5">
               <div className="text-xs text-slate-500 dark:text-slate-400">Refunds Issued</div>
               <div className="font-mono-tabular text-2xl font-bold text-rose-600 dark:text-rose-400 mt-1.5">
                 {formatBdt(analytics.totalRefunded, lang)}
@@ -1469,7 +1482,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             </div>
           </div>
 
-          <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 shadow-sm">
+          <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6">
             <div className="flex items-center justify-between mb-6">
               <h4 className="font-display text-base font-semibold text-slate-900 dark:text-white">
                 7-Day Merchant Revenue Trend
@@ -1504,7 +1517,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
 
       {/* TAB 5: Full Merchant Statement */}
       {activeTab === 'statement' && !cashierMode && (
-        <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+        <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">

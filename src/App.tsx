@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { LogOut, ShieldCheck, Globe, User as UserIcon, MapPin, Sun, Moon, Smartphone } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { LogOut, ShieldCheck, Globe, User as UserIcon, MapPin, Sun, Moon, Smartphone, Bell } from 'lucide-react';
 import {
   AcashBooth,
   AcashMapLocation,
   AcashSession,
   AcashTransaction,
   AcashUser,
+  AccountNotification,
   AdminActivityLog,
   AdminNotification,
   AdminSession,
@@ -19,6 +20,10 @@ import {
   DEFAULT_FEE_CONFIG,
   DEFAULT_TREASURY_VAULT,
   ensureDefaultPlatformData,
+  isAccountNotificationRead,
+  markAccountNotificationRead,
+  markAllAccountNotificationsRead,
+  subscribeToAccountNotifications,
   subscribeToAdminActivityLogs,
   subscribeToAdminNotifications,
   subscribeToAllTransactions,
@@ -52,6 +57,13 @@ import { AdminApp } from './components/admin/AdminApp';
 import { ProfileModal, ProfileTab } from './components/common/ProfileModal';
 import { BoothLocatorModal } from './components/common/BoothLocatorMap';
 import { GetAppModal } from './components/common/GetAppModal';
+import {
+  AccountNotificationModal,
+  LiveAccountToastStack,
+  LiveToastItem,
+} from './components/common/AccountNotificationCenter';
+import { MobileBottomNav } from './components/common/MobileBottomNav';
+import { TransactionReceiptModal } from './components/common/TransactionReceiptModal';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 import { initSoundboxAudioUnlock } from './lib/soundbox';
 
@@ -184,6 +196,12 @@ export default function App() {
   const [profileInitialTab, setProfileInitialTab] = useState<ProfileTab>('photo');
   const [boothMapOpen, setBoothMapOpen] = useState(false);
   const [getAppOpen, setGetAppOpen] = useState(false);
+  const [accountNotifications, setAccountNotifications] = useState<AccountNotification[]>([]);
+  const [liveToasts, setLiveToasts] = useState<LiveToastItem[]>([]);
+  const [notifModalOpen, setNotifModalOpen] = useState(false);
+  const [notifReceiptTx, setNotifReceiptTx] = useState<AcashTransaction | null>(null);
+  const [qrTriggerCount, setQrTriggerCount] = useState(0);
+  const seenNotifsRef = useRef<Set<string> | null>(null);
   const isOnline = useOnlineStatus();
 
   // Sync Dark/Light root class
@@ -250,9 +268,12 @@ export default function App() {
 
   // Real-time subscription for logged-in Unified App user (never auto-logout on refresh)
   useEffect(() => {
+    seenNotifsRef.current = null;
     if (!userSession) {
       setCurrentUser(null);
       setUserTransactions([]);
+      setAccountNotifications([]);
+      setLiveToasts([]);
       setUserBootLoading(false);
       return;
     }
@@ -279,12 +300,53 @@ export default function App() {
 
     const unsubTxs = subscribeToUserTransactions(userSession.accountId, setUserTransactions);
 
+    const unsubNotifs = subscribeToAccountNotifications(userSession.accountId, (notifs) => {
+      setAccountNotifications(notifs);
+      if (seenNotifsRef.current === null) {
+        seenNotifsRef.current = new Set(notifs.map((n) => n.id));
+        return;
+      }
+      const newlyArrived: AccountNotification[] = [];
+      for (const n of notifs) {
+        if (!seenNotifsRef.current.has(n.id)) {
+          seenNotifsRef.current.add(n.id);
+          if (!isAccountNotificationRead(n, userSession.accountId)) {
+            newlyArrived.push(n);
+          }
+        }
+      }
+      if (newlyArrived.length > 0) {
+        const items: LiveToastItem[] = newlyArrived.slice(0, 3).map((n) => ({
+          id: `toast-${n.id}`,
+          notifId: n.id,
+          title: n.title,
+          message: n.message,
+          severity: n.severity,
+          txId: n.txId,
+          createdAt: n.createdAt,
+        }));
+        setLiveToasts((prev) => [...items, ...prev].slice(0, 4));
+        items.forEach((item) => {
+          window.setTimeout(() => {
+            setLiveToasts((prev) => prev.filter((tItem) => tItem.id !== item.id));
+          }, 6500);
+        });
+      }
+    });
+
     return () => {
       window.clearTimeout(bootFallbackTimer);
       unsubUser();
       unsubTxs();
+      unsubNotifs();
     };
   }, [userSession]);
+
+  const unreadNotifCount = useMemo(() => {
+    if (!currentUser) return 0;
+    return accountNotifications.filter((n) => !isAccountNotificationRead(n, currentUser.accountId))
+      .length;
+  }, [accountNotifications, currentUser]);
 
   // Real-time subscriptions for Separate Admin App
   useEffect(() => {
@@ -407,7 +469,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden">
       {/* Calm 3-Zone Top Bar */}
       <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-4">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
           <BrandLogo
             size="sm"
             subtitle={
@@ -512,6 +574,24 @@ export default function App() {
               <>
                 <button
                   type="button"
+                  onClick={() => setNotifModalOpen(true)}
+                  aria-label={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
+                  title={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
+                  className="relative min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <span className="hidden lg:inline">
+                    {lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}
+                  </span>
+                  {unreadNotifCount > 0 && (
+                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-[10px] font-bold text-white flex items-center justify-center font-mono-tabular">
+                      {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => {
                     setProfileInitialTab('photo');
                     setProfileOpen(true);
@@ -522,6 +602,7 @@ export default function App() {
                     <img
                       src={currentUser.profilePhotoUrl}
                       alt={currentUser.name}
+                      referrerPolicy="no-referrer"
                       className="w-7 h-7 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
                     />
                   ) : (
@@ -603,6 +684,57 @@ export default function App() {
         </div>
       )}
 
+      {currentUser && (
+        <LiveAccountToastStack
+          toasts={liveToasts}
+          lang={lang}
+          onDismiss={(id) => setLiveToasts((prev) => prev.filter((item) => item.id !== id))}
+          onOpenDetails={(toast) => {
+            if (toast.notifId) {
+              void markAccountNotificationRead(toast.notifId, currentUser.accountId);
+            }
+            setLiveToasts((prev) => prev.filter((item) => item.id !== toast.id));
+            if (toast.txId) {
+              const found = userTransactions.find((tx) => tx.txId === toast.txId);
+              if (found) {
+                setNotifReceiptTx(found);
+                return;
+              }
+            }
+            setNotifModalOpen(true);
+          }}
+        />
+      )}
+
+      {currentUser && notifModalOpen && (
+        <AccountNotificationModal
+          accountId={currentUser.accountId}
+          notifications={accountNotifications}
+          transactions={userTransactions}
+          lang={lang}
+          onClose={() => setNotifModalOpen(false)}
+          onMarkRead={(notifId) => {
+            void markAccountNotificationRead(notifId, currentUser.accountId);
+          }}
+          onMarkAllRead={() => {
+            void markAllAccountNotificationsRead(currentUser.accountId);
+          }}
+          onOpenReceipt={(tx) => {
+            setNotifModalOpen(false);
+            setNotifReceiptTx(tx);
+          }}
+        />
+      )}
+
+      {currentUser && notifReceiptTx && (
+        <TransactionReceiptModal
+          tx={notifReceiptTx}
+          currentAccountId={currentUser.accountId}
+          lang={lang}
+          onClose={() => setNotifReceiptTx(null)}
+        />
+      )}
+
       <main className="flex-1">
         {userBootLoading ? (
           <div className="max-w-7xl mx-auto px-6 py-24 text-center space-y-3">
@@ -626,6 +758,9 @@ export default function App() {
             initialPaymentIntent={paymentIntent}
             onClearPaymentIntent={() => setPaymentIntent(null)}
             onOpenBoothMap={() => setBoothMapOpen(true)}
+            onOpenNotifications={() => setNotifModalOpen(true)}
+            unreadNotifications={unreadNotifCount}
+            externalQrSignal={qrTriggerCount}
           />
         ) : currentUser.role === 'A' ? (
           <AgentPanel
@@ -637,6 +772,9 @@ export default function App() {
               setProfileInitialTab('location');
               setProfileOpen(true);
             }}
+            onOpenNotifications={() => setNotifModalOpen(true)}
+            unreadNotifications={unreadNotifCount}
+            externalQrSignal={qrTriggerCount}
           />
         ) : (
           <MerchantPanel
@@ -648,9 +786,28 @@ export default function App() {
               setProfileInitialTab('location');
               setProfileOpen(true);
             }}
+            onOpenNotifications={() => setNotifModalOpen(true)}
+            unreadNotifications={unreadNotifCount}
+            externalQrSignal={qrTriggerCount}
           />
         )}
       </main>
+
+      {currentUser && (
+        <MobileBottomNav
+          role={currentUser.role}
+          lang={lang}
+          unreadNotifications={unreadNotifCount}
+          onHome={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          onOpenBoothMap={() => setBoothMapOpen(true)}
+          onPrimaryQr={() => setQrTriggerCount((c) => c + 1)}
+          onOpenNotifications={() => setNotifModalOpen(true)}
+          onOpenProfile={() => {
+            setProfileInitialTab('photo');
+            setProfileOpen(true);
+          }}
+        />
+      )}
     </div>
   );
 }

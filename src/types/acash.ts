@@ -169,6 +169,30 @@ export interface AdminNotification {
     | 'admin_profile';
 }
 
+export type AccountNotificationCategory =
+  | 'transaction'
+  | 'admin_alert'
+  | 'kyc'
+  | 'fee_update'
+  | 'security';
+
+export interface AccountNotification {
+  id: string;
+  recipientId: string; // 'ALL' or specific U-/A-/M- accountId
+  recipientRole?: UserRole | 'ALL';
+  title: string;
+  message: string;
+  category: AccountNotificationCategory;
+  severity: 'info' | 'success' | 'warning' | 'critical';
+  amount?: number;
+  txId?: string;
+  txHash?: string;
+  createdBy?: string;
+  read: boolean;
+  readBy?: string[];
+  createdAt: number;
+}
+
 export type AdminActivityType =
   | 'fee_update'
   | 'fund_transfer'
@@ -178,7 +202,8 @@ export type AdminActivityType =
   | 'account_delete'
   | 'aml_decision'
   | 'alert_settings'
-  | 'security_update';
+  | 'security_update'
+  | 'account_alert';
 
 export interface AdminActivityLog {
   id: string;

@@ -18,6 +18,7 @@ import {
   MapPin,
   Volume2,
   VolumeX,
+  Bell,
 } from 'lucide-react';
 import {
   AcashTransaction,
@@ -35,6 +36,7 @@ import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { OperatorLogo, OPERATORS, detectOperatorFromPhone } from '../common/OperatorLogo';
 import { QrModal } from '../common/QrModal';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
+import { Wallet3DCard } from '../common/Wallet3DCard';
 
 interface CustomerPanelProps {
   user: AcashUser;
@@ -44,6 +46,9 @@ interface CustomerPanelProps {
   initialPaymentIntent?: { to: string; amount?: number; note?: string } | null;
   onClearPaymentIntent?: () => void;
   onOpenBoothMap?: () => void;
+  onOpenNotifications?: () => void;
+  unreadNotifications?: number;
+  externalQrSignal?: number;
 }
 
 type ServiceTab = 'send_money' | 'cash_out' | 'mobile_recharge' | 'bill_pay' | 'merchant_payment';
@@ -65,6 +70,9 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   initialPaymentIntent,
   onClearPaymentIntent,
   onOpenBoothMap,
+  onOpenNotifications,
+  unreadNotifications = 0,
+  externalQrSignal = 0,
 }) => {
   const [showBalance, setShowBalance] = useState(false);
   const [activeService, setActiveService] = useState<ServiceTab>('send_money');
@@ -151,6 +159,12 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       return next;
     });
   };
+
+  useEffect(() => {
+    if (externalQrSignal > 0) {
+      setQrMode('scan');
+    }
+  }, [externalQrSignal]);
 
   useEffect(() => {
     if (initialPaymentIntent?.to) {
@@ -271,6 +285,24 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     }
   };
 
+  const walletInsights = useMemo(() => {
+    let incoming = 0;
+    let outgoing = 0;
+    for (const tx of transactions) {
+      if (tx.status === 'rejected') continue;
+      if (tx.receiverId === user.accountId) {
+        incoming += tx.amount;
+      } else if (tx.senderId === user.accountId) {
+        outgoing += tx.totalDebited;
+      }
+    }
+    return {
+      incoming,
+      outgoing,
+      count: transactions.length,
+    };
+  }, [transactions, user.accountId]);
+
   const filteredTransactions = useMemo(() => {
     const q = searchTx.trim().toLowerCase();
     if (!q) return transactions;
@@ -333,112 +365,139 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         </div>
       )}
 
-      {/* Top Wallet Hero + Action Strip */}
+      {/* Top 3D Wallet Hero + Action Workbench */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        <div className="lg:col-span-5 rounded-3xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-6 flex flex-col justify-between shadow-lg text-white">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-xs font-medium text-indigo-300">
-                {t('roleCustomer', lang)} · <span className="font-mono-tabular">{user.accountId}</span>
-              </div>
-              <h2 className="font-display text-xl font-bold text-white mt-1">{user.name}</h2>
-              <div className="text-xs text-slate-400 font-mono-tabular mt-0.5">{user.phone}</div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setQrMode('show')}
-                className="min-h-[40px] px-3 rounded-xl bg-white/10 border border-white/15 hover:bg-white/15 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <QrCode className="w-4 h-4" />
-                <span>{t('myQr', lang)}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setQrMode('scan')}
-                className="min-h-[40px] px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <ScanLine className="w-4 h-4" />
-                <span>{t('scanQr', lang)}</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Tap to Reveal Balance */}
-          <div className="mt-6">
-            <div className="text-xs text-indigo-200/80 mb-1.5">{t('balance', lang)}</div>
-            <button
-              type="button"
-              onClick={() => setShowBalance((prev) => !prev)}
-              className="w-full flex items-center justify-between px-4 py-3.5 rounded-2xl bg-slate-950/60 border border-white/15 hover:border-indigo-400/60 transition-all text-left group"
-            >
-              <span className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight">
-                {showBalance ? formatBdt(user.balance, lang) : '৳ ••••••'}
-              </span>
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-300 group-hover:text-white">
-                {showBalance ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                <span className="hidden sm:inline">
-                  {showBalance ? t('hideBalance', lang) : t('tapForBalance', lang)}
-                </span>
-              </span>
-            </button>
-          </div>
-
-          <div className="mt-5 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-2.5">
-            <div className="text-xs text-slate-300 flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <span>
-                {lang === 'bn' ? 'ক্যাশ আউট ফি' : 'Cash Out'}:{' '}
-                <span className="font-mono-tabular font-semibold text-indigo-300">
-                  ৳{feeConfig.feePer1000}/1k
-                </span>
-              </span>
-              <span aria-hidden="true" className="text-slate-600">·</span>
-              <span>
-                {lang === 'bn' ? 'সেন্ড মানি' : 'Send Money'}:{' '}
-                <span className="font-mono-tabular font-semibold text-amber-300">
-                  {feeConfig.sendMoneyChargeMode === 'per_1000'
-                    ? `৳${feeConfig.sendMoneyFeeRate}/1k`
-                    : feeConfig.sendMoneyFeeRate > 0
-                      ? `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`
-                      : 'Free'}
-                </span>
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={toggleVoiceMute}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
-                title={voiceMuted ? 'Enable Voice Alerts' : 'Mute Voice Alerts'}
-              >
-                {voiceMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-300" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-300" />}
-                <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
-              </button>
-              {onOpenBoothMap && (
+        <div className="lg:col-span-5 flex flex-col gap-3.5">
+          <Wallet3DCard
+            user={user}
+            lang={lang}
+            balanceLabel={t('balance', lang)}
+            showBalance={showBalance}
+            onToggleBalance={() => setShowBalance((prev) => !prev)}
+            accentVariant="customer"
+            topRightActions={
+              <>
                 <button
                   type="button"
-                  onClick={onOpenBoothMap}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 transition-colors whitespace-nowrap"
+                  onClick={() => setQrMode('show')}
+                  className="min-h-[38px] px-2.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
                 >
-                  <MapPin className="w-3.5 h-3.5" />
-                  <span>{lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}</span>
+                  <QrCode className="w-3.5 h-3.5" />
+                  <span>{t('myQr', lang)}</span>
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
-              >
-                <FileText className="w-4 h-4" />
-                <span>{t('downloadStatement', lang)}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setQrMode('scan')}
+                  className="min-h-[38px] px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-sm"
+                >
+                  <ScanLine className="w-3.5 h-3.5" />
+                  <span>{t('scanQr', lang)}</span>
+                </button>
+              </>
+            }
+            footerMeta={
+              <>
+                <span>
+                  {lang === 'bn' ? 'ক্যাশ আউট' : 'Cash Out'}:{' '}
+                  <span className="font-mono-tabular font-semibold text-indigo-200">
+                    ৳{feeConfig.feePer1000}/1k
+                  </span>
+                </span>
+                <span aria-hidden="true" className="text-white/30">·</span>
+                <span>
+                  {lang === 'bn' ? 'সেন্ড মানি' : 'Send Money'}:{' '}
+                  <span className="font-mono-tabular font-semibold text-amber-300">
+                    {feeConfig.sendMoneyChargeMode === 'per_1000'
+                      ? `৳${feeConfig.sendMoneyFeeRate}/1k`
+                      : feeConfig.sendMoneyFeeRate > 0
+                        ? `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`
+                        : 'Free'}
+                  </span>
+                </span>
+              </>
+            }
+            footerActions={
+              <>
+                <button
+                  type="button"
+                  onClick={toggleVoiceMute}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                >
+                  {voiceMuted ? (
+                    <VolumeX className="w-3.5 h-3.5 text-rose-300" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
+                  )}
+                  <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
+                </button>
+                {onOpenNotifications && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotifications}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 transition-colors whitespace-nowrap"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-indigo-300" />
+                    <span>{lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Alerts'}</span>
+                    {unreadNotifications > 0 && (
+                      <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
+                        {unreadNotifications}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {onOpenBoothMap && (
+                  <button
+                    type="button"
+                    onClick={onOpenBoothMap}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 transition-colors whitespace-nowrap"
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>{t('downloadStatement', lang)}</span>
+                </button>
+              </>
+            }
+          />
+
+          {/* 3D Quick Insights Strip */}
+          <div className="grid grid-cols-3 gap-2.5">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'মোট গ্রহণ' : 'Incoming'}
+              </div>
+              <div className="font-mono-tabular text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 truncate">
+                {formatBdt(walletInsights.incoming, lang)}
+              </div>
+            </div>
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'মোট ব্যয়' : 'Outgoing'}
+              </div>
+              <div className="font-mono-tabular text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-0.5 truncate">
+                {formatBdt(walletInsights.outgoing, lang)}
+              </div>
+            </div>
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'লেনদেন' : 'Total Txs'}
+              </div>
+              <div className="font-mono-tabular text-sm font-bold text-slate-900 dark:text-white mt-0.5">
+                {walletInsights.count}
+              </div>
             </div>
           </div>
         </div>
 
         {/* Service Selector + Active Transaction Workbench */}
-        <div className="lg:col-span-7 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-6 shadow-sm dark:shadow-none">
+        <div className="lg:col-span-7 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-6">
           <div className="mb-3.5 px-3 py-2 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span>
               <strong className="text-emerald-600 dark:text-emerald-400">
@@ -462,8 +521,8 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
             </span>
           </div>
 
-          {/* Horizontal Service Tabs */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-6">
+          {/* Tactile 3D Service Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-6">
             {services.map((srv) => {
               const Icon = srv.icon;
               const active = activeService === srv.id;
@@ -475,17 +534,21 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     setActiveService(srv.id);
                     resetForm();
                   }}
-                  className={`min-h-[44px] px-3 py-2.5 rounded-xl border text-left transition-colors flex items-center sm:flex-col sm:items-start gap-2.5 sm:gap-1.5 ${
+                  className={`acash-3d-tile min-h-[54px] px-3 py-2.5 rounded-2xl border text-left flex items-center sm:flex-col sm:items-start gap-2.5 sm:gap-2 ${
                     active
-                      ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-500 text-indigo-900 dark:text-white'
-                      : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-700'
+                      ? 'bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/20'
+                      : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-300 dark:hover:border-slate-700'
                   }`}
                 >
-                  <Icon
-                    className={`w-4 h-4 shrink-0 ${
-                      active ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'
+                  <div
+                    className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                      active
+                        ? 'bg-white/20 text-white'
+                        : 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
                     }`}
-                  />
+                  >
+                    <Icon className="w-4 h-4" />
+                  </div>
                   <span className="text-xs font-semibold truncate w-full">{srv.label}</span>
                 </button>
               );
@@ -893,7 +956,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       </div>
 
       {/* Transaction History Ledger */}
-      <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm dark:shadow-none">
+      <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
             {t('recentTransactions', lang)}

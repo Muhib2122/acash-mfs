@@ -103,12 +103,12 @@ export const TapAndHoldButton: React.FC<TapAndHoldButtonProps> = ({
             cancelHold();
           }
         }}
-        className={`relative w-full h-16 rounded-2xl overflow-hidden border transition-transform duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+        className={`relative w-full h-16 rounded-2xl overflow-hidden border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
           disabled
             ? 'bg-slate-200 dark:bg-slate-800/70 border-slate-300 dark:border-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed'
             : isHolding
-              ? 'scale-[0.985] border-indigo-400 bg-indigo-950 text-white shadow-md cursor-pointer'
-              : 'border-indigo-500/40 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white hover:border-indigo-400 cursor-pointer shadow-sm'
+              ? 'scale-[0.98] translate-y-[1px] border-indigo-300 bg-indigo-950 text-white shadow-inner cursor-pointer'
+              : 'border-indigo-400/50 bg-gradient-to-r from-[#0e1429] via-[#211d58] to-[#0e1429] text-white hover:border-indigo-300 cursor-pointer shadow-[0_12px_24px_-8px_rgba(79,70,229,0.5),inset_0_1px_0_rgba(255,255,255,0.2)]'
         }`}
       >
         {/* Animated horizontal fill bar */}

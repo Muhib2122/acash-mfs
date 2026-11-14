@@ -37,6 +37,8 @@ import {
   Moon,
   Volume2,
   VolumeX,
+  Eye,
+  Megaphone,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -83,6 +85,7 @@ import {
   adminMarkTransactionPending,
   adminRejectTransaction,
   adminSaveBooth,
+  adminSendAccountNotification,
   adminToggleBoothStatus,
   adminToggleUserStatus,
   adminTransferBetweenAccounts,
@@ -112,6 +115,7 @@ import { BrandLogo } from '../common/BrandLogo';
 import { TransactionVolumeChart } from './TransactionVolumeChart';
 import { BoothLocatorMap } from '../common/BoothLocatorMap';
 import { RealLocationPickerMap, RealLocationValue } from '../common/RealLocationPickerMap';
+import { AdminAccountViewModal } from './AdminAccountViewModal';
 
 interface AdminAppProps {
   lang: Language;
@@ -210,8 +214,29 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [userSearch, setUserSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | UserRole>('ALL');
   const [selectedDossierId, setSelectedDossierId] = useState<string | null>(null);
+  const [viewedAccountId, setViewedAccountId] = useState<string | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState('');
+
+  // In-app executive confirmation dialog (replaces window.confirm for iframe safety)
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    tone: 'danger' | 'warning';
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  // Live Account Alert / Broadcast modal state
+  const [broadcastModalOpen, setBroadcastModalOpen] = useState(false);
+  const [broadcastTarget, setBroadcastTarget] = useState('ALL');
+  const [broadcastSeverity, setBroadcastSeverity] = useState<
+    'info' | 'success' | 'warning' | 'critical'
+  >('info');
+  const [broadcastTitle, setBroadcastTitle] = useState('');
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastBusy, setBroadcastBusy] = useState(false);
 
   // Notification Bar & Drawer state + Admin Alert Email + Voice Alerts
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
@@ -571,6 +596,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     const next = Math.max(0, Number(((Number(currentValue) || 0) + delta).toFixed(2)));
     setter(String(next));
   };
+
+  const viewedAccount = useMemo(
+    () => (viewedAccountId ? users.find((u) => u.accountId === viewedAccountId) || null : null),
+    [users, viewedAccountId]
+  );
 
   const unreadNotifications = useMemo(
     () => notifications.filter((n) => !n.read),
@@ -1379,101 +1409,184 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     }
   };
 
-  const handleFreezeAll = async () => {
+  const handleFreezeAll = () => {
     if (!adminSession) return;
-    if (!window.confirm('Are you sure you want to freeze ALL active accounts in the system?')) return;
-    setBulkBusy(true);
-    setFeedbackMsg('');
-    try {
-      const frozen = await adminFreezeAllUsers({
-        adminEmail: adminSession.adminEmail,
-        reason: 'Admin emergency freeze of all system accounts',
-      });
-      setFeedbackMsg(`Successfully froze ${frozen.length} active account(s).`);
-    } catch (err) {
-      setFeedbackMsg(err instanceof Error ? err.message : 'Could not freeze accounts.');
-    } finally {
-      setBulkBusy(false);
-    }
+    setConfirmModal({
+      title: lang === 'bn' ? 'সব অ্যাকাউন্ট ফ্রিজ করবেন?' : 'Freeze ALL Active Accounts?',
+      message:
+        lang === 'bn'
+          ? 'সিস্টেমের সব সক্রিয় কাস্টমার, এজেন্ট ও মার্চেন্ট অ্যাকাউন্ট সাময়িকভাবে বন্ধ হবে।'
+          : 'This will temporarily freeze every active Customer, Agent, and Merchant account across the platform.',
+      confirmLabel: lang === 'bn' ? 'সব ফ্রিজ করুন' : 'Freeze All Accounts',
+      tone: 'warning',
+      onConfirm: async () => {
+        setBulkBusy(true);
+        setFeedbackMsg('');
+        try {
+          const frozen = await adminFreezeAllUsers({
+            adminEmail: adminSession.adminEmail,
+            reason: 'Admin emergency freeze of all system accounts',
+          });
+          setFeedbackMsg(`Successfully froze ${frozen.length} active account(s).`);
+        } catch (err) {
+          setFeedbackMsg(err instanceof Error ? err.message : 'Could not freeze accounts.');
+        } finally {
+          setBulkBusy(false);
+        }
+      },
+    });
   };
 
-  const handleDeleteSelected = async () => {
+  const handleDeleteSelected = () => {
     if (!adminSession || selectedUserIds.length === 0) return;
-    if (!window.confirm(`Permanently delete ${selectedUserIds.length} selected account(s)? This cannot be undone.`)) return;
-    setBulkBusy(true);
-    setFeedbackMsg('');
-    try {
-      const deleted = await adminBulkDeleteUsers({
-        accountIds: selectedUserIds,
-        adminEmail: adminSession.adminEmail,
-        reason: 'Admin bulk delete selected accounts',
-      });
-      setFeedbackMsg(`Permanently deleted ${deleted.length} account(s) and released identity locks.`);
-      setSelectedUserIds([]);
-    } catch (err) {
-      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete accounts.');
-    } finally {
-      setBulkBusy(false);
-    }
+    setConfirmModal({
+      title:
+        lang === 'bn'
+          ? `${selectedUserIds.length}টি নির্বাচিত অ্যাকাউন্ট ডিলিট করবেন?`
+          : `Delete ${selectedUserIds.length} Selected Account(s)?`,
+      message:
+        lang === 'bn'
+          ? 'নির্বাচিত অ্যাকাউন্টগুলো স্থায়ীভাবে মুছে যাবে এবং এটি ফিরিয়ে আনা যাবে না।'
+          : 'This permanently deletes the selected accounts and releases their identity locks. This cannot be undone.',
+      confirmLabel: lang === 'bn' ? 'স্থায়ী ডিলিট' : 'Delete Selected',
+      tone: 'danger',
+      onConfirm: async () => {
+        setBulkBusy(true);
+        setFeedbackMsg('');
+        try {
+          const deleted = await adminBulkDeleteUsers({
+            accountIds: selectedUserIds,
+            adminEmail: adminSession.adminEmail,
+            reason: 'Admin bulk delete selected accounts',
+          });
+          setFeedbackMsg(`Permanently deleted ${deleted.length} account(s) and released identity locks.`);
+          setSelectedUserIds([]);
+        } catch (err) {
+          setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete accounts.');
+        } finally {
+          setBulkBusy(false);
+        }
+      },
+    });
   };
 
-  const handleDeleteAll = async () => {
+  const handleDeleteAll = () => {
     if (!adminSession) return;
-    if (!window.confirm('WARNING: Permanently delete ALL accounts in the system? This will clear all ledgers and identity locks.')) return;
-    setBulkBusy(true);
-    setFeedbackMsg('');
-    try {
-      const allIds = users.map((u) => u.accountId);
-      const deleted = await adminBulkDeleteUsers({
-        accountIds: allIds,
-        adminEmail: adminSession.adminEmail,
-        reason: 'Admin bulk delete all system accounts',
-      });
-      setFeedbackMsg(`Permanently deleted all ${deleted.length} system accounts.`);
-      setSelectedUserIds([]);
-    } catch (err) {
-      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete all accounts.');
-    } finally {
-      setBulkBusy(false);
-    }
+    setConfirmModal({
+      title: lang === 'bn' ? 'সিস্টেমের সব অ্যাকাউন্ট ডিলিট করবেন?' : 'Delete ALL Platform Accounts?',
+      message:
+        lang === 'bn'
+          ? 'সব অ্যাকাউন্ট ও আইডেন্টিটি লক স্থায়ীভাবে মুছে যাবে। নিশ্চিত হলে এগিয়ে যান।'
+          : 'WARNING: This will permanently delete ALL Customer, Agent, and Merchant accounts and clear identity locks.',
+      confirmLabel: lang === 'bn' ? 'সব ডিলিট করুন' : 'Delete All Accounts',
+      tone: 'danger',
+      onConfirm: async () => {
+        setBulkBusy(true);
+        setFeedbackMsg('');
+        try {
+          const allIds = users.map((u) => u.accountId);
+          const deleted = await adminBulkDeleteUsers({
+            accountIds: allIds,
+            adminEmail: adminSession.adminEmail,
+            reason: 'Admin bulk delete all system accounts',
+          });
+          setFeedbackMsg(`Permanently deleted all ${deleted.length} system accounts.`);
+          setSelectedUserIds([]);
+        } catch (err) {
+          setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete all accounts.');
+        } finally {
+          setBulkBusy(false);
+        }
+      },
+    });
   };
 
-  const handleFactoryResetSystem = async () => {
+  const handleFactoryResetSystem = () => {
     if (!adminSession) return;
-    if (
-      !window.confirm(
-        '⚠️ FACTORY RESET: Delete ALL users, merchants, agents, transactions, KYC records, and reset treasury vault to 0 BDT? This will completely wipe the platform clean so you can add new accounts from scratch.'
-      )
-    )
-      return;
-    setBulkBusy(true);
-    setFeedbackMsg('');
-    try {
-      await adminResetAllAccountsAndTransactions({
-        adminEmail: adminSession.adminEmail,
-        reason: 'System factory reset by Main Admin',
-      });
-      setFeedbackMsg('System factory reset completed successfully! All accounts, transactions & history wiped clean.');
-      setSelectedUserIds([]);
-    } catch (err) {
-      setFeedbackMsg(err instanceof Error ? err.message : 'Factory reset failed.');
-    } finally {
-      setBulkBusy(false);
-    }
+    setConfirmModal({
+      title: lang === 'bn' ? 'সিস্টেম ফ্যাক্টরি রিসেট' : 'Factory Reset Entire Platform',
+      message:
+        lang === 'bn'
+          ? 'সকল ইউজার, এজেন্ট, মার্চেন্ট, লেনদেন, KYC রেকর্ড মুছে যাবে এবং ট্রেজারি ভল্ট ৳0.00-এ রিসেট হবে।'
+          : 'Delete ALL users, merchants, agents, transactions, KYC records, and reset the treasury vault to 0 BDT so you can start fresh.',
+      confirmLabel: lang === 'bn' ? 'ফ্যাক্টরি রিসেট নিশ্চিত করুন' : 'Confirm Factory Reset',
+      tone: 'danger',
+      onConfirm: async () => {
+        setBulkBusy(true);
+        setFeedbackMsg('');
+        try {
+          await adminResetAllAccountsAndTransactions({
+            adminEmail: adminSession.adminEmail,
+            reason: 'System factory reset by Main Admin',
+          });
+          setFeedbackMsg(
+            'System factory reset completed successfully! All accounts, transactions & history wiped clean.'
+          );
+          setSelectedUserIds([]);
+          setViewedAccountId(null);
+        } catch (err) {
+          setFeedbackMsg(err instanceof Error ? err.message : 'Factory reset failed.');
+        } finally {
+          setBulkBusy(false);
+        }
+      },
+    });
   };
 
-  const handleDeleteSingleUser = async (accountId: string) => {
+  const handleDeleteSingleUser = (accountId: string) => {
     if (!adminSession) return;
-    if (!window.confirm(`Permanently delete account ${accountId}?`)) return;
-    setActionBusyId(accountId);
+    setConfirmModal({
+      title:
+        lang === 'bn'
+          ? `অ্যাকাউন্ট ${accountId} ডিলিট করবেন?`
+          : `Delete Account ${accountId}?`,
+      message:
+        lang === 'bn'
+          ? `অ্যাকাউন্ট ${accountId} স্থায়ীভাবে মুছে ফেলা হবে। এটি আর পুনরুদ্ধার করা যাবে না।`
+          : `Permanently delete account ${accountId} and release its identity locks? This cannot be undone.`,
+      confirmLabel: lang === 'bn' ? 'ডিলিট করুন' : 'Delete Account',
+      tone: 'danger',
+      onConfirm: async () => {
+        setActionBusyId(accountId);
+        setFeedbackMsg('');
+        try {
+          await adminDeleteUser(accountId, adminSession.adminEmail, 'Admin deleted account');
+          setFeedbackMsg(`Successfully deleted account ${accountId}.`);
+          if (viewedAccountId === accountId) setViewedAccountId(null);
+        } catch (err) {
+          setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete account.');
+        } finally {
+          setActionBusyId(null);
+        }
+      },
+    });
+  };
+
+  const handleSendBroadcastAlert = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminSession) return;
+    setBroadcastBusy(true);
     setFeedbackMsg('');
     try {
-      await adminDeleteUser(accountId, adminSession.adminEmail, 'Admin deleted account');
-      setFeedbackMsg(`Successfully deleted account ${accountId}.`);
+      const sent = await adminSendAccountNotification({
+        recipientIdentifier: broadcastTarget,
+        title: broadcastTitle,
+        message: broadcastMessage,
+        severity: broadcastSeverity,
+        adminEmail: adminSession.adminEmail,
+      });
+      setFeedbackMsg(
+        sent.recipientId === 'ALL'
+          ? `Live broadcast popup pushed to ALL Accounts ("${sent.title}").`
+          : `Live popup alert pushed directly to ${sent.recipientId} ("${sent.title}").`
+      );
+      setBroadcastTitle('');
+      setBroadcastMessage('');
+      setBroadcastModalOpen(false);
     } catch (err) {
-      setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete account.');
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not send account alert.');
     } finally {
-      setActionBusyId(null);
+      setBroadcastBusy(false);
     }
   };
 
@@ -1954,6 +2067,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
             <button
               type="button"
+              onClick={() => setBroadcastModalOpen(true)}
+              className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 shadow-sm transition-colors"
+              title={lang === 'bn' ? 'অ্যাকাউন্ট পোর্টালে লাইভ অ্যালার্ট পাঠান' : 'Send Live Alert to Accounts'}
+            >
+              <Megaphone className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'অ্যালার্ট পাঠান' : 'Push Alert'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() =>
                 downloadGlobalLedgerPdf(transactions, users, feeConfig, adminSession.adminEmail)
               }
@@ -2089,9 +2212,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             </div>
           )}
 
-          {/* KPI Strip */}
+          {/* 3D Executive KPI Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
-            <div className="rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-4 text-white shadow-md">
+            <div className="acash-3d-tile rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-4 text-white">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-slate-300">{t('totalSystemFloat', lang)}</span>
                 <button
@@ -2109,7 +2232,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 Vault: {formatBdt(treasuryVault.balance, lang)} · {metrics.activeUsersCount}/{users.length} active
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">{t('adminRevenue', lang)}</div>
               <div className="font-mono-tabular text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-1.5">
                 {formatBdt(metrics.adminRevenue, lang)}
@@ -2118,7 +2241,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {feeConfig.adminShare} Tk / 1,000 rate
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">{t('govtLevy', lang)}</div>
               <div className="font-mono-tabular text-xl font-bold text-sky-600 dark:text-sky-400 mt-1.5">
                 {formatBdt(metrics.govtPool, lang)}
@@ -2127,7 +2250,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {feeConfig.govtShare} Tk / 1,000 rate
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">{t('agentPool', lang)}</div>
               <div className="font-mono-tabular text-xl font-bold text-indigo-600 dark:text-indigo-400 mt-1.5">
                 {formatBdt(metrics.agentPool, lang)}
@@ -2136,7 +2259,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {feeConfig.agentShare} Tk / 1,000 rate
               </div>
             </div>
-            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-amber-200 dark:border-amber-500/35 p-4 shadow-sm">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-amber-200 dark:border-amber-500/35 p-4">
               <div className="text-xs text-amber-700 dark:text-amber-300 font-medium">{t('pendingReviews', lang)}</div>
               <div className="font-mono-tabular text-xl font-bold text-amber-600 dark:text-amber-200 mt-1.5">
                 {metrics.pendingHighValue.length}
@@ -2865,6 +2988,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
+                        onClick={() => setViewedAccountId(inspectedCreator.accountId)}
+                        className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-2 shadow-sm transition-colors"
+                      >
+                        <Eye className="w-4 h-4" />
+                        <span>{lang === 'bn' ? 'সম্পূর্ণ অ্যাকাউন্ট দেখুন' : 'Full Account View'}</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() =>
                           downloadAccountStatementPdf(
                             inspectedCreator,
@@ -3123,19 +3255,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           {bulkBusy ? 'Deleting...' : `Delete Selected (${selectedUsers.length})`}
                         </span>
                       </button>
-
-                      <button
-                        type="button"
-                        disabled={bulkBusy}
-                        onClick={handleDeleteSelected}
-                        className="px-3.5 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
-                        title="Permanently delete selected accounts"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>
-                          {bulkBusy ? 'Deleting...' : `Delete Selected (${selectedUsers.length})`}
-                        </span>
-                      </button>
                     </div>
                   </div>
                 )}
@@ -3197,6 +3316,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 <img
                                   src={u.profilePhotoUrl || u.kyc?.nidPhotoUrl}
                                   alt={u.name}
+                                  referrerPolicy="no-referrer"
                                   className="w-9 h-9 rounded-xl object-cover border border-indigo-200 dark:border-indigo-500/35 shrink-0"
                                 />
                               ) : (
@@ -3260,6 +3380,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           </td>
                           <td className="py-3.5 px-5 text-right" onClick={(e) => e.stopPropagation()}>
                             <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setViewedAccountId(u.accountId)}
+                                title={lang === 'bn' ? 'PDF ছাড়া সম্পূর্ণ অ্যাকাউন্ট দেখুন' : 'Inspect Full Account (No PDF needed)'}
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-1 transition-colors shadow-xs"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>{lang === 'bn' ? 'দেখুন' : 'View'}</span>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => {
@@ -4535,11 +4664,33 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                             </td>
                             <td className="py-3 px-4 text-slate-900 dark:text-white">
                               {tx.senderName}{' '}
-                              <span className="text-slate-500 dark:text-slate-400">({tx.senderId})</span>
+                              {/^[UAM]-/.test(tx.senderId) ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setViewedAccountId(tx.senderId)}
+                                  className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                  title="Inspect sender account"
+                                >
+                                  ({tx.senderId})
+                                </button>
+                              ) : (
+                                <span className="text-slate-500 dark:text-slate-400">({tx.senderId})</span>
+                              )}
                             </td>
                             <td className="py-3 px-4 text-slate-900 dark:text-white">
                               {tx.receiverName}{' '}
-                              <span className="text-slate-500 dark:text-slate-400">({tx.receiverId})</span>
+                              {/^[UAM]-/.test(tx.receiverId) ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setViewedAccountId(tx.receiverId)}
+                                  className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                  title="Inspect recipient account"
+                                >
+                                  ({tx.receiverId})
+                                </button>
+                              ) : (
+                                <span className="text-slate-500 dark:text-slate-400">({tx.receiverId})</span>
+                              )}
                             </td>
                             <td className="py-3 px-4 text-right font-mono-tabular font-bold text-slate-900 dark:text-white whitespace-nowrap">
                               {formatBdt(tx.amount, lang)}
@@ -4695,6 +4846,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       { id: 'bulk_status_change', label: 'Bulk Status' },
                       { id: 'status_change', label: 'Account Status' },
                       { id: 'aml_decision', label: 'AML Decisions' },
+                      { id: 'account_alert', label: 'Account Alerts' },
                       { id: 'alert_settings', label: 'Alert Settings' },
                     ] as const
                   ).map((tab) => (
@@ -5664,6 +5816,207 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Account 360° Inspector Modal (All Details Without PDF Download) */}
+      {viewedAccount && (
+        <AdminAccountViewModal
+          user={viewedAccount}
+          allTransactions={transactions}
+          feeConfig={feeConfig}
+          lang={lang}
+          adminEmail={adminSession.adminEmail}
+          actionBusy={actionBusyId === viewedAccount.accountId}
+          onClose={() => setViewedAccountId(null)}
+          onCreditAccount={(accId) => {
+            setCreditTarget(accId);
+            setSection('treasury');
+          }}
+          onToggleStatus={(targetUser) => {
+            void handleUserStatusButtonClick(targetUser);
+          }}
+        />
+      )}
+
+      {/* Live Account Alert / Platform Broadcast Composer Modal */}
+      {broadcastModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handleSendBroadcastAlert}
+            className="w-full max-w-lg rounded-3xl bg-white dark:bg-[#121622] border border-indigo-200 dark:border-indigo-500/40 p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300 flex items-center justify-center shrink-0">
+                  <Megaphone className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                    {lang === 'bn'
+                      ? 'অ্যাকাউন্ট পোর্টালে লাইভ অ্যালার্ট পাঠান'
+                      : 'Push Live Notification to Accounts'}
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {lang === 'bn'
+                      ? 'রিফ্রেশ ছাড়াই তাৎক্ষণিক পপআপ সব বা নির্দিষ্ট অ্যাকাউন্টে পৌঁছাবে।'
+                      : 'Appears instantly as a live toast popup & alert inbox item without page refresh.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBroadcastModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  {lang === 'bn' ? 'প্রাপক অ্যাকাউন্ট (অথবা ALL)' : 'Target (ALL or ID / Phone / Email)'}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={broadcastTarget}
+                  onChange={(e) => setBroadcastTarget(e.target.value)}
+                  placeholder="ALL or U-100001 / A- / M-"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs font-mono-tabular text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  {lang === 'bn' ? 'গুরুত্বের ধরন' : 'Alert Severity'}
+                </label>
+                <select
+                  value={broadcastSeverity}
+                  onChange={(e) =>
+                    setBroadcastSeverity(
+                      e.target.value as 'info' | 'success' | 'warning' | 'critical'
+                    )
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="info">Info Announcement</option>
+                  <option value="success">Success / Bonus Notice</option>
+                  <option value="warning">Warning / Maintenance</option>
+                  <option value="critical">Critical Security Alert</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                {lang === 'bn' ? 'শিরোনাম' : 'Alert Title'}
+              </label>
+              <input
+                type="text"
+                required
+                value={broadcastTitle}
+                onChange={(e) => setBroadcastTitle(e.target.value)}
+                placeholder="e.g. Scheduled Maintenance Complete"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                {lang === 'bn' ? 'বার্তা' : 'Alert Message'}
+              </label>
+              <textarea
+                required
+                rows={3}
+                value={broadcastMessage}
+                onChange={(e) => setBroadcastMessage(e.target.value)}
+                placeholder="Write the message to deliver live to Customer, Agent & Merchant portals..."
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setBroadcastModalOpen(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300"
+              >
+                {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+              </button>
+              <button
+                type="submit"
+                disabled={broadcastBusy}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>{broadcastBusy ? 'Pushing...' : 'Push Live Notification'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* In-App Executive Confirmation Modal */}
+      {confirmModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/65 dark:bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className={`w-full max-w-md rounded-3xl bg-white dark:bg-[#121622] border p-6 space-y-4 shadow-2xl ${
+              confirmModal.tone === 'danger'
+                ? 'border-rose-200 dark:border-rose-500/40'
+                : 'border-amber-200 dark:border-amber-500/40'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                {confirmModal.title}
+              </h3>
+              <button
+                type="button"
+                disabled={confirmBusy}
+                onClick={() => setConfirmModal(null)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              {confirmModal.message}
+            </p>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                disabled={confirmBusy}
+                onClick={() => setConfirmModal(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300"
+              >
+                {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                disabled={confirmBusy}
+                onClick={async () => {
+                  setConfirmBusy(true);
+                  try {
+                    await confirmModal.onConfirm();
+                    setConfirmModal(null);
+                  } finally {
+                    setConfirmBusy(false);
+                  }
+                }}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-semibold text-white disabled:opacity-50 transition-colors ${
+                  confirmModal.tone === 'danger'
+                    ? 'bg-rose-600 hover:bg-rose-500'
+                    : 'bg-amber-600 hover:bg-amber-500'
+                }`}
+              >
+                {confirmBusy ? 'Processing...' : confirmModal.confirmLabel}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

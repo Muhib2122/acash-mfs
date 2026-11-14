@@ -1,4 +1,5 @@
 import {
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -36,6 +37,8 @@ import {
   AcashMapLocation,
   AcashTransaction,
   AcashUser,
+  AccountNotification,
+  AccountNotificationCategory,
   AccountStatus,
   AdminActivityLog,
   AdminActivityType,
@@ -70,6 +73,7 @@ const MAP_LOCATIONS_COL = 'acash_map_locations';
 const SECOND_ADMINS_COL = 'acash_second_admins';
 const SETTINGS_COL = 'acash_settings';
 const ADMIN_NOTIF_COL = 'acash_admin_notifications';
+const ACCOUNT_NOTIF_COL = 'acash_account_notifications';
 const ADMIN_ACTIVITY_COL = 'acash_admin_activity_logs';
 const FEE_DOC_ID = 'fee_config';
 const ADMIN_ALERT_DOC_ID = 'admin_alert';
@@ -566,6 +570,7 @@ interface LocalStoreState {
   mapLocations: Record<string, AcashMapLocation>;
   secondAdmins: Record<string, SecondAdminProfile>;
   notifications: Record<string, AdminNotification>;
+  accountNotifications: Record<string, AccountNotification>;
   activityLogs: Record<string, AdminActivityLog>;
   feeConfig: FeeConfig;
   adminAlertEmail: string;
@@ -962,6 +967,7 @@ function readLocalStore(): LocalStoreState {
         mapLocations: mergedMapLocations,
         secondAdmins: mergedSecondAdmins,
         notifications: parsed.notifications || buildDefaultNotifications(),
+        accountNotifications: parsed.accountNotifications || {},
         activityLogs: parsed.activityLogs || buildDefaultActivityLogs(),
         feeConfig: normalizeFeeConfig(parsed.feeConfig),
         adminAlertEmail: normalizedAlertEmail,
@@ -983,6 +989,7 @@ function readLocalStore(): LocalStoreState {
     mapLocations: {},
     secondAdmins: {},
     notifications: buildDefaultNotifications(),
+    accountNotifications: {},
     activityLogs: buildDefaultActivityLogs(),
     feeConfig: normalizeFeeConfig(DEFAULT_FEE_CONFIG),
     adminAlertEmail: DEFAULT_ADMIN_ALERT_EMAIL,
@@ -1099,6 +1106,11 @@ function writeLocalStore(state: LocalStoreState, notify = true) {
         ...state,
         users: compactUsers,
         transactions: Object.fromEntries(recentTxs),
+        accountNotifications: Object.fromEntries(
+          Object.entries(state.accountNotifications || {})
+            .sort((a, b) => b[1].createdAt - a[1].createdAt)
+            .slice(0, 120)
+        ),
         activityLogs: Object.fromEntries(
           Object.entries(state.activityLogs)
             .sort((a, b) => b[1].timestamp - a[1].timestamp)
@@ -2754,6 +2766,253 @@ export async function markAllAdminNotificationsRead(): Promise<void> {
   }
 }
 
+function buildAccountNotification(params: {
+  recipientId: string;
+  recipientRole?: UserRole | 'ALL';
+  title: string;
+  message: string;
+  category: AccountNotificationCategory;
+  severity: 'info' | 'success' | 'warning' | 'critical';
+  amount?: number;
+  txId?: string;
+  txHash?: string;
+  createdBy?: string;
+  createdAt?: number;
+}): AccountNotification {
+  const ts = params.createdAt || Date.now();
+  const rand = Math.random().toString(36).substring(2, 7).toUpperCase();
+  return stripUndefined({
+    id: `ACN-${ts.toString(36).toUpperCase()}-${rand}`,
+    recipientId: params.recipientId,
+    ...(params.recipientRole ? { recipientRole: params.recipientRole } : {}),
+    title: params.title.slice(0, 190),
+    message: params.message.slice(0, 950),
+    category: params.category,
+    severity: params.severity,
+    ...(typeof params.amount === 'number' ? { amount: params.amount } : {}),
+    ...(params.txId ? { txId: params.txId } : {}),
+    ...(params.txHash ? { txHash: params.txHash } : {}),
+    ...(params.createdBy ? { createdBy: params.createdBy } : {}),
+    read: false,
+    readBy: [],
+    createdAt: ts,
+  });
+}
+
+async function persistAccountNotifications(notifs: AccountNotification[]): Promise<void> {
+  if (notifs.length === 0) return;
+  const store = readLocalStore();
+  store.accountNotifications = store.accountNotifications || {};
+  for (const n of notifs) {
+    store.accountNotifications[n.id] = n;
+  }
+  writeLocalStore(store, true);
+  try {
+    await Promise.all(
+      notifs.map((n) => setDoc(doc(db, ACCOUNT_NOTIF_COL, n.id), n).catch(() => {}))
+    );
+  } catch {
+    // ignore offline sync fallback
+  }
+}
+
+export function isAccountNotificationRead(notif: AccountNotification, accountId: string): boolean {
+  if (notif.recipientId === 'ALL') {
+    return Boolean(notif.readBy?.includes(accountId));
+  }
+  return Boolean(notif.read || notif.readBy?.includes(accountId));
+}
+
+export function subscribeToAccountNotifications(
+  accountId: string,
+  callback: (notifs: AccountNotification[]) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    const store = readLocalStore();
+    const list = Object.values(store.accountNotifications || {})
+      .filter((n) => n.recipientId === accountId || n.recipientId === 'ALL')
+      .sort((a, b) => b.createdAt - a.createdAt);
+    callback(list);
+  };
+
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  const attachFs = () => {
+    unsubFs();
+    try {
+      const q = query(
+        collection(db, ACCOUNT_NOTIF_COL),
+        where('recipientId', 'in', [accountId, 'ALL'])
+      );
+      unsubFs = onSnapshot(
+        q,
+        (snap) => {
+          const store = readLocalStore();
+          store.accountNotifications = store.accountNotifications || {};
+          for (const d of snap.docs) {
+            const n = d.data() as AccountNotification;
+            if (n?.id) {
+              store.accountNotifications[n.id] = n;
+            }
+          }
+          writeLocalStore(store, false);
+          emitLocal();
+        },
+        () => emitLocal()
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  attachFs();
+  let lastUid = auth.currentUser?.uid || '';
+  const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
+    const nextUid = fbUser?.emailVerified ? fbUser.uid : '';
+    if (nextUid && nextUid !== lastUid) {
+      lastUid = nextUid;
+      attachFs();
+    } else if (!nextUid) {
+      lastUid = '';
+    }
+  });
+
+  return () => {
+    unsubLocal();
+    unsubAuth();
+    unsubFs();
+  };
+}
+
+export async function markAccountNotificationRead(notifId: string, accountId: string): Promise<void> {
+  const store = readLocalStore();
+  const existing = store.accountNotifications?.[notifId];
+  let isBroadcast = false;
+  if (existing) {
+    isBroadcast = existing.recipientId === 'ALL';
+    const nextReadBy = Array.from(new Set([...(existing.readBy || []), accountId]));
+    store.accountNotifications[notifId] = {
+      ...existing,
+      read: isBroadcast ? existing.read : true,
+      readBy: nextReadBy,
+    };
+    writeLocalStore(store, true);
+  }
+  try {
+    await updateDoc(
+      doc(db, ACCOUNT_NOTIF_COL, notifId),
+      isBroadcast ? { readBy: arrayUnion(accountId) } : { read: true, readBy: arrayUnion(accountId) }
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export async function markAllAccountNotificationsRead(accountId: string): Promise<void> {
+  const store = readLocalStore();
+  const matching = Object.values(store.accountNotifications || {}).filter(
+    (n) => (n.recipientId === accountId || n.recipientId === 'ALL') && !isAccountNotificationRead(n, accountId)
+  );
+  if (matching.length === 0) return;
+
+  for (const n of matching) {
+    const nextReadBy = Array.from(new Set([...(n.readBy || []), accountId]));
+    store.accountNotifications[n.id] = {
+      ...n,
+      read: n.recipientId === 'ALL' ? n.read : true,
+      readBy: nextReadBy,
+    };
+  }
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all(
+      matching.map((n) =>
+        updateDoc(
+          doc(db, ACCOUNT_NOTIF_COL, n.id),
+          n.recipientId === 'ALL'
+            ? { readBy: arrayUnion(accountId) }
+            : { read: true, readBy: arrayUnion(accountId) }
+        ).catch(() => {})
+      )
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export async function adminSendAccountNotification(params: {
+  recipientIdentifier: string; // 'ALL' or accountId / phone / email
+  title: string;
+  message: string;
+  severity?: 'info' | 'success' | 'warning' | 'critical';
+  adminEmail: string;
+}): Promise<AccountNotification> {
+  const cleanTitle = params.title.trim();
+  const cleanMessage = params.message.trim();
+  if (!cleanTitle || !cleanMessage) {
+    throw new Error('Alert title and message are required.');
+  }
+
+  const cleanTarget = params.recipientIdentifier.trim().toUpperCase();
+  let resolvedRecipientId = 'ALL';
+  let resolvedRole: UserRole | 'ALL' = 'ALL';
+
+  if (cleanTarget !== 'ALL') {
+    const targetUser = await findUserByIdentifier(params.recipientIdentifier);
+    if (!targetUser) {
+      throw new Error('Target account not found. Enter a valid ID (U-/A-/M-), phone, email, or select ALL.');
+    }
+    resolvedRecipientId = targetUser.accountId;
+    resolvedRole = targetUser.role;
+  }
+
+  const now = Date.now();
+  const notif = buildAccountNotification({
+    recipientId: resolvedRecipientId,
+    recipientRole: resolvedRole,
+    title: cleanTitle,
+    message: cleanMessage,
+    category: 'admin_alert',
+    severity: params.severity || 'info',
+    createdBy: params.adminEmail,
+    createdAt: now,
+  });
+
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-BCN',
+    actionType: 'account_alert',
+    title:
+      resolvedRecipientId === 'ALL'
+        ? `Live Broadcast Alert Sent (${cleanTitle})`
+        : `Direct Alert Sent to ${resolvedRecipientId}`,
+    details: `${cleanTitle} — ${cleanMessage}`,
+    actorEmail: params.adminEmail,
+    targetIds: resolvedRecipientId === 'ALL' ? [] : [resolvedRecipientId],
+    timestamp: now,
+  });
+
+  const store = readLocalStore();
+  store.accountNotifications = store.accountNotifications || {};
+  store.accountNotifications[notif.id] = notif;
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      setDoc(doc(db, ACCOUNT_NOTIF_COL, notif.id), notif),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return notif;
+}
+
 export function subscribeToAdminActivityLogs(
   callback: (logs: AdminActivityLog[]) => void
 ): Unsubscribe {
@@ -3175,7 +3434,55 @@ export async function executeFinancialTransaction(params: {
   if (txNotif) {
     latestStore.notifications[txNotif.id] = txNotif;
   }
-  writeLocalStore(latestStore, true);
+  const accountNotifs: AccountNotification[] = [];
+  if (requiresAdminApproval) {
+    accountNotifs.push(
+      buildAccountNotification({
+        recipientId: senderLocal.accountId,
+        recipientRole: senderLocal.role,
+        title: `Pending Admin Approval · ৳${amount.toLocaleString()}`,
+        message: `Your ${params.type.replace(/_/g, ' ')} to ${committedTxRecord.receiverName} (${committedTxRecord.receiverId}) is held for AML review (${txHash}).`,
+        category: 'transaction',
+        severity: 'warning',
+        amount,
+        txId,
+        txHash,
+        createdAt: now,
+      })
+    );
+  } else {
+    accountNotifs.push(
+      buildAccountNotification({
+        recipientId: senderLocal.accountId,
+        recipientRole: senderLocal.role,
+        title: `${params.type.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())} Completed · ৳${amount.toLocaleString()}`,
+        message: `Debited ৳${totalDebited.toLocaleString()} to ${committedTxRecord.receiverName} (${committedTxRecord.receiverId}) · ${txHash}`,
+        category: 'transaction',
+        severity: 'info',
+        amount,
+        txId,
+        txHash,
+        createdAt: now,
+      })
+    );
+    if (committedReceiver) {
+      accountNotifs.push(
+        buildAccountNotification({
+          recipientId: (committedReceiver as AcashUser).accountId,
+          recipientRole: (committedReceiver as AcashUser).role,
+          title: `Money Received · +৳${creditToReceiver.toLocaleString()}`,
+          message: `Received ৳${amount.toLocaleString()}${receiverCommInc > 0 ? ` (+৳${receiverCommInc.toFixed(2)} comm)` : ''} from ${committedTxRecord.senderName} (${committedTxRecord.senderId}) · ${txHash}`,
+          category: 'transaction',
+          severity: 'success',
+          amount: creditToReceiver,
+          txId,
+          txHash,
+          createdAt: now,
+        })
+      );
+    }
+  }
+  await persistAccountNotifications(accountNotifs);
 
   if (requiresAdminApproval) {
     await sendHighValuePendingEmails({
@@ -3372,6 +3679,21 @@ export async function executeMerchantRefund(params: {
   if (committedOrig) latestStore.transactions[(committedOrig as AcashTransaction).txId] = committedOrig;
   latestStore.transactions[refundTxId] = committedRefund;
   writeLocalStore(latestStore, true);
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: customer.accountId,
+      recipientRole: customer.role,
+      title: `Merchant Refund Received · +৳${refundAmt.toLocaleString()}`,
+      message: `${merchant.businessName || merchant.name} (${merchant.accountId}) refunded ৳${refundAmt.toLocaleString()} for ${orig.txHash}.`,
+      category: 'transaction',
+      severity: 'success',
+      amount: refundAmt,
+      txId: refundTxId,
+      txHash: refundTxHash,
+      createdAt: now,
+    }),
+  ]);
 
   return committedRefund;
 }
@@ -3727,6 +4049,22 @@ export async function adminCreditAccount(params: {
   latestStore.activityLogs[creditActivity.id] = creditActivity;
   writeLocalStore(latestStore, true);
 
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: currentTarget.accountId,
+      recipientRole: currentTarget.role,
+      title: `Admin Wallet Credit · +৳${amt.toLocaleString()}`,
+      message: `Platform Admin credited ৳${amt.toLocaleString()} to your wallet. Note: ${txRecord.note} (${txHash})`,
+      category: 'admin_alert',
+      severity: 'success',
+      amount: amt,
+      txId,
+      txHash,
+      createdBy: params.adminEmail,
+      createdAt: now,
+    }),
+  ]);
+
   return committedTx;
 }
 
@@ -3928,6 +4266,40 @@ export async function adminTransferBetweenAccounts(params: {
   latestStore.activityLogs[trActivity.id] = trActivity;
   writeLocalStore(latestStore, true);
 
+  const transferNotifs: AccountNotification[] = [
+    buildAccountNotification({
+      recipientId: currentTo.accountId,
+      recipientRole: currentTo.role,
+      title: `Admin Transfer Credited · +৳${amt.toLocaleString()}`,
+      message: `Received ৳${amt.toLocaleString()} from ${baseTxRecord.senderName} (${baseTxRecord.senderId}). Note: ${baseTxRecord.note} (${txHash})`,
+      category: 'admin_alert',
+      severity: 'success',
+      amount: amt,
+      txId,
+      txHash,
+      createdBy: params.adminEmail,
+      createdAt: now,
+    }),
+  ];
+  if (committedFrom) {
+    transferNotifs.push(
+      buildAccountNotification({
+        recipientId: (committedFrom as AcashUser).accountId,
+        recipientRole: (committedFrom as AcashUser).role,
+        title: `Admin Transfer Debited · -৳${amt.toLocaleString()}`,
+        message: `Transferred ৳${amt.toLocaleString()} to ${currentTo.businessName || currentTo.name} (${currentTo.accountId}). Note: ${baseTxRecord.note} (${txHash})`,
+        category: 'admin_alert',
+        severity: 'warning',
+        amount: amt,
+        txId,
+        txHash,
+        createdBy: params.adminEmail,
+        createdAt: now,
+      })
+    );
+  }
+  await persistAccountNotifications(transferNotifs);
+
   return committedTx;
 }
 
@@ -4093,6 +4465,40 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
   latestStore.activityLogs[approveActivity.id] = approveActivity;
   writeLocalStore(latestStore, true);
 
+  const amlApproveNotifs: AccountNotification[] = [
+    buildAccountNotification({
+      recipientId: tx.senderId,
+      recipientRole: tx.senderRole === 'U' || tx.senderRole === 'A' || tx.senderRole === 'M' ? tx.senderRole : undefined,
+      title: `AML Transaction Approved · ৳${tx.amount.toLocaleString()}`,
+      message: `Admin approved your transaction ${tx.txHash} to ${tx.receiverName} (${tx.receiverId}).`,
+      category: 'transaction',
+      severity: 'success',
+      amount: tx.amount,
+      txId,
+      txHash: tx.txHash,
+      createdBy: adminEmail,
+      createdAt: now,
+    }),
+  ];
+  if (tx.receiverRole === 'U' || tx.receiverRole === 'A' || tx.receiverRole === 'M') {
+    amlApproveNotifs.push(
+      buildAccountNotification({
+        recipientId: tx.receiverId,
+        recipientRole: tx.receiverRole,
+        title: `Approved Funds Credited · +৳${tx.amount.toLocaleString()}`,
+        message: `Admin approved incoming transfer of ৳${tx.amount.toLocaleString()} from ${tx.senderName} (${tx.senderId}) · ${tx.txHash}.`,
+        category: 'transaction',
+        severity: 'success',
+        amount: tx.amount,
+        txId,
+        txHash: tx.txHash,
+        createdBy: adminEmail,
+        createdAt: now,
+      })
+    );
+  }
+  await persistAccountNotifications(amlApproveNotifs);
+
   const sender = latestStore.users[tx.senderId];
   const resolvedAdminEmail =
     adminEmail && adminEmail.includes('@') && adminEmail !== 'admin@acash.com'
@@ -4228,6 +4634,22 @@ export async function adminRejectTransaction(
   latestStore.notifications[decisionNotif.id] = decisionNotif;
   latestStore.activityLogs[rejectActivity.id] = rejectActivity;
   writeLocalStore(latestStore, true);
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: tx.senderId,
+      recipientRole: tx.senderRole === 'U' || tx.senderRole === 'A' || tx.senderRole === 'M' ? tx.senderRole : undefined,
+      title: `Transaction Rejected & Refunded · ৳${tx.totalDebited.toLocaleString()}`,
+      message: `Admin rejected ${tx.txHash} (Reason: ${rejectReason}). Escrow refunded to your wallet.`,
+      category: 'transaction',
+      severity: 'warning',
+      amount: tx.totalDebited,
+      txId,
+      txHash: tx.txHash,
+      createdBy: adminEmail,
+      createdAt: now,
+    }),
+  ]);
 
   const sender = latestStore.users[tx.senderId];
   const resolvedAdminEmail =
@@ -4467,6 +4889,22 @@ export async function adminToggleUserStatus(
     } catch {
       firestoreBackendMode = 'local_sync';
     }
+
+    await persistAccountNotifications([
+      buildAccountNotification({
+        recipientId: accountId,
+        recipientRole: existingUser.role,
+        title: newStatus === 'disabled' ? 'Account Restricted by Admin' : 'Account Reactivated',
+        message:
+          newStatus === 'disabled'
+            ? `Your account has been temporarily restricted. Cause: ${updatedUser.disableReason}`
+            : `Your Acash account is active again (${reason || 'Reviewed by Platform Admin'}).`,
+        category: 'security',
+        severity: newStatus === 'disabled' ? 'critical' : 'success',
+        createdBy: adminEmail || 'Admin',
+        createdAt: now,
+      }),
+    ]);
   }
 
   return updatedUser;
@@ -4565,6 +5003,24 @@ export async function adminBulkUpdateUserStatus(params: {
   } catch {
     firestoreBackendMode = 'local_sync';
   }
+
+  await persistAccountNotifications(
+    updatedUsers.map((u) =>
+      buildAccountNotification({
+        recipientId: u.accountId,
+        recipientRole: u.role,
+        title: params.newStatus === 'disabled' ? 'Account Restricted by Admin' : 'Account Reactivated',
+        message:
+          params.newStatus === 'disabled'
+            ? `Your account has been restricted by Platform Admin. Cause: ${cleanReason}`
+            : `Your Acash account has been reactivated by Platform Admin.`,
+        category: 'security',
+        severity: params.newStatus === 'disabled' ? 'critical' : 'success',
+        createdBy: params.adminEmail,
+        createdAt: now,
+      })
+    )
+  );
 
   return updatedUsers;
 }
@@ -4726,6 +5182,7 @@ export async function adminResetAllAccountsAndTransactions(params: {
     targetSection: 'users',
   };
   store.notifications = { [resetNotif.id]: resetNotif };
+  store.accountNotifications = {};
 
   const resetActivity = makeActivityEntry({
     idPrefix: 'ACT-RESET',
@@ -4741,13 +5198,14 @@ export async function adminResetAllAccountsAndTransactions(params: {
   writeLocalStore(store, true);
 
   try {
-    const [usersSnap, dirSnap, txSnap, mapSnap, kycSnap, locksSnap] = await Promise.all([
+    const [usersSnap, dirSnap, txSnap, mapSnap, kycSnap, locksSnap, acctNotifSnap] = await Promise.all([
       getDocs(collection(db, USERS_COL)),
       getDocs(collection(db, DIRECTORY_COL)),
       getDocs(collection(db, TX_COL)),
       getDocs(collection(db, MAP_LOCATIONS_COL)),
       getDocs(collection(db, KYC_SUBMISSIONS_COL)),
       getDocs(collection(db, LOCKS_COL)),
+      getDocs(collection(db, ACCOUNT_NOTIF_COL)),
     ]);
 
     await Promise.all([
@@ -4757,6 +5215,7 @@ export async function adminResetAllAccountsAndTransactions(params: {
       ...mapSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       ...kycSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       ...locksSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
+      ...acctNotifSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       setDoc(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), store.treasuryVault).catch(() => {}),
       setDoc(doc(db, ADMIN_NOTIF_COL, resetNotif.id), resetNotif).catch(() => {}),
       setDoc(doc(db, ADMIN_ACTIVITY_COL, resetActivity.id), resetActivity).catch(() => {}),
@@ -4811,6 +5270,19 @@ export async function adminUpdateFeeConfig(config: Omit<FeeConfig, 'updatedAt'>)
   } catch {
     firestoreBackendMode = 'local_sync';
   }
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: 'ALL',
+      recipientRole: 'ALL',
+      title: 'Platform Fee Schedule Updated',
+      message: `Cash-Out ৳${full.feePer1000}/1k · Merchant CO ৳${full.merchantCashOutFeePer1000}/1k · Send Money ${sendMoneyLabel}. Effective immediately.`,
+      category: 'fee_update',
+      severity: 'info',
+      createdBy: config.updatedBy,
+      createdAt: now,
+    }),
+  ]);
 }
 
 export async function updateUserPin(accountId: string, newPin: string): Promise<void> {
@@ -5062,6 +5534,19 @@ export async function updateUserKyc(params: {
       console.warn('Firestore KYC sync error:', err);
     }
   }
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: updated.accountId,
+      recipientRole: updated.role,
+      title: 'KYC Identity Verified',
+      message: `Your KYC verification (NID: ${cleanNid}${cleanTaxCertNo ? `, Tax: ${cleanTaxCertNo}` : ''}) has been verified and synced.`,
+      category: 'kyc',
+      severity: 'success',
+      createdAt: now,
+    }),
+  ]);
+
   return updated;
 }
 

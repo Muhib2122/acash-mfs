@@ -12,6 +12,7 @@ import {
   MapPin,
   Volume2,
   VolumeX,
+  Bell,
 } from 'lucide-react';
 import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
@@ -25,6 +26,7 @@ import { getVoiceMuted, playTransactionVoiceAlert, setVoiceMuted } from '../../l
 import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { QrModal } from '../common/QrModal';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
+import { Wallet3DCard } from '../common/Wallet3DCard';
 
 interface AgentPanelProps {
   user: AcashUser;
@@ -32,6 +34,9 @@ interface AgentPanelProps {
   feeConfig: FeeConfig;
   lang: Language;
   onOpenMapLocationPicker?: () => void;
+  onOpenNotifications?: () => void;
+  unreadNotifications?: number;
+  externalQrSignal?: number;
 }
 
 type AgentTab = 'cash_in' | 'send_money' | 'cash_out' | 'agent_cash_out';
@@ -42,6 +47,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   feeConfig,
   lang,
   onOpenMapLocationPicker,
+  onOpenNotifications,
+  unreadNotifications = 0,
+  externalQrSignal = 0,
 }) => {
   const [counterTab, setCounterTab] = useState<AgentTab>('cash_in');
   const [customerIdentifier, setCustomerIdentifier] = useState('');
@@ -102,6 +110,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
       }
     }
   }, [transactions, user.accountId, user.gender, lang, voiceMuted]);
+
+  useEffect(() => {
+    if (externalQrSignal > 0) {
+      setShowQr(true);
+    }
+  }, [externalQrSignal]);
 
   const toggleVoiceMute = () => {
     setVoiceMutedState((prev) => {
@@ -277,71 +291,98 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
         </div>
       )}
 
-      {/* KPI Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-5 text-white shadow-md">
-          <div className="flex items-center justify-between text-xs text-indigo-300">
-            <span>{lang === 'bn' ? 'এজেন্ট ফ্লোট ব্যালেন্স' : 'Agent Float Balance'}</span>
-            <span className="font-mono-tabular">{user.accountId}</span>
-          </div>
-          <div className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white mt-2">
-            {formatBdt(user.balance, lang)}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowQr(true)}
-              className="px-3 py-1.5 rounded-lg bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
-            >
-              <QrCode className="w-3.5 h-3.5" />
-              <span>{t('myQr', lang)}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              <span>{t('downloadStatement', lang)}</span>
-            </button>
-            <button
-              type="button"
-              onClick={toggleVoiceMute}
-              className="px-3 py-1.5 rounded-lg bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
-            >
-              {voiceMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-300" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-300" />}
-              <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
-            </button>
-            {onOpenMapLocationPicker && (
+      {/* 3D Agent KPI Strip */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+        <div className="lg:col-span-6">
+          <Wallet3DCard
+            user={user}
+            lang={lang}
+            balanceLabel={lang === 'bn' ? 'এজেন্ট ফ্লোট ব্যালেন্স' : 'Agent Float Balance'}
+            alwaysVisibleBalance
+            accentVariant="agent"
+            secondaryBalanceLabel={t('todayCommission', lang)}
+            secondaryBalanceValue={todayCommission}
+            topRightActions={
               <button
                 type="button"
-                onClick={onOpenMapLocationPicker}
-                className="px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-400/40 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 inline-flex items-center gap-1.5 transition-colors"
+                onClick={() => setShowQr(true)}
+                className="min-h-[38px] px-3 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
               >
-                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-                <span>
-                  {user.mapLocation
-                    ? lang === 'bn'
-                      ? 'ম্যাপ লোকেশন আপডেট'
-                      : 'Update Map Pin'
-                    : lang === 'bn'
-                      ? 'ম্যাপে লোকেশন দিন'
-                      : 'Set Map Location'}
-                </span>
+                <QrCode className="w-3.5 h-3.5" />
+                <span>{t('myQr', lang)}</span>
               </button>
-            )}
-          </div>
+            }
+            footerActions={
+              <>
+                <button
+                  type="button"
+                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>{t('downloadStatement', lang)}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleVoiceMute}
+                  className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  {voiceMuted ? (
+                    <VolumeX className="w-3.5 h-3.5 text-rose-300" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
+                  )}
+                  <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
+                </button>
+                {onOpenNotifications && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotifications}
+                    className="px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-indigo-300" />
+                    <span>{lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Alerts'}</span>
+                    {unreadNotifications > 0 && (
+                      <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
+                        {unreadNotifications}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {onOpenMapLocationPicker && (
+                  <button
+                    type="button"
+                    onClick={onOpenMapLocationPicker}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/40 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                  >
+                    <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>
+                      {user.mapLocation
+                        ? lang === 'bn'
+                          ? 'ম্যাপ লোকেশন আপডেট'
+                          : 'Update Map Pin'
+                        : lang === 'bn'
+                          ? 'ম্যাপে লোকেশন দিন'
+                          : 'Set Map Location'}
+                    </span>
+                  </button>
+                )}
+              </>
+            }
+          />
         </div>
 
-        <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm dark:shadow-none">
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>{t('totalCommission', lang)}</span>
-            <Award className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+        <div className="lg:col-span-3 acash-3d-tile rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+              <span>{t('totalCommission', lang)}</span>
+              <Award className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            </div>
+            <div className="font-mono-tabular text-2xl sm:text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-3">
+              {formatBdt(user.commissionBalance || 0, lang)}
+            </div>
           </div>
-          <div className="font-mono-tabular text-2xl sm:text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-2">
-            {formatBdt(user.commissionBalance || 0, lang)}
-          </div>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-3">
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
             {t('todayCommission', lang)}:{' '}
             <span className="font-mono-tabular text-slate-900 dark:text-white font-semibold">
               {formatBdt(todayCommission, lang)}
@@ -349,34 +390,36 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           </div>
         </div>
 
-        <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 shadow-sm dark:shadow-none">
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>{t('commissionRate', lang)}</span>
-            <TrendingUp className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+        <div className="lg:col-span-3 acash-3d-tile rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+              <span>{t('commissionRate', lang)}</span>
+              <TrendingUp className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            </div>
+            <div className="mt-3 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-600 dark:text-slate-300">User / Merch CO Share</span>
+                <span className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400">
+                  ৳{feeConfig.agentShare} / ৳{feeConfig.merchantCashOutAgentShare} per 1k
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-600 dark:text-slate-300">Cash-In Bonus</span>
+                <span className="font-mono-tabular font-semibold text-emerald-600 dark:text-emerald-400">
+                  ৳{feeConfig.cashInCommissionPer1000} / ৳1,000
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-600 dark:text-slate-300">Send Money Fee</span>
+                <span className="font-mono-tabular font-semibold text-amber-600 dark:text-amber-300">
+                  {feeConfig.sendMoneyChargeMode === 'per_1000'
+                    ? `৳${feeConfig.sendMoneyFeeRate}/1k`
+                    : `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`}
+                </span>
+              </div>
+            </div>
           </div>
-          <div className="mt-2 space-y-1.5">
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-600 dark:text-slate-300">User / Merch CO Share</span>
-              <span className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400">
-                ৳{feeConfig.agentShare} / ৳{feeConfig.merchantCashOutAgentShare} per 1k
-              </span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-600 dark:text-slate-300">Cash-In Bonus</span>
-              <span className="font-mono-tabular font-semibold text-emerald-600 dark:text-emerald-400">
-                ৳{feeConfig.cashInCommissionPer1000} / ৳1,000
-              </span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-600 dark:text-slate-300">Send Money Fee</span>
-              <span className="font-mono-tabular font-semibold text-amber-600 dark:text-amber-300">
-                {feeConfig.sendMoneyChargeMode === 'per_1000'
-                  ? `৳${feeConfig.sendMoneyFeeRate}/1k`
-                  : `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`}
-              </span>
-            </div>
-          </div>
-          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-2.5">
+          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
             {lang === 'bn'
               ? 'গ্রহণ: গ্রাহক, মার্চেন্ট ও অ্যাডমিন · ক্যাশ-আউট: শুধু অ্যাডমিন'
               : 'Receive: User, Merchant & Admin · Agent Cash-Out: Admin Only'}
@@ -386,7 +429,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
       {/* Main Agent Workbench */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="lg:col-span-5 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 shadow-sm dark:shadow-none">
+        <div className="lg:col-span-5 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6">
           <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 mb-5">
             {[
               { id: 'cash_in' as AgentTab, label: t('processCashIn', lang) },
@@ -670,7 +713,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
         </div>
 
         {/* Commission & Counter Activity Ledger */}
-        <div className="lg:col-span-7 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm dark:shadow-none">
+        <div className="lg:col-span-7 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
               {t('commissionTracker', lang)} & {t('recentTransactions', lang)}

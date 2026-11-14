@@ -156,6 +156,18 @@ service cloud.firestore {
       allow delete: if isValidId(logId);
     }
 
+    match /acash_account_notifications/{notifId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow create, update: if isValidId(notifId)
+        && incoming().id == notifId
+        && incoming().recipientId is string && incoming().recipientId.size() > 0 && incoming().recipientId.size() <= 32
+        && incoming().title is string && incoming().title.size() <= 200
+        && incoming().message is string && incoming().message.size() <= 1000
+        && incoming().read is bool
+        && incoming().createdAt is number;
+      allow delete: if isValidId(notifId);
+    }
+
     match /admins/{uid} {
       allow get, list: if isSignedIn();
       allow create, update: if isSignedIn() && request.auth.uid == uid;
