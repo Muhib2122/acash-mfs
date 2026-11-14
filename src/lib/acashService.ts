@@ -4,7 +4,6 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   onSnapshot,
   orderBy,
   query,
@@ -547,6 +546,16 @@ function normalizeAccountIdInput(input: string): string {
   const match = clean.match(/^([UAM])-?(\d{6})$/);
   if (match) return `${match[1]}-${match[2]}`;
   return clean;
+}
+
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out as T;
 }
 
 // ---------- Synchronized Resilient Store ----------
@@ -1605,23 +1614,9 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
   const isPhonePattern = phone.length >= 10;
   const lowerEmail = clean.toLowerCase();
 
-  // 0. Check local store FIRST for instant resolution
-  const store = readLocalStore();
-  if (isAccountIdPattern && store.users[normalizedId]) {
-    return store.users[normalizedId];
-  }
-  for (const u of Object.values(store.users)) {
-    if (isPhonePattern && normalizeBdPhone(u.phone) === phone) {
-      return u;
-    }
-    if (clean.includes('@') && u.email.toLowerCase() === lowerEmail) {
-      return u;
-    }
-  }
-
   await ensureFirebaseAuthSession();
 
-  // 1. Try full user record in acash_users (succeeds for owner or Admin)
+  // 1. Query authoritative user record in acash_users on Firestore FIRST so balances/status are never stale
   if (isAccountIdPattern) {
     try {
       const snap = await getDoc(doc(db, USERS_COL, normalizedId));
@@ -1657,7 +1652,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
     try {
       const qEmail = query(
         collection(db, USERS_COL),
-        where('email', '==', clean.toLowerCase()),
+        where('email', '==', lowerEmail),
         limit(1)
       );
       const snapEmail = await getDocs(qEmail);
@@ -2010,12 +2005,10 @@ export async function registerAcashUser(params: {
     }
   }
 
-  if (params.verificationMethod === 'google_auth' && fbSession?.emailVerified) {
-    try {
-      await setDoc(doc(db, ADMIN_NOTIF_COL, regNotif.id), regNotif);
-    } catch {
-      // non-fatal notification write
-    }
+  try {
+    await setDoc(doc(db, ADMIN_NOTIF_COL, regNotif.id), regNotif);
+  } catch {
+    // non-fatal notification write
   }
 
   // Notify both Creator Email and Admin Email when account opens
@@ -2246,11 +2239,8 @@ export function subscribeToUserTransactions(
 
   let unsubSenderFs: Unsubscribe = () => {};
   let unsubReceiverFs: Unsubscribe = () => {};
-  let attachedUid: string | null = null;
 
-  const attachForUid = (uid: string | undefined) => {
-    if (!uid || attachedUid === uid) return;
-    attachedUid = uid;
+  const attachAccountListeners = () => {
     unsubSenderFs();
     unsubReceiverFs();
     try {
@@ -2260,7 +2250,7 @@ export function subscribeToUserTransactions(
           docChanges: () => Array<{ type: string; doc: { id: string } }>;
           metadata: { fromCache: boolean };
         },
-        roleField: 'senderUid' | 'receiverUid'
+        roleField: 'senderId' | 'receiverId'
       ) => {
         const fsTxs = snap.docs.map((d) => d.data() as AcashTransaction);
         const store = readLocalStore();
@@ -2273,21 +2263,24 @@ export function subscribeToUserTransactions(
           }
         }
 
-        if (!snap.metadata.fromCache && fsTxs.length < 150) {
+        if (!snap.metadata.fromCache && fsTxs.length < 250) {
           const serverIds = new Set(fsTxs.map((t) => t.txId));
+          const now = Date.now();
           for (const [id, existingTx] of Object.entries(store.transactions)) {
-            if (existingTx[roleField] === uid && !serverIds.has(id)) {
+            if (
+              existingTx[roleField] === accountId &&
+              now - existingTx.createdAt > 5000 &&
+              !serverIds.has(id)
+            ) {
               delete store.transactions[id];
               mutated = true;
             }
           }
         }
 
-        if (fsTxs.length > 0) {
-          for (const tx of fsTxs) {
-            store.transactions[tx.txId] = tx;
-            mutated = true;
-          }
+        for (const tx of fsTxs) {
+          store.transactions[tx.txId] = tx;
+          mutated = true;
         }
 
         if (mutated) {
@@ -2297,24 +2290,37 @@ export function subscribeToUserTransactions(
       };
 
       unsubSenderFs = onSnapshot(
-        query(collection(db, TX_COL), where('senderUid', '==', uid), limit(150)),
-        (snap) => mergeSnap(snap, 'senderUid'),
-        () => emitLocal()
+        query(collection(db, TX_COL), where('senderId', '==', accountId), limit(250)),
+        (snap) => mergeSnap(snap, 'senderId'),
+        (err) => {
+          console.warn('Sender transaction subscription notice:', err);
+          emitLocal();
+        }
       );
       unsubReceiverFs = onSnapshot(
-        query(collection(db, TX_COL), where('receiverUid', '==', uid), limit(150)),
-        (snap) => mergeSnap(snap, 'receiverUid'),
-        () => emitLocal()
+        query(collection(db, TX_COL), where('receiverId', '==', accountId), limit(250)),
+        (snap) => mergeSnap(snap, 'receiverId'),
+        (err) => {
+          console.warn('Receiver transaction subscription notice:', err);
+          emitLocal();
+        }
       );
     } catch {
       // ignore
     }
   };
 
-  attachForUid(auth.currentUser?.uid);
+  // Attach immediately by accountId so EmailJS OTP & PIN-authenticated users receive live credits & history
+  attachAccountListeners();
+
+  let lastAuthUid = auth.currentUser?.uid || '';
   const unsubAuth = subscribeToFirebaseAuth((fbUser) => {
-    if (fbUser?.uid) {
-      attachForUid(fbUser.uid);
+    const nextUid = fbUser?.uid || '';
+    if (nextUid && nextUid !== lastAuthUid) {
+      lastAuthUid = nextUid;
+      attachAccountListeners();
+    } else if (!nextUid) {
+      lastAuthUid = '';
     }
   });
 
@@ -2416,7 +2422,7 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
     unsubFs();
     unsubKycFs();
     try {
-      const q = query(collection(db, USERS_COL), orderBy('createdAt', 'desc'));
+      const q = query(collection(db, USERS_COL), limit(500));
       unsubFs = onSnapshot(
         q,
         (snap) => {
@@ -2578,10 +2584,12 @@ export function subscribeToAllTransactions(
   const unsubLocal = subscribeLocalStore(emitLocal);
 
   let unsubFs: Unsubscribe = () => {};
-  const attachFs = () => {
+  const attachFs = (useOrderBy = true) => {
     unsubFs();
     try {
-      const q = query(collection(db, TX_COL), limit(500));
+      const q = useOrderBy
+        ? query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(500))
+        : query(collection(db, TX_COL), limit(500));
       unsubFs = onSnapshot(
         q,
         (snap) => {
@@ -2601,27 +2609,23 @@ export function subscribeToAllTransactions(
           if (!snap.metadata.fromCache) {
             const serverIds = new Set(fsTxs.map((t) => t.txId));
             const oldestServerTs =
-              fsTxs.length >= 300 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
+              fsTxs.length >= 450 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
+            const now = Date.now();
             for (const [id, existingTx] of Object.entries(store.transactions)) {
-              const isCloudTx = Boolean(
-                existingTx.senderUid ||
-                  existingTx.receiverUid ||
-                  existingTx.type === 'admin_credit' ||
-                  existingTx.type === 'admin_transfer' ||
-                  existingTx.approvedBy
-              );
-              if (isCloudTx && existingTx.createdAt >= oldestServerTs && !serverIds.has(id)) {
+              if (
+                existingTx.createdAt >= oldestServerTs &&
+                now - existingTx.createdAt > 5000 &&
+                !serverIds.has(id)
+              ) {
                 delete store.transactions[id];
                 mutated = true;
               }
             }
           }
 
-          if (fsTxs.length > 0) {
-            for (const tx of fsTxs) {
-              store.transactions[tx.txId] = tx;
-              mutated = true;
-            }
+          for (const tx of fsTxs) {
+            store.transactions[tx.txId] = tx;
+            mutated = true;
           }
 
           if (mutated) {
@@ -2629,12 +2633,19 @@ export function subscribeToAllTransactions(
           }
           emitLocal();
         },
-        () => {
+        (err) => {
+          console.warn('Global Ledger subscription notice:', err);
+          if (useOrderBy) {
+            attachFs(false);
+            return;
+          }
           emitLocal();
         }
       );
     } catch {
-      // ignore
+      if (useOrderBy) {
+        attachFs(false);
+      }
     }
   };
 
@@ -2827,7 +2838,17 @@ export async function executeFinancialTransaction(params: {
     (cleanReceiverInput === 'ADMIN-TREASURY' || cleanReceiverInput === 'ADMIN');
 
   const store = readLocalStore();
-  const senderLocal = store.users[params.senderId];
+  let senderLocal = store.users[params.senderId];
+  try {
+    const freshSenderSnap = await getDoc(doc(db, USERS_COL, params.senderId));
+    if (freshSenderSnap.exists()) {
+      senderLocal = freshSenderSnap.data() as AcashUser;
+      store.users[senderLocal.accountId] = senderLocal;
+    }
+  } catch {
+    // fall back to cached sender if offline
+  }
+
   if (!senderLocal) throw new Error('Sender account does not exist.');
   if (senderLocal.status !== 'active') throw new Error('Your account is currently disabled by Admin.');
   if (senderLocal.pinHash !== hashPin(params.pin)) throw new Error('Incorrect Security PIN.');
@@ -2917,18 +2938,13 @@ export async function executeFinancialTransaction(params: {
     );
   }
 
-  const cachedReceiver = receiverUser ? store.users[receiverUser.accountId] : null;
-  const resolvedReceiver = receiverUser
-    ? cachedReceiver && cachedReceiver.pinHash
-      ? cachedReceiver
-      : receiverUser
-    : null;
+  const resolvedReceiver = receiverUser;
   if (resolvedReceiver && resolvedReceiver.status !== 'active') {
     throw new Error('Recipient account is disabled.');
   }
 
   const activeUid = auth.currentUser?.uid;
-  const txRecord: AcashTransaction = {
+  const baseTxRecord: AcashTransaction = {
     txId,
     txHash,
     type: params.type,
@@ -2982,20 +2998,6 @@ export async function executeFinancialTransaction(params: {
     createdAt: now,
   };
 
-  // Apply balance mutations locally
-  let newSenderBalance = Number((senderLocal.balance - totalDebited).toFixed(2));
-  let newSenderComm = senderLocal.commissionBalance || 0;
-  if (params.type === 'cash_in' && !requiresAdminApproval) {
-    newSenderBalance = Number((newSenderBalance + breakdown.agentAmount).toFixed(2));
-    newSenderComm = Number((newSenderComm + breakdown.agentAmount).toFixed(2));
-  }
-  store.users[senderLocal.accountId] = {
-    ...senderLocal,
-    balance: newSenderBalance,
-    commissionBalance: newSenderComm,
-    lastActiveAt: now,
-  };
-
   const getsCashOutCommission =
     Boolean(resolvedReceiver) &&
     (params.type === 'cash_out' ||
@@ -3004,18 +3006,6 @@ export async function executeFinancialTransaction(params: {
     ? Number((amount + breakdown.agentAmount).toFixed(2))
     : amount;
   const receiverCommInc = getsCashOutCommission ? breakdown.agentAmount : 0;
-
-  if (!requiresAdminApproval && resolvedReceiver) {
-    const existingRecv = cachedReceiver || resolvedReceiver;
-    store.users[resolvedReceiver.accountId] = {
-      ...existingRecv,
-      balance: Number((existingRecv.balance + creditToReceiver).toFixed(2)),
-      commissionBalance: Number(((existingRecv.commissionBalance || 0) + receiverCommInc).toFixed(2)),
-      lastActiveAt: now,
-    };
-  }
-
-  store.transactions[txId] = txRecord;
 
   let txNotif: AdminNotification | null = null;
   if (requiresAdminApproval) {
@@ -3029,7 +3019,6 @@ export async function executeFinancialTransaction(params: {
       read: false,
       targetSection: 'approvals',
     };
-    store.notifications[txNotif.id] = txNotif;
   } else if (isAdminTarget) {
     txNotif = {
       id: `NTF-SET-${txId}`,
@@ -3041,63 +3030,107 @@ export async function executeFinancialTransaction(params: {
       read: false,
       targetSection: 'treasury',
     };
-    store.notifications[txNotif.id] = txNotif;
   }
 
-  writeLocalStore(store, true);
+  let committedSender: AcashUser | null = null;
+  let committedReceiver: AcashUser | null = null;
+  let committedTxRecord: AcashTransaction = baseTxRecord;
 
-  // Guarantee Global Ledger write immediately
-  try {
-    await setDoc(doc(db, TX_COL, txId), txRecord, { merge: true });
-    if (txNotif) {
-      await setDoc(doc(db, ADMIN_NOTIF_COL, txNotif.id), txNotif, { merge: true });
-    }
-  } catch (err) {
-    console.warn('Direct Global Ledger write warning:', err);
-  }
-
-  // Sync atomically to Firestore when accessible (ensuring receiver doc is created/updated robustly)
-  const runFirestoreSync = async (includeReceiverUpdate: boolean) => {
+  const executeAtomicCloudTx = async () => {
     await runTransaction(db, async (transaction) => {
+      // 1. Execute ALL Firestore reads BEFORE any writes
       const senderRef = doc(db, USERS_COL, params.senderId);
       const senderSnap = await transaction.get(senderRef);
+
+      const receiverRef =
+        !requiresAdminApproval && resolvedReceiver
+          ? doc(db, USERS_COL, resolvedReceiver.accountId)
+          : null;
+      const receiverSnap = receiverRef ? await transaction.get(receiverRef) : null;
+
+      // 2. Compute authoritative sender balance from Firestore snapshot
+      const authSender = senderSnap.exists() ? (senderSnap.data() as AcashUser) : senderLocal;
+      if (authSender.status !== 'active') {
+        throw new Error('Your account is currently disabled by Admin.');
+      }
+      if (authSender.balance < totalDebited) {
+        throw new Error(
+          `Insufficient balance. Needed ৳${totalDebited.toFixed(2)}, Available ৳${authSender.balance.toFixed(2)}.`
+        );
+      }
+
+      let nextSenderBalance = Number((authSender.balance - totalDebited).toFixed(2));
+      let nextSenderComm = Number((authSender.commissionBalance || 0).toFixed(2));
+      if (params.type === 'cash_in' && !requiresAdminApproval) {
+        nextSenderBalance = Number((nextSenderBalance + breakdown.agentAmount).toFixed(2));
+        nextSenderComm = Number((nextSenderComm + breakdown.agentAmount).toFixed(2));
+      }
+
+      committedSender = stripUndefined({
+        ...authSender,
+        balance: nextSenderBalance,
+        commissionBalance: nextSenderComm,
+        lastActiveAt: now,
+      });
+
+      // 3. Compute authoritative receiver balance from Firestore snapshot
+      let nextTxRecord: AcashTransaction = { ...baseTxRecord };
+      if (!requiresAdminApproval && resolvedReceiver && receiverRef) {
+        const authReceiver = receiverSnap?.exists()
+          ? (receiverSnap.data() as AcashUser)
+          : resolvedReceiver;
+        if (authReceiver.status !== 'active') {
+          throw new Error('Recipient account is disabled.');
+        }
+
+        const nextReceiverBalance = Number(
+          ((authReceiver.balance || 0) + creditToReceiver).toFixed(2)
+        );
+        const nextReceiverComm = Number(
+          ((authReceiver.commissionBalance || 0) + receiverCommInc).toFixed(2)
+        );
+
+        committedReceiver = stripUndefined({
+          ...authReceiver,
+          balance: nextReceiverBalance,
+          commissionBalance: nextReceiverComm,
+          lastActiveAt: now,
+        });
+
+        nextTxRecord = {
+          ...baseTxRecord,
+          receiverName: authReceiver.businessName || authReceiver.name || baseTxRecord.receiverName,
+          receiverPhone: authReceiver.phone || baseTxRecord.receiverPhone,
+          ...(authReceiver.firebaseUid ? { receiverUid: authReceiver.firebaseUid } : {}),
+        };
+      }
+
+      committedTxRecord = nextTxRecord;
+
+      // 4. Execute ALL Firestore writes atomically after all reads
       if (senderSnap.exists()) {
         transaction.update(senderRef, {
-          balance: store.users[senderLocal.accountId].balance,
-          commissionBalance: store.users[senderLocal.accountId].commissionBalance,
+          balance: committedSender.balance,
+          commissionBalance: committedSender.commissionBalance,
           lastActiveAt: now,
         });
       } else {
-        transaction.set(senderRef, store.users[senderLocal.accountId]);
+        transaction.set(senderRef, committedSender);
       }
 
-      if (includeReceiverUpdate && !requiresAdminApproval && resolvedReceiver) {
-        const receiverRef = doc(db, USERS_COL, resolvedReceiver.accountId);
-        const receiverSnap = await transaction.get(receiverRef);
-        const updatedReceiverData = store.users[resolvedReceiver.accountId];
-        if (receiverSnap.exists() && updatedReceiverData) {
-          transaction.set(receiverRef, updatedReceiverData, { merge: true });
-        } else if (updatedReceiverData) {
-          transaction.set(receiverRef, updatedReceiverData);
-        } else {
-          transaction.set(receiverRef, {
-            accountId: resolvedReceiver.accountId,
-            role: resolvedReceiver.role,
-            name: resolvedReceiver.name,
-            phone: resolvedReceiver.phone,
-            email: resolvedReceiver.email,
-            pinHash: resolvedReceiver.pinHash || '',
-            balance: creditToReceiver,
-            commissionBalance: receiverCommInc,
-            status: 'active',
-            verified: resolvedReceiver.verified,
-            createdAt: resolvedReceiver.createdAt || now,
+      if (receiverRef && committedReceiver) {
+        if (receiverSnap?.exists()) {
+          transaction.update(receiverRef, {
+            balance: committedReceiver.balance,
+            commissionBalance: committedReceiver.commissionBalance,
             lastActiveAt: now,
           });
+        } else {
+          transaction.set(receiverRef, committedReceiver);
         }
       }
 
-      transaction.set(doc(db, TX_COL, txId), txRecord);
+      transaction.set(doc(db, TX_COL, txId), committedTxRecord);
       if (txNotif) {
         transaction.set(doc(db, ADMIN_NOTIF_COL, txNotif.id), txNotif);
       }
@@ -3105,21 +3138,44 @@ export async function executeFinancialTransaction(params: {
   };
 
   try {
-    await runFirestoreSync(true);
+    await executeAtomicCloudTx();
     firestoreBackendMode = 'firestore';
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isValidationErr =
+      msg.includes('Insufficient balance') ||
+      msg.includes('disabled') ||
+      msg.includes('Incorrect Security PIN') ||
+      msg.includes('not found');
+    if (isValidationErr) {
+      throw err;
+    }
     try {
-      await runFirestoreSync(true);
+      await executeAtomicCloudTx();
       firestoreBackendMode = 'firestore';
-    } catch {
-      try {
-        await runFirestoreSync(false);
-        firestoreBackendMode = 'firestore';
-      } catch {
-        firestoreBackendMode = 'local_sync';
-      }
+    } catch (retryErr) {
+      firestoreBackendMode = 'local_sync';
+      console.error('Atomic Firestore transaction failed:', retryErr);
+      throw new Error(
+        retryErr instanceof Error && !isPermissionError(retryErr)
+          ? retryErr.message
+          : 'Transaction could not be committed to Acash Cloud Ledger. Please check your connection and try again.'
+      );
     }
   }
+
+  const latestStore = readLocalStore();
+  if (committedSender) {
+    latestStore.users[(committedSender as AcashUser).accountId] = committedSender;
+  }
+  if (committedReceiver) {
+    latestStore.users[(committedReceiver as AcashUser).accountId] = committedReceiver;
+  }
+  latestStore.transactions[txId] = committedTxRecord;
+  if (txNotif) {
+    latestStore.notifications[txNotif.id] = txNotif;
+  }
+  writeLocalStore(latestStore, true);
 
   if (requiresAdminApproval) {
     await sendHighValuePendingEmails({
@@ -3127,15 +3183,15 @@ export async function executeFinancialTransaction(params: {
       senderName: senderLocal.businessName || senderLocal.name,
       senderId: senderLocal.accountId,
       adminEmail: getAdminAlertEmail(),
-      receiverName: txRecord.receiverName,
-      receiverId: txRecord.receiverId,
-      amount: txRecord.amount,
-      txType: txRecord.type,
-      txHash: txRecord.txHash,
+      receiverName: committedTxRecord.receiverName,
+      receiverId: committedTxRecord.receiverId,
+      amount: committedTxRecord.amount,
+      txType: committedTxRecord.type,
+      txHash: committedTxRecord.txHash,
     });
   }
 
-  return txRecord;
+  return committedTxRecord;
 }
 
 export async function executeMerchantRefund(params: {
@@ -3181,7 +3237,10 @@ export async function executeMerchantRefund(params: {
     throw new Error(`Refund exceeds remaining refundable amount (৳${remaining.toFixed(2)}).`);
   }
 
-  const merchant = store.users[params.merchantId];
+  let merchant = store.users[params.merchantId];
+  if (!merchant) {
+    merchant = (await findUserByIdentifier(params.merchantId)) ?? undefined as unknown as AcashUser;
+  }
   if (!merchant) throw new Error('Merchant account not found.');
   if (merchant.status !== 'active') throw new Error('Merchant account is disabled.');
   if (merchant.pinHash !== hashPin(params.pin)) throw new Error('Incorrect Security PIN.');
@@ -3189,40 +3248,27 @@ export async function executeMerchantRefund(params: {
     throw new Error('Insufficient Merchant balance to process this refund.');
   }
 
-  const customer = store.users[orig.senderId];
+  let customer = store.users[orig.senderId];
+  if (!customer) {
+    customer = (await findUserByIdentifier(orig.senderId)) ?? undefined as unknown as AcashUser;
+  }
   if (!customer) throw new Error('Customer account not found.');
 
   const now = Date.now();
   const refundTxId = generateTxId();
   const refundTxHash = generateTxHash();
-  const updatedRefundedTotal = Number(((orig.refundedAmount || 0) + refundAmt).toFixed(2));
-  const newOrigStatus = updatedRefundedTotal >= orig.amount ? 'refunded' : 'partially_refunded';
-
-  store.users[merchant.accountId] = {
-    ...merchant,
-    balance: Number((merchant.balance - refundAmt).toFixed(2)),
-    lastActiveAt: now,
-  };
-  store.users[customer.accountId] = {
-    ...customer,
-    balance: Number((customer.balance + refundAmt).toFixed(2)),
-    lastActiveAt: now,
-  };
-  store.transactions[orig.txId] = {
-    ...orig,
-    refundedAmount: updatedRefundedTotal,
-    status: newOrigStatus,
-  };
 
   const refundRecord: AcashTransaction = {
     txId: refundTxId,
     txHash: refundTxHash,
     type: 'refund',
     senderId: merchant.accountId,
+    ...(merchant.firebaseUid ? { senderUid: merchant.firebaseUid } : {}),
     senderName: merchant.businessName || merchant.name,
     senderPhone: merchant.phone,
     senderRole: 'M',
     receiverId: customer.accountId,
+    ...(customer.firebaseUid ? { receiverUid: customer.firebaseUid } : {}),
     receiverName: customer.businessName || customer.name,
     receiverPhone: customer.phone,
     receiverRole: customer.role,
@@ -3246,21 +3292,88 @@ export async function executeMerchantRefund(params: {
     createdAt: now,
   };
 
-  store.transactions[refundTxId] = refundRecord;
-  writeLocalStore(store, true);
+  let committedMerchant: AcashUser | null = null;
+  let committedCustomer: AcashUser | null = null;
+  let committedOrig: AcashTransaction | null = null;
+  let committedRefund: AcashTransaction = refundRecord;
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      transaction.set(doc(db, USERS_COL, merchant.accountId), store.users[merchant.accountId]);
-      transaction.set(doc(db, USERS_COL, customer.accountId), store.users[customer.accountId]);
-      transaction.set(doc(db, TX_COL, orig!.txId), store.transactions[orig!.txId]);
-      transaction.set(doc(db, TX_COL, refundTxId), refundRecord);
+  await runTransaction(db, async (transaction) => {
+    const merchantRef = doc(db, USERS_COL, merchant.accountId);
+    const customerRef = doc(db, USERS_COL, customer.accountId);
+    const origRef = doc(db, TX_COL, orig!.txId);
+
+    const [merchantSnap, customerSnap, origSnap] = await Promise.all([
+      transaction.get(merchantRef),
+      transaction.get(customerRef),
+      transaction.get(origRef),
+    ]);
+
+    const authMerchant = merchantSnap.exists() ? (merchantSnap.data() as AcashUser) : merchant;
+    if (authMerchant.balance < refundAmt) {
+      throw new Error('Insufficient Merchant balance to process this refund.');
+    }
+    const authCustomer = customerSnap.exists() ? (customerSnap.data() as AcashUser) : customer;
+    const authOrig = origSnap.exists() ? (origSnap.data() as AcashTransaction) : orig!;
+
+    const authRemaining = Number((authOrig.amount - (authOrig.refundedAmount || 0)).toFixed(2));
+    if (refundAmt > authRemaining) {
+      throw new Error(`Refund exceeds remaining refundable amount (৳${authRemaining.toFixed(2)}).`);
+    }
+
+    const updatedRefundedTotal = Number(((authOrig.refundedAmount || 0) + refundAmt).toFixed(2));
+    const newOrigStatus = updatedRefundedTotal >= authOrig.amount ? 'refunded' : 'partially_refunded';
+
+    committedMerchant = stripUndefined({
+      ...authMerchant,
+      balance: Number((authMerchant.balance - refundAmt).toFixed(2)),
+      lastActiveAt: now,
     });
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    committedCustomer = stripUndefined({
+      ...authCustomer,
+      balance: Number(((authCustomer.balance || 0) + refundAmt).toFixed(2)),
+      lastActiveAt: now,
+    });
+    committedOrig = {
+      ...authOrig,
+      refundedAmount: updatedRefundedTotal,
+      status: newOrigStatus,
+    };
+    committedRefund = {
+      ...refundRecord,
+      ...(authCustomer.firebaseUid ? { receiverUid: authCustomer.firebaseUid } : {}),
+    };
 
-  return refundRecord;
+    if (merchantSnap.exists()) {
+      transaction.update(merchantRef, {
+        balance: committedMerchant.balance,
+        lastActiveAt: now,
+      });
+    } else {
+      transaction.set(merchantRef, committedMerchant);
+    }
+
+    if (customerSnap.exists()) {
+      transaction.update(customerRef, {
+        balance: committedCustomer.balance,
+        lastActiveAt: now,
+      });
+    } else {
+      transaction.set(customerRef, committedCustomer);
+    }
+
+    transaction.set(origRef, committedOrig);
+    transaction.set(doc(db, TX_COL, refundTxId), committedRefund);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  if (committedMerchant) latestStore.users[(committedMerchant as AcashUser).accountId] = committedMerchant;
+  if (committedCustomer) latestStore.users[(committedCustomer as AcashUser).accountId] = committedCustomer;
+  if (committedOrig) latestStore.transactions[(committedOrig as AcashTransaction).txId] = committedOrig;
+  latestStore.transactions[refundTxId] = committedRefund;
+  writeLocalStore(latestStore, true);
+
+  return committedRefund;
 }
 
 // ---------- Admin Actions ----------
@@ -3493,23 +3606,8 @@ export async function adminCreditAccount(params: {
   const txHash = generateTxHash();
 
   const store = readLocalStore();
-  const currentTarget = store.users[targetUser.accountId] || targetUser;
-  store.users[targetUser.accountId] = {
-    ...currentTarget,
-    balance: Number((currentTarget.balance + amt).toFixed(2)),
-    lastActiveAt: now,
-  };
-
+  const currentTarget = targetUser;
   const currentVault = normalizeTreasuryVault(store.treasuryVault);
-  const deductedFromVault = Math.min(currentVault.balance, amt);
-  const updatedVault: MainTreasuryVault = {
-    ...currentVault,
-    balance: Number(Math.max(0, currentVault.balance - deductedFromVault).toFixed(2)),
-    totalDisbursed: Number((currentVault.totalDisbursed + amt).toFixed(2)),
-    updatedAt: now,
-    updatedBy: params.adminEmail,
-  };
-  store.treasuryVault = updatedVault;
 
   const txRecord: AcashTransaction = {
     txId,
@@ -3520,6 +3618,7 @@ export async function adminCreditAccount(params: {
     senderPhone: 'SYSTEM',
     senderRole: 'ADMIN',
     receiverId: currentTarget.accountId,
+    ...(currentTarget.firebaseUid ? { receiverUid: currentTarget.firebaseUid } : {}),
     receiverName: currentTarget.businessName || currentTarget.name,
     receiverPhone: currentTarget.phone,
     receiverRole: currentTarget.role,
@@ -3544,7 +3643,6 @@ export async function adminCreditAccount(params: {
     approvedAt: now,
   };
 
-  store.transactions[txId] = txRecord;
   const creditNotif: AdminNotification = {
     id: `NTF-CRD-${txId}`,
     title: `Admin Credit Added (৳${amt.toLocaleString()})`,
@@ -3555,7 +3653,6 @@ export async function adminCreditAccount(params: {
     read: false,
     targetSection: 'ledger',
   };
-  store.notifications[creditNotif.id] = creditNotif;
 
   const creditActivity = makeActivityEntry({
     idPrefix: 'ACT-CRD',
@@ -3567,41 +3664,70 @@ export async function adminCreditAccount(params: {
     amount: amt,
     timestamp: now,
   });
-  store.activityLogs[creditActivity.id] = creditActivity;
 
-  writeLocalStore(store, true);
+  let committedUser: AcashUser | null = null;
+  let committedVault: MainTreasuryVault = currentVault;
+  let committedTx: AcashTransaction = txRecord;
 
-  try {
-    await setDoc(doc(db, TX_COL, txId), txRecord, { merge: true });
-    await setDoc(doc(db, ADMIN_NOTIF_COL, creditNotif.id), creditNotif, { merge: true });
-    await setDoc(doc(db, ADMIN_ACTIVITY_COL, creditActivity.id), creditActivity, { merge: true });
-  } catch (err) {
-    console.warn('Direct admin credit write warning:', err);
-  }
+  await runTransaction(db, async (transaction) => {
+    const targetRef = doc(db, USERS_COL, currentTarget.accountId);
+    const vaultRef = doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID);
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      if (currentTarget.pinHash) {
-        transaction.set(
-          doc(db, USERS_COL, currentTarget.accountId),
-          store.users[currentTarget.accountId]
-        );
-      } else {
-        transaction.update(doc(db, USERS_COL, currentTarget.accountId), {
-          balance: increment(amt),
-          lastActiveAt: now,
-        });
-      }
-      transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), updatedVault);
-      transaction.set(doc(db, TX_COL, txId), txRecord);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, creditNotif.id), creditNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, creditActivity.id), creditActivity);
+    const [targetSnap, vaultSnap] = await Promise.all([
+      transaction.get(targetRef),
+      transaction.get(vaultRef),
+    ]);
+
+    const authTarget = targetSnap.exists() ? (targetSnap.data() as AcashUser) : currentTarget;
+    const authVault = vaultSnap.exists()
+      ? normalizeTreasuryVault(vaultSnap.data() as Partial<MainTreasuryVault>)
+      : currentVault;
+
+    const deductedFromVault = Math.min(authVault.balance, amt);
+    committedVault = {
+      ...authVault,
+      balance: Number(Math.max(0, authVault.balance - deductedFromVault).toFixed(2)),
+      totalDisbursed: Number((authVault.totalDisbursed + amt).toFixed(2)),
+      updatedAt: now,
+      updatedBy: params.adminEmail,
+    };
+
+    committedUser = stripUndefined({
+      ...authTarget,
+      balance: Number(((authTarget.balance || 0) + amt).toFixed(2)),
+      lastActiveAt: now,
     });
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
 
-  return txRecord;
+    committedTx = {
+      ...txRecord,
+      ...(authTarget.firebaseUid ? { receiverUid: authTarget.firebaseUid } : {}),
+    };
+
+    if (targetSnap.exists()) {
+      transaction.update(targetRef, {
+        balance: committedUser.balance,
+        lastActiveAt: now,
+      });
+    } else {
+      transaction.set(targetRef, committedUser);
+    }
+
+    transaction.set(vaultRef, committedVault);
+    transaction.set(doc(db, TX_COL, txId), committedTx);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, creditNotif.id), creditNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, creditActivity.id), creditActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  if (committedUser) latestStore.users[(committedUser as AcashUser).accountId] = committedUser;
+  latestStore.treasuryVault = committedVault;
+  latestStore.transactions[txId] = committedTx;
+  latestStore.notifications[creditNotif.id] = creditNotif;
+  latestStore.activityLogs[creditActivity.id] = creditActivity;
+  writeLocalStore(latestStore, true);
+
+  return committedTx;
 }
 
 export async function adminTransferBetweenAccounts(params: {
@@ -3630,8 +3756,8 @@ export async function adminTransferBetweenAccounts(params: {
   }
 
   const store = readLocalStore();
-  const currentTo = store.users[toUser.accountId] || toUser;
-  const currentFrom = fromUser ? store.users[fromUser.accountId] || fromUser : null;
+  const currentTo = toUser;
+  const currentFrom = fromUser || null;
 
   if (currentFrom && currentFrom.balance < amt) {
     throw new Error(
@@ -3643,41 +3769,17 @@ export async function adminTransferBetweenAccounts(params: {
   const txId = generateTxId();
   const txHash = generateTxHash();
 
-  if (currentFrom) {
-    store.users[currentFrom.accountId] = {
-      ...currentFrom,
-      balance: Number((currentFrom.balance - amt).toFixed(2)),
-      lastActiveAt: now,
-    };
-  }
-
-  if (isFromTreasury) {
-    const currentVault = normalizeTreasuryVault(store.treasuryVault);
-    const deducted = Math.min(currentVault.balance, amt);
-    store.treasuryVault = {
-      ...currentVault,
-      balance: Number(Math.max(0, currentVault.balance - deducted).toFixed(2)),
-      totalDisbursed: Number((currentVault.totalDisbursed + amt).toFixed(2)),
-      updatedAt: now,
-      updatedBy: params.adminEmail,
-    };
-  }
-
-  store.users[currentTo.accountId] = {
-    ...currentTo,
-    balance: Number((currentTo.balance + amt).toFixed(2)),
-    lastActiveAt: now,
-  };
-
-  const txRecord: AcashTransaction = {
+  const baseTxRecord: AcashTransaction = {
     txId,
     txHash,
     type: 'admin_transfer',
     senderId: currentFrom ? currentFrom.accountId : 'ADMIN-TREASURY',
+    ...(currentFrom?.firebaseUid ? { senderUid: currentFrom.firebaseUid } : {}),
     senderName: currentFrom ? currentFrom.businessName || currentFrom.name : 'Acash Admin Treasury',
     senderPhone: currentFrom ? currentFrom.phone : 'SYSTEM',
     senderRole: currentFrom ? currentFrom.role : 'ADMIN',
     receiverId: currentTo.accountId,
+    ...(currentTo.firebaseUid ? { receiverUid: currentTo.firebaseUid } : {}),
     receiverName: currentTo.businessName || currentTo.name,
     receiverPhone: currentTo.phone,
     receiverRole: currentTo.role,
@@ -3702,68 +3804,131 @@ export async function adminTransferBetweenAccounts(params: {
     approvedAt: now,
   };
 
-  store.transactions[txId] = txRecord;
   const trNotif: AdminNotification = {
     id: `NTF-TRF-${txId}`,
     title: `Admin Fund Transfer (৳${amt.toLocaleString()})`,
-    message: `Moved ৳${amt.toLocaleString()} from ${txRecord.senderId} to ${txRecord.receiverId}.`,
+    message: `Moved ৳${amt.toLocaleString()} from ${baseTxRecord.senderId} to ${baseTxRecord.receiverId}.`,
     category: 'treasury',
     severity: 'info',
     createdAt: now,
     read: false,
     targetSection: 'ledger',
   };
-  store.notifications[trNotif.id] = trNotif;
 
   const trActivity = makeActivityEntry({
     idPrefix: 'ACT-TRF',
     actionType: 'fund_transfer',
     title: `Fund Transfer (৳${amt.toLocaleString()})`,
-    details: `Transferred ৳${amt.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${txRecord.senderName} (${txRecord.senderId}) to ${txRecord.receiverName} (${txRecord.receiverId}). Tx Hash: ${txHash}. Note: ${txRecord.note}`,
+    details: `Transferred ৳${amt.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${baseTxRecord.senderName} (${baseTxRecord.senderId}) to ${baseTxRecord.receiverName} (${baseTxRecord.receiverId}). Tx Hash: ${txHash}. Note: ${baseTxRecord.note}`,
     actorEmail: params.adminEmail,
-    targetIds: [txRecord.senderId, txRecord.receiverId],
+    targetIds: [baseTxRecord.senderId, baseTxRecord.receiverId],
     amount: amt,
     timestamp: now,
   });
-  store.activityLogs[trActivity.id] = trActivity;
 
-  writeLocalStore(store, true);
+  let committedFrom: AcashUser | null = null;
+  let committedTo: AcashUser | null = null;
+  let committedVault: MainTreasuryVault | null = null;
+  let committedTx: AcashTransaction = baseTxRecord;
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      if (currentFrom) {
-        if (currentFrom.pinHash) {
-          transaction.set(
-            doc(db, USERS_COL, currentFrom.accountId),
-            store.users[currentFrom.accountId]
-          );
-        } else {
-          transaction.update(doc(db, USERS_COL, currentFrom.accountId), {
-            balance: increment(-amt),
-            lastActiveAt: now,
-          });
-        }
-      }
-      if (isFromTreasury) {
-        transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), store.treasuryVault);
-      }
-      if (currentTo.pinHash) {
-        transaction.set(doc(db, USERS_COL, currentTo.accountId), store.users[currentTo.accountId]);
-      } else {
-        transaction.update(doc(db, USERS_COL, currentTo.accountId), {
-          balance: increment(amt),
+  await runTransaction(db, async (transaction) => {
+    const toRef = doc(db, USERS_COL, currentTo.accountId);
+    const fromRef = currentFrom ? doc(db, USERS_COL, currentFrom.accountId) : null;
+    const vaultRef = isFromTreasury ? doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID) : null;
+
+    const [toSnap, fromSnap, vaultSnap] = await Promise.all([
+      transaction.get(toRef),
+      fromRef ? transaction.get(fromRef) : Promise.resolve(null),
+      vaultRef ? transaction.get(vaultRef) : Promise.resolve(null),
+    ]);
+
+    const authTo = toSnap.exists() ? (toSnap.data() as AcashUser) : currentTo;
+    const authFrom = currentFrom
+      ? fromSnap?.exists()
+        ? (fromSnap.data() as AcashUser)
+        : currentFrom
+      : null;
+
+    if (authFrom && authFrom.balance < amt) {
+      throw new Error(
+        `Source account ${authFrom.accountId} has insufficient balance (${authFrom.balance.toFixed(2)} BDT).`
+      );
+    }
+
+    if (authFrom) {
+      committedFrom = stripUndefined({
+        ...authFrom,
+        balance: Number((authFrom.balance - amt).toFixed(2)),
+        lastActiveAt: now,
+      });
+    }
+
+    if (isFromTreasury) {
+      const authVault = vaultSnap?.exists()
+        ? normalizeTreasuryVault(vaultSnap.data() as Partial<MainTreasuryVault>)
+        : normalizeTreasuryVault(store.treasuryVault);
+      const deducted = Math.min(authVault.balance, amt);
+      committedVault = {
+        ...authVault,
+        balance: Number(Math.max(0, authVault.balance - deducted).toFixed(2)),
+        totalDisbursed: Number((authVault.totalDisbursed + amt).toFixed(2)),
+        updatedAt: now,
+        updatedBy: params.adminEmail,
+      };
+    }
+
+    committedTo = stripUndefined({
+      ...authTo,
+      balance: Number(((authTo.balance || 0) + amt).toFixed(2)),
+      lastActiveAt: now,
+    });
+
+    committedTx = {
+      ...baseTxRecord,
+      ...(authFrom?.firebaseUid ? { senderUid: authFrom.firebaseUid } : {}),
+      ...(authTo.firebaseUid ? { receiverUid: authTo.firebaseUid } : {}),
+    };
+
+    if (fromRef && committedFrom) {
+      if (fromSnap?.exists()) {
+        transaction.update(fromRef, {
+          balance: committedFrom.balance,
           lastActiveAt: now,
         });
+      } else {
+        transaction.set(fromRef, committedFrom);
       }
-      transaction.set(doc(db, TX_COL, txId), txRecord);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, trNotif.id), trNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, trActivity.id), trActivity);
-    });
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    }
 
-  return txRecord;
+    if (vaultRef && committedVault) {
+      transaction.set(vaultRef, committedVault);
+    }
+
+    if (toSnap.exists()) {
+      transaction.update(toRef, {
+        balance: committedTo.balance,
+        lastActiveAt: now,
+      });
+    } else {
+      transaction.set(toRef, committedTo);
+    }
+
+    transaction.set(doc(db, TX_COL, txId), committedTx);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, trNotif.id), trNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, trActivity.id), trActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  if (committedFrom) latestStore.users[(committedFrom as AcashUser).accountId] = committedFrom;
+  if (committedTo) latestStore.users[(committedTo as AcashUser).accountId] = committedTo;
+  if (committedVault) latestStore.treasuryVault = committedVault;
+  latestStore.transactions[txId] = committedTx;
+  latestStore.notifications[trNotif.id] = trNotif;
+  latestStore.activityLogs[trActivity.id] = trActivity;
+  writeLocalStore(latestStore, true);
+
+  return committedTx;
 }
 
 export async function adminApproveTransaction(txId: string, adminEmail: string): Promise<void> {
@@ -3787,38 +3952,6 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
 
   // Only credit receiver & agent commission if this transaction was NOT already settled earlier.
   const shouldCreditBalances = !tx.settledOnce;
-  if (shouldCreditBalances) {
-    if (tx.receiverRole === 'U' || tx.receiverRole === 'A' || tx.receiverRole === 'M') {
-      const receiver = store.users[tx.receiverId];
-      if (receiver) {
-        const getsCashOutCommission =
-          tx.type === 'cash_out' || (tx.type === 'merchant_cash_out' && tx.receiverRole === 'A');
-        const creditAmount = getsCashOutCommission
-          ? Number((tx.amount + tx.feeBreakdown.agentAmount).toFixed(2))
-          : tx.amount;
-        const commInc = getsCashOutCommission ? tx.feeBreakdown.agentAmount : 0;
-        store.users[tx.receiverId] = {
-          ...receiver,
-          balance: Number((receiver.balance + creditAmount).toFixed(2)),
-          commissionBalance: Number(((receiver.commissionBalance || 0) + commInc).toFixed(2)),
-          lastActiveAt: now,
-        };
-      }
-    }
-
-    if (tx.type === 'cash_in') {
-      const sender = store.users[tx.senderId];
-      if (sender) {
-        store.users[tx.senderId] = {
-          ...sender,
-          balance: Number((sender.balance + tx.feeBreakdown.agentAmount).toFixed(2)),
-          commissionBalance: Number(
-            ((sender.commissionBalance || 0) + tx.feeBreakdown.agentAmount).toFixed(2)
-          ),
-        };
-      }
-    }
-  }
 
   const decisionNotif: AdminNotification = {
     id: `NTF-APR-${txId}`,
@@ -3832,7 +3965,6 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
     read: false,
     targetSection: 'ledger',
   };
-  store.notifications[decisionNotif.id] = decisionNotif;
 
   const approveActivity = makeActivityEntry({
     idPrefix: 'ACT-APR',
@@ -3844,36 +3976,124 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
     amount: tx.amount,
     timestamp: now,
   });
-  store.activityLogs[approveActivity.id] = approveActivity;
 
-  store.transactions[txId] = {
+  let committedReceiver: AcashUser | null = null;
+  let committedSender: AcashUser | null = null;
+  let committedTx: AcashTransaction = {
     ...tx,
     status: 'completed',
     settledOnce: true,
     approvedBy: adminEmail,
     approvedAt: now,
   };
-  writeLocalStore(store, true);
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      if (shouldCreditBalances) {
-        if (store.users[tx.receiverId]) {
-          transaction.set(doc(db, USERS_COL, tx.receiverId), store.users[tx.receiverId]);
-        }
-        if (tx.type === 'cash_in' && store.users[tx.senderId]) {
-          transaction.set(doc(db, USERS_COL, tx.senderId), store.users[tx.senderId]);
-        }
+  await runTransaction(db, async (transaction) => {
+    const txRef = doc(db, TX_COL, txId);
+    const needsReceiverRead =
+      shouldCreditBalances &&
+      (tx!.receiverRole === 'U' || tx!.receiverRole === 'A' || tx!.receiverRole === 'M');
+    const needsSenderRead = shouldCreditBalances && tx!.type === 'cash_in';
+
+    const receiverRef = needsReceiverRead ? doc(db, USERS_COL, tx!.receiverId) : null;
+    const senderRef = needsSenderRead ? doc(db, USERS_COL, tx!.senderId) : null;
+
+    const [txSnap, receiverSnap, senderSnap] = await Promise.all([
+      transaction.get(txRef),
+      receiverRef ? transaction.get(receiverRef) : Promise.resolve(null),
+      senderRef ? transaction.get(senderRef) : Promise.resolve(null),
+    ]);
+
+    const authTx = txSnap.exists() ? (txSnap.data() as AcashTransaction) : tx!;
+    if (authTx.status !== 'pending_admin_approval') {
+      throw new Error('Transaction is no longer pending approval.');
+    }
+    const authCredit = !authTx.settledOnce;
+
+    if (authCredit && receiverRef) {
+      const authReceiver = receiverSnap?.exists()
+        ? (receiverSnap.data() as AcashUser)
+        : store.users[authTx.receiverId];
+      if (authReceiver) {
+        const getsCashOutCommission =
+          authTx.type === 'cash_out' ||
+          (authTx.type === 'merchant_cash_out' && authTx.receiverRole === 'A');
+        const creditAmount = getsCashOutCommission
+          ? Number((authTx.amount + authTx.feeBreakdown.agentAmount).toFixed(2))
+          : authTx.amount;
+        const commInc = getsCashOutCommission ? authTx.feeBreakdown.agentAmount : 0;
+
+        committedReceiver = stripUndefined({
+          ...authReceiver,
+          balance: Number(((authReceiver.balance || 0) + creditAmount).toFixed(2)),
+          commissionBalance: Number(((authReceiver.commissionBalance || 0) + commInc).toFixed(2)),
+          lastActiveAt: now,
+        });
       }
-      transaction.set(doc(db, TX_COL, txId), store.transactions[txId]);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, decisionNotif.id), decisionNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, approveActivity.id), approveActivity);
-    });
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    }
 
-  const sender = store.users[tx.senderId];
+    if (authCredit && senderRef) {
+      const authSender = senderSnap?.exists()
+        ? (senderSnap.data() as AcashUser)
+        : store.users[authTx.senderId];
+      if (authSender) {
+        committedSender = stripUndefined({
+          ...authSender,
+          balance: Number(((authSender.balance || 0) + authTx.feeBreakdown.agentAmount).toFixed(2)),
+          commissionBalance: Number(
+            ((authSender.commissionBalance || 0) + authTx.feeBreakdown.agentAmount).toFixed(2)
+          ),
+          lastActiveAt: now,
+        });
+      }
+    }
+
+    committedTx = {
+      ...authTx,
+      status: 'completed',
+      settledOnce: true,
+      approvedBy: adminEmail,
+      approvedAt: now,
+    };
+
+    if (receiverRef && committedReceiver) {
+      if (receiverSnap?.exists()) {
+        transaction.update(receiverRef, {
+          balance: committedReceiver.balance,
+          commissionBalance: committedReceiver.commissionBalance,
+          lastActiveAt: now,
+        });
+      } else {
+        transaction.set(receiverRef, committedReceiver);
+      }
+    }
+
+    if (senderRef && committedSender) {
+      if (senderSnap?.exists()) {
+        transaction.update(senderRef, {
+          balance: committedSender.balance,
+          commissionBalance: committedSender.commissionBalance,
+          lastActiveAt: now,
+        });
+      } else {
+        transaction.set(senderRef, committedSender);
+      }
+    }
+
+    transaction.set(txRef, committedTx);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, decisionNotif.id), decisionNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, approveActivity.id), approveActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  if (committedReceiver) latestStore.users[(committedReceiver as AcashUser).accountId] = committedReceiver;
+  if (committedSender) latestStore.users[(committedSender as AcashUser).accountId] = committedSender;
+  latestStore.transactions[txId] = committedTx;
+  latestStore.notifications[decisionNotif.id] = decisionNotif;
+  latestStore.activityLogs[approveActivity.id] = approveActivity;
+  writeLocalStore(latestStore, true);
+
+  const sender = latestStore.users[tx.senderId];
   const resolvedAdminEmail =
     adminEmail && adminEmail.includes('@') && adminEmail !== 'admin@acash.com'
       ? adminEmail
@@ -3917,15 +4137,6 @@ export async function adminRejectTransaction(
   }
 
   const shouldRefundEscrow = !tx.settledOnce;
-  const sender = store.users[tx.senderId];
-  if (shouldRefundEscrow && sender) {
-    store.users[tx.senderId] = {
-      ...sender,
-      balance: Number((sender.balance + tx.totalDebited).toFixed(2)),
-      lastActiveAt: now,
-    };
-  }
-
   const rejectReason = reason || 'Rejected by Admin AML Security Review';
   const decisionNotif: AdminNotification = {
     id: `NTF-REJ-${txId}`,
@@ -3939,7 +4150,6 @@ export async function adminRejectTransaction(
     read: false,
     targetSection: 'ledger',
   };
-  store.notifications[decisionNotif.id] = decisionNotif;
 
   const rejectActivity = makeActivityEntry({
     idPrefix: 'ACT-REJ',
@@ -3951,30 +4161,75 @@ export async function adminRejectTransaction(
     amount: tx.amount,
     timestamp: now,
   });
-  store.activityLogs[rejectActivity.id] = rejectActivity;
 
-  store.transactions[txId] = {
+  let committedSender: AcashUser | null = null;
+  let committedTx: AcashTransaction = {
     ...tx,
     status: 'rejected',
     approvedBy: adminEmail,
     approvedAt: now,
     rejectionReason: rejectReason,
   };
-  writeLocalStore(store, true);
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      if (shouldRefundEscrow && store.users[tx.senderId]) {
-        transaction.set(doc(db, USERS_COL, tx.senderId), store.users[tx.senderId]);
+  await runTransaction(db, async (transaction) => {
+    const txRef = doc(db, TX_COL, txId);
+    const senderRef = doc(db, USERS_COL, tx!.senderId);
+    const [txSnap, senderSnap] = await Promise.all([
+      transaction.get(txRef),
+      transaction.get(senderRef),
+    ]);
+
+    const authTx = txSnap.exists() ? (txSnap.data() as AcashTransaction) : tx!;
+    if (authTx.status !== 'pending_admin_approval') {
+      throw new Error('Transaction is no longer pending approval.');
+    }
+
+    if (!authTx.settledOnce) {
+      const authSender = senderSnap.exists()
+        ? (senderSnap.data() as AcashUser)
+        : store.users[authTx.senderId];
+      if (authSender) {
+        committedSender = stripUndefined({
+          ...authSender,
+          balance: Number(((authSender.balance || 0) + authTx.totalDebited).toFixed(2)),
+          lastActiveAt: now,
+        });
       }
-      transaction.set(doc(db, TX_COL, txId), store.transactions[txId]);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, decisionNotif.id), decisionNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, rejectActivity.id), rejectActivity);
-    });
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    }
 
+    committedTx = {
+      ...authTx,
+      status: 'rejected',
+      approvedBy: adminEmail,
+      approvedAt: now,
+      rejectionReason: rejectReason,
+    };
+
+    if (committedSender) {
+      if (senderSnap.exists()) {
+        transaction.update(senderRef, {
+          balance: committedSender.balance,
+          lastActiveAt: now,
+        });
+      } else {
+        transaction.set(senderRef, committedSender);
+      }
+    }
+
+    transaction.set(txRef, committedTx);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, decisionNotif.id), decisionNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, rejectActivity.id), rejectActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  if (committedSender) latestStore.users[(committedSender as AcashUser).accountId] = committedSender;
+  latestStore.transactions[txId] = committedTx;
+  latestStore.notifications[decisionNotif.id] = decisionNotif;
+  latestStore.activityLogs[rejectActivity.id] = rejectActivity;
+  writeLocalStore(latestStore, true);
+
+  const sender = latestStore.users[tx.senderId];
   const resolvedAdminEmail =
     adminEmail && adminEmail.includes('@') && adminEmail !== 'admin@acash.com'
       ? adminEmail
@@ -4486,12 +4741,13 @@ export async function adminResetAllAccountsAndTransactions(params: {
   writeLocalStore(store, true);
 
   try {
-    const [usersSnap, dirSnap, txSnap, mapSnap, kycSnap] = await Promise.all([
+    const [usersSnap, dirSnap, txSnap, mapSnap, kycSnap, locksSnap] = await Promise.all([
       getDocs(collection(db, USERS_COL)),
       getDocs(collection(db, DIRECTORY_COL)),
       getDocs(collection(db, TX_COL)),
       getDocs(collection(db, MAP_LOCATIONS_COL)),
       getDocs(collection(db, KYC_SUBMISSIONS_COL)),
+      getDocs(collection(db, LOCKS_COL)),
     ]);
 
     await Promise.all([
@@ -4500,6 +4756,7 @@ export async function adminResetAllAccountsAndTransactions(params: {
       ...txSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       ...mapSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       ...kycSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
+      ...locksSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
       setDoc(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), store.treasuryVault).catch(() => {}),
       setDoc(doc(db, ADMIN_NOTIF_COL, resetNotif.id), resetNotif).catch(() => {}),
       setDoc(doc(db, ADMIN_ACTIVITY_COL, resetActivity.id), resetActivity).catch(() => {}),

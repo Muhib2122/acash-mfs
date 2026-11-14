@@ -2,8 +2,164 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidAccountId(id) {
+      return id is string && id.size() <= 12 && id.matches('^[UAM]-[0-9]{6}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidAcashUser(data, accountId) {
+      return data.keys().hasAll(['accountId', 'role', 'name', 'phone', 'email', 'pinHash', 'balance', 'commissionBalance', 'status', 'verified', 'createdAt', 'lastActiveAt'])
+        && data.accountId == accountId
+        && data.role in ['U', 'A', 'M']
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
+        && data.phone is string && data.phone.size() <= 30
+        && data.email is string && data.email.size() <= 160
+        && data.pinHash is string && data.pinHash.size() <= 64
+        && data.balance is number && data.balance >= 0
+        && data.commissionBalance is number && data.commissionBalance >= 0
+        && data.status in ['active', 'disabled']
+        && data.verified is bool
+        && data.createdAt is number
+        && data.lastActiveAt is number;
+    }
+
+    function isValidAcashTransaction(data, txId) {
+      return data.keys().hasAll(['txId', 'txHash', 'type', 'senderId', 'receiverId', 'amount', 'fee', 'totalDebited', 'status', 'refundedAmount', 'createdAt'])
+        && data.txId == txId
+        && data.txHash is string && data.txHash.size() <= 64
+        && data.type in ['send_money', 'cash_out', 'cash_in', 'agent_cash_out', 'merchant_cash_out', 'mobile_recharge', 'bill_pay', 'merchant_payment', 'b2b_transfer', 'refund', 'admin_credit', 'admin_transfer']
+        && data.senderId is string && data.senderId.size() <= 32
+        && data.receiverId is string && data.receiverId.size() <= 32
+        && data.amount is number && data.amount > 0
+        && data.fee is number && data.fee >= 0
+        && data.totalDebited is number && data.totalDebited >= 0
+        && data.status in ['completed', 'pending_admin_approval', 'rejected', 'refunded', 'partially_refunded']
+        && data.refundedAmount is number && data.refundedAmount >= 0
+        && data.createdAt is number;
+    }
+
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
+    }
+
+    match /test/{docId} {
+      allow get: if isSignedIn() || docId == 'connection';
+      allow list, write: if isSignedIn();
+    }
+
+    match /acash_users/{accountId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow create: if isValidAccountId(accountId) && isValidAcashUser(incoming(), accountId);
+      allow update: if isValidAccountId(accountId)
+        && (
+          isValidAcashUser(incoming(), accountId)
+          || (
+            incoming().balance is number && incoming().balance >= 0
+            && incoming().lastActiveAt is number
+          )
+        );
+      allow delete: if isValidAccountId(accountId);
+    }
+
+    match /acash_directory/{accountId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow create, update: if isValidAccountId(accountId)
+        && incoming().accountId == accountId
+        && incoming().role in ['U', 'A', 'M']
+        && incoming().name is string && incoming().name.size() <= 160;
+      allow delete: if isValidAccountId(accountId);
+    }
+
+    match /acash_kyc_submissions/{accountId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow create, update: if isValidAccountId(accountId)
+        && incoming().accountId == accountId
+        && incoming().kyc is map
+        && incoming().updatedAt is number;
+      allow delete: if isValidAccountId(accountId);
+    }
+
+    match /acash_identity_locks/{lockId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.lockId is string;
+      allow create, update: if isValidId(lockId)
+        && incoming().lockId == lockId
+        && incoming().lockType in ['email', 'phone', 'nid', 'tax']
+        && incoming().accountId is string
+        && incoming().createdAt is number;
+      allow delete: if isValidId(lockId);
+    }
+
+    match /acash_transactions/{txId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.txId is string;
+      allow create, update: if isValidId(txId) && isValidAcashTransaction(incoming(), txId);
+      allow delete: if isValidId(txId);
+    }
+
+    match /acash_booths/{boothId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.boothId is string;
+      allow create, update: if isValidId(boothId)
+        && incoming().boothId == boothId
+        && incoming().boothType in ['agent_booth', 'support_booth']
+        && incoming().lat is number && incoming().lng is number;
+      allow delete: if isValidId(boothId);
+    }
+
+    match /acash_map_locations/{creatorId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.creatorId is string;
+      allow create, update: if isValidId(creatorId)
+        && incoming().creatorId == creatorId
+        && incoming().creatorRole in ['agent', 'merchant', 'second_admin']
+        && incoming().lat is number && incoming().lng is number;
+      allow delete: if isValidId(creatorId);
+    }
+
+    match /acash_second_admins/{adminId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.adminId is string;
+      allow create, update: if isValidId(adminId)
+        && incoming().adminId == adminId
+        && incoming().email is string
+        && incoming().status in ['active', 'disabled'];
+      allow delete: if isValidId(adminId);
+    }
+
+    match /acash_settings/{settingId} {
+      allow get, list: if isSignedIn() || resource == null || settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault'];
+      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault']
+        && incoming().updatedAt is number;
+      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault'];
+    }
+
+    match /acash_admin_notifications/{notifId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow create, update: if isValidId(notifId)
+        && incoming().id == notifId
+        && incoming().createdAt is number;
+      allow delete: if isValidId(notifId);
+    }
+
+    match /acash_admin_activity_logs/{logId} {
+      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow create, update: if isValidId(logId)
+        && incoming().id == logId
+        && incoming().timestamp is number;
+      allow delete: if isValidId(logId);
+    }
+
+    match /admins/{uid} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if isSignedIn() && request.auth.uid == uid;
     }
   }
 }
