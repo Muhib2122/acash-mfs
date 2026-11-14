@@ -1680,8 +1680,21 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
     }
   }
 
-  // 2. Try non-PII cross-portal routing directory (acash_directory)
-  const resolveFromDirectoryEntry = (entry: AcashDirectoryEntry): AcashUser => {
+  // 2. Try non-PII cross-portal routing directory (acash_directory) and hydrate full AcashUser doc
+  const resolveFromDirectoryEntry = async (entry: AcashDirectoryEntry): Promise<AcashUser> => {
+    try {
+      const fullSnap = await getDoc(doc(db, USERS_COL, entry.accountId));
+      if (fullSnap.exists()) {
+        const u = fullSnap.data() as AcashUser;
+        const store = readLocalStore();
+        store.users[u.accountId] = u;
+        writeLocalStore(store, false);
+        return u;
+      }
+    } catch {
+      // fall through to cached / directory fallback
+    }
+
     const store = readLocalStore();
     const cached = store.users[entry.accountId];
     if (cached && cached.pinHash) {
@@ -1705,7 +1718,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
     try {
       const dirSnap = await getDoc(doc(db, DIRECTORY_COL, normalizedId));
       if (dirSnap.exists()) {
-        return resolveFromDirectoryEntry(dirSnap.data() as AcashDirectoryEntry);
+        return await resolveFromDirectoryEntry(dirSnap.data() as AcashDirectoryEntry);
       }
     } catch {
       // continue
@@ -1717,7 +1730,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
       const qDirPhone = query(collection(db, DIRECTORY_COL), where('phone', '==', phone), limit(1));
       const dirPhoneSnap = await getDocs(qDirPhone);
       if (!dirPhoneSnap.empty) {
-        return resolveFromDirectoryEntry(dirPhoneSnap.docs[0].data() as AcashDirectoryEntry);
+        return await resolveFromDirectoryEntry(dirPhoneSnap.docs[0].data() as AcashDirectoryEntry);
       }
     } catch {
       // continue
@@ -1731,7 +1744,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
       if (mapSnap.exists()) {
         const loc = mapSnap.data() as AcashMapLocation;
         if (loc.creatorRole === 'agent' || loc.creatorRole === 'merchant') {
-          return directoryEntryToStubUser({
+          return await resolveFromDirectoryEntry({
             accountId: loc.creatorId,
             ...(loc.creatorUid ? { firebaseUid: loc.creatorUid } : {}),
             role: loc.creatorRole === 'agent' ? 'A' : 'M',
@@ -1761,7 +1774,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
       if (!mapPhoneSnap.empty) {
         const loc = mapPhoneSnap.docs[0].data() as AcashMapLocation;
         if (loc.creatorRole === 'agent' || loc.creatorRole === 'merchant') {
-          return directoryEntryToStubUser({
+          return await resolveFromDirectoryEntry({
             accountId: loc.creatorId,
             ...(loc.creatorUid ? { firebaseUid: loc.creatorUid } : {}),
             role: loc.creatorRole === 'agent' ? 'A' : 'M',
@@ -1780,7 +1793,7 @@ export async function findUserByIdentifier(identifier: string): Promise<AcashUse
     }
   }
 
-  // 4. Fallback to local synchronized store (sandbox & locally registered accounts)
+  // 4. Fallback to local synchronized store (offline cache)
   return findInLocalStore(clean);
 }
 
@@ -1991,30 +2004,29 @@ export async function registerAcashUser(params: {
     }
   }
 
-  let cloudUserWritten = false;
-  let cloudDirWritten = false;
   try {
-    await setDoc(doc(db, USERS_COL, accountId), newUser);
-    cloudUserWritten = true;
-    await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
-    cloudDirWritten = true;
+    await runTransaction(db, async (transaction) => {
+      transaction.set(doc(db, USERS_COL, accountId), newUser);
+      transaction.set(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
+    });
     firestoreBackendMode = 'firestore';
   } catch (err) {
-    if (!cloudDirWritten) {
-      try {
-        await setDoc(doc(db, DIRECTORY_COL, accountId), toDirectoryEntry(newUser));
-        cloudDirWritten = true;
-      } catch {
-        // handled below
-      }
-    }
-    firestoreBackendMode = cloudDirWritten ? 'firestore' : 'local_sync';
+    firestoreBackendMode = 'local_sync';
+    delete store.users[accountId];
+    delete store.notifications[regNotif.id];
+    writeLocalStore(store, true);
+    await Promise.all([
+      releaseIdentityLock('email', email).catch(() => {}),
+      releaseIdentityLock('phone', phone).catch(() => {}),
+    ]);
     if (auth.currentUser && isPermissionError(err)) {
       handleFirestoreError(err, OperationType.CREATE, `${USERS_COL}/${accountId}`);
     }
-    if (!cloudUserWritten && !cloudDirWritten) {
-      console.warn('Firestore registration sync warning:', err);
-    }
+    throw new Error(
+      err instanceof Error && !isPermissionError(err)
+        ? `Account registration could not be saved to Acash Cloud: ${err.message}`
+        : 'Account registration could not be saved to Acash Cloud. Please check your internet connection and try again.'
+    );
   }
 
   try {
@@ -2137,7 +2149,7 @@ export function subscribeToUser(
           writeLocalStore(store, false);
           callback(u);
           syncDirIfOwner(u);
-        } else if (!snap.metadata.fromCache) {
+        } else if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
           const store = readLocalStore();
           const localUser = store.users[accountId];
           if (localUser && Date.now() - localUser.createdAt > 10000) {
@@ -2149,7 +2161,10 @@ export function subscribeToUser(
           emitLocalIfFound();
         }
       },
-      () => {
+      (err) => {
+        if (isPermissionError(err)) {
+          console.warn('User profile subscription notice:', err);
+        }
         firestoreBackendMode = 'local_sync';
         emitLocalIfFound();
       }
@@ -2260,7 +2275,7 @@ export function subscribeToUserTransactions(
         snap: {
           docs: Array<{ data: () => unknown }>;
           docChanges: () => Array<{ type: string; doc: { id: string } }>;
-          metadata: { fromCache: boolean };
+          metadata: { fromCache: boolean; hasPendingWrites?: boolean };
         },
         roleField: 'senderId' | 'receiverId'
       ) => {
@@ -2269,13 +2284,18 @@ export function subscribeToUserTransactions(
         let mutated = false;
 
         for (const change of snap.docChanges()) {
-          if (change.type === 'removed' && store.transactions[change.doc.id]) {
+          if (
+            change.type === 'removed' &&
+            !snap.metadata.fromCache &&
+            !snap.metadata.hasPendingWrites &&
+            store.transactions[change.doc.id]
+          ) {
             delete store.transactions[change.doc.id];
             mutated = true;
           }
         }
 
-        if (!snap.metadata.fromCache && fsTxs.length < 250) {
+        if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites && fsTxs.length < 1000) {
           const serverIds = new Set(fsTxs.map((t) => t.txId));
           const now = Date.now();
           for (const [id, existingTx] of Object.entries(store.transactions)) {
@@ -2301,8 +2321,35 @@ export function subscribeToUserTransactions(
         emitLocal();
       };
 
+      const qSender = query(collection(db, TX_COL), where('senderId', '==', accountId), limit(1000));
+      const qReceiver = query(collection(db, TX_COL), where('receiverId', '==', accountId), limit(1000));
+
+      // Eagerly hydrate sender & receiver ledger immediately on login/account switch
+      void Promise.all([getDocs(qSender), getDocs(qReceiver)])
+        .then(([sSnap, rSnap]) => {
+          const store = readLocalStore();
+          let mutated = false;
+          for (const d of sSnap.docs) {
+            const tx = d.data() as AcashTransaction;
+            store.transactions[tx.txId] = tx;
+            mutated = true;
+          }
+          for (const d of rSnap.docs) {
+            const tx = d.data() as AcashTransaction;
+            store.transactions[tx.txId] = tx;
+            mutated = true;
+          }
+          if (mutated) {
+            writeLocalStore(store, false);
+            emitLocal();
+          }
+        })
+        .catch(() => {
+          // Handled via live onSnapshot listeners below
+        });
+
       unsubSenderFs = onSnapshot(
-        query(collection(db, TX_COL), where('senderId', '==', accountId), limit(250)),
+        qSender,
         (snap) => mergeSnap(snap, 'senderId'),
         (err) => {
           console.warn('Sender transaction subscription notice:', err);
@@ -2310,7 +2357,7 @@ export function subscribeToUserTransactions(
         }
       );
       unsubReceiverFs = onSnapshot(
-        query(collection(db, TX_COL), where('receiverId', '==', accountId), limit(250)),
+        qReceiver,
         (snap) => mergeSnap(snap, 'receiverId'),
         (err) => {
           console.warn('Receiver transaction subscription notice:', err);
@@ -2375,16 +2422,22 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
   const attachDirectoryListener = () => {
     unsubDirFs();
     try {
-      const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'), limit(500));
+      const qDir = query(collection(db, DIRECTORY_COL), orderBy('createdAt', 'desc'), limit(1000));
       unsubDirFs = onSnapshot(
         qDir,
         (snap) => {
           const entries = snap.docs.map((d) => d.data() as AcashDirectoryEntry);
           const store = readLocalStore();
+          const missingIds: string[] = [];
           let changed = false;
 
           for (const change of snap.docChanges()) {
-            if (change.type === 'removed' && store.users[change.doc.id]) {
+            if (
+              change.type === 'removed' &&
+              !snap.metadata.fromCache &&
+              !snap.metadata.hasPendingWrites &&
+              store.users[change.doc.id]
+            ) {
               delete store.users[change.doc.id];
               changed = true;
             }
@@ -2394,12 +2447,9 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
             if (LEGACY_BOT_USER_IDS.has(entry.accountId)) continue;
             const existing = store.users[entry.accountId];
             if (!existing) {
-              store.users[entry.accountId] = applyKycSubmissionToUser(
-                directoryEntryToStubUser(entry),
-                kycSubmissionCache[entry.accountId]
-              );
-              changed = true;
+              missingIds.push(entry.accountId);
             } else {
+              // Merge directory metadata only; NEVER overwrite real balance, commission, pinHash, or email
               const merged = applyKycSubmissionToUser(
                 {
                   ...existing,
@@ -2420,8 +2470,37 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
             writeLocalStore(store, false);
           }
           emitLocal();
+
+          // Hydrate any missing users directly from authoritative acash_users collection (never balance: 0 stubs)
+          if (missingIds.length > 0) {
+            void Promise.all(
+              missingIds.slice(0, 50).map((id) => getDoc(doc(db, USERS_COL, id)).catch(() => null))
+            ).then((snaps) => {
+              const nextStore = readLocalStore();
+              let hydrated = false;
+              for (const s of snaps) {
+                if (s && s.exists()) {
+                  const realUser = s.data() as AcashUser;
+                  if (!LEGACY_BOT_USER_IDS.has(realUser.accountId)) {
+                    nextStore.users[realUser.accountId] = applyKycSubmissionToUser(
+                      realUser,
+                      kycSubmissionCache[realUser.accountId]
+                    );
+                    hydrated = true;
+                  }
+                }
+              }
+              if (hydrated) {
+                writeLocalStore(nextStore, false);
+                emitLocal();
+              }
+            });
+          }
         },
-        () => {
+        (err) => {
+          if (isPermissionError(err)) {
+            console.warn('Directory subscription notice:', err);
+          }
           emitLocal();
         }
       );
@@ -2434,66 +2513,84 @@ export function subscribeToAllUsers(callback: (users: AcashUser[]) => void): Uns
     unsubFs();
     unsubKycFs();
     try {
-      const q = query(collection(db, USERS_COL), limit(500));
-      unsubFs = onSnapshot(
-        q,
-        (snap) => {
-          const fsUsers = snap.docs
-            .map((d) => d.data() as AcashUser)
-            .filter((u) => !LEGACY_BOT_USER_IDS.has(u.accountId));
-          const store = readLocalStore();
-          let mutated = false;
+      const q = query(collection(db, USERS_COL), limit(1000));
+      const processUsersSnap = (snap: {
+        docs: Array<{ data: () => unknown }>;
+        docChanges?: () => Array<{ type: string; doc: { id: string } }>;
+        metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+      }) => {
+        const fsUsers = snap.docs
+          .map((d) => d.data() as AcashUser)
+          .filter((u) => !LEGACY_BOT_USER_IDS.has(u.accountId));
+        const store = readLocalStore();
+        let mutated = false;
 
+        if (snap.docChanges) {
           for (const change of snap.docChanges()) {
-            if (change.type === 'removed' && store.users[change.doc.id]) {
+            if (
+              change.type === 'removed' &&
+              !snap.metadata.fromCache &&
+              !snap.metadata.hasPendingWrites &&
+              store.users[change.doc.id]
+            ) {
               delete store.users[change.doc.id];
               mutated = true;
             }
           }
+        }
 
-          if (!snap.metadata.fromCache) {
-            const serverIds = new Set(fsUsers.map((u) => u.accountId));
-            for (const id of Object.keys(store.users)) {
-              if (!serverIds.has(id)) {
-                delete store.users[id];
-                mutated = true;
-              }
+        if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
+          const serverIds = new Set(fsUsers.map((u) => u.accountId));
+          for (const id of Object.keys(store.users)) {
+            if (!serverIds.has(id)) {
+              delete store.users[id];
+              mutated = true;
             }
           }
+        }
 
+        for (const u of fsUsers) {
+          const existing = store.users[u.accountId];
+          const cachedSub = kycSubmissionCache[u.accountId];
+          const mergedKyc =
+            existing?.kyc && (!u.kyc || existing.kyc.updatedAt > u.kyc.updatedAt)
+              ? existing.kyc
+              : u.kyc;
+          const candidate = applyKycSubmissionToUser(
+            {
+              ...u,
+              ...(mergedKyc ? { kyc: mergedKyc } : {}),
+            },
+            cachedSub
+          );
+          store.users[u.accountId] = candidate;
+          mutated = true;
+        }
+
+        if (mutated) {
+          writeLocalStore(store, false);
+        }
+
+        if (auth.currentUser?.emailVerified && isMainAdminEmail(auth.currentUser.email)) {
           for (const u of fsUsers) {
-            const existing = store.users[u.accountId];
-            const cachedSub = kycSubmissionCache[u.accountId];
-            const mergedKyc =
-              existing?.kyc && (!u.kyc || existing.kyc.updatedAt > u.kyc.updatedAt)
-                ? existing.kyc
-                : u.kyc;
-            const candidate = applyKycSubmissionToUser(
-              {
-                ...u,
-                ...(mergedKyc ? { kyc: mergedKyc } : {}),
-              },
-              cachedSub
-            );
-            store.users[u.accountId] = candidate;
-            mutated = true;
+            void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), {
+              merge: true,
+            }).catch(() => {});
+            void backfillUserIdentityLocks(u);
           }
+        }
+        emitLocal();
+      };
 
-          if (mutated) {
-            writeLocalStore(store, false);
-          }
+      void getDocs(q)
+        .then((snap) => processUsersSnap(snap))
+        .catch(() => {});
 
-          if (auth.currentUser?.emailVerified && isMainAdminEmail(auth.currentUser.email)) {
-            for (const u of fsUsers) {
-              void setDoc(doc(db, DIRECTORY_COL, u.accountId), toDirectoryEntry(u), {
-                merge: true,
-              }).catch(() => {});
-              void backfillUserIdentityLocks(u);
-            }
-          }
-          emitLocal();
-        },
-        () => {
+      unsubFs = onSnapshot(
+        q,
+        (snap) => processUsersSnap(snap),
+        (err) => {
+          console.warn('Users subscription notice:', err);
           emitLocal();
         }
       );
@@ -2600,8 +2697,8 @@ export function subscribeToAllTransactions(
     unsubFs();
     try {
       const q = useOrderBy
-        ? query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(500))
-        : query(collection(db, TX_COL), limit(500));
+        ? query(collection(db, TX_COL), orderBy('createdAt', 'desc'), limit(1000))
+        : query(collection(db, TX_COL), limit(1000));
       unsubFs = onSnapshot(
         q,
         (snap) => {
@@ -2612,16 +2709,21 @@ export function subscribeToAllTransactions(
           let mutated = false;
 
           for (const change of snap.docChanges()) {
-            if (change.type === 'removed' && store.transactions[change.doc.id]) {
+            if (
+              change.type === 'removed' &&
+              !snap.metadata.fromCache &&
+              !snap.metadata.hasPendingWrites &&
+              store.transactions[change.doc.id]
+            ) {
               delete store.transactions[change.doc.id];
               mutated = true;
             }
           }
 
-          if (!snap.metadata.fromCache) {
+          if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
             const serverIds = new Set(fsTxs.map((t) => t.txId));
             const oldestServerTs =
-              fsTxs.length >= 450 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
+              fsTxs.length >= 900 ? fsTxs[fsTxs.length - 1].createdAt : Number.NEGATIVE_INFINITY;
             const now = Date.now();
             for (const [id, existingTx] of Object.entries(store.transactions)) {
               if (
@@ -3299,16 +3401,21 @@ export async function executeFinancialTransaction(params: {
     await runTransaction(db, async (transaction) => {
       // 1. Execute ALL Firestore reads BEFORE any writes
       const senderRef = doc(db, USERS_COL, params.senderId);
-      const senderSnap = await transaction.get(senderRef);
-
       const receiverRef =
-        !requiresAdminApproval && resolvedReceiver
+        !isExternalUtility && !isAdminTarget && resolvedReceiver
           ? doc(db, USERS_COL, resolvedReceiver.accountId)
           : null;
-      const receiverSnap = receiverRef ? await transaction.get(receiverRef) : null;
+
+      const [senderSnap, receiverSnap] = await Promise.all([
+        transaction.get(senderRef),
+        receiverRef ? transaction.get(receiverRef) : Promise.resolve(null),
+      ]);
 
       // 2. Compute authoritative sender balance from Firestore snapshot
-      const authSender = senderSnap.exists() ? (senderSnap.data() as AcashUser) : senderLocal;
+      if (!senderSnap.exists()) {
+        throw new Error('Sender account record not found in Acash Cloud Ledger.');
+      }
+      const authSender = senderSnap.data() as AcashUser;
       if (authSender.status !== 'active') {
         throw new Error('Your account is currently disabled by Admin.');
       }
@@ -3332,29 +3439,16 @@ export async function executeFinancialTransaction(params: {
         lastActiveAt: now,
       });
 
-      // 3. Compute authoritative receiver balance from Firestore snapshot
+      // 3. Validate & compute authoritative receiver balance from Firestore snapshot
       let nextTxRecord: AcashTransaction = { ...baseTxRecord };
-      if (!requiresAdminApproval && resolvedReceiver && receiverRef) {
-        const authReceiver = receiverSnap?.exists()
-          ? (receiverSnap.data() as AcashUser)
-          : resolvedReceiver;
+      if (receiverRef && resolvedReceiver) {
+        if (!receiverSnap || !receiverSnap.exists()) {
+          throw new Error('Recipient account record not found in Acash Cloud Ledger.');
+        }
+        const authReceiver = receiverSnap.data() as AcashUser;
         if (authReceiver.status !== 'active') {
           throw new Error('Recipient account is disabled.');
         }
-
-        const nextReceiverBalance = Number(
-          ((authReceiver.balance || 0) + creditToReceiver).toFixed(2)
-        );
-        const nextReceiverComm = Number(
-          ((authReceiver.commissionBalance || 0) + receiverCommInc).toFixed(2)
-        );
-
-        committedReceiver = stripUndefined({
-          ...authReceiver,
-          balance: nextReceiverBalance,
-          commissionBalance: nextReceiverComm,
-          lastActiveAt: now,
-        });
 
         nextTxRecord = {
           ...baseTxRecord,
@@ -3362,31 +3456,39 @@ export async function executeFinancialTransaction(params: {
           receiverPhone: authReceiver.phone || baseTxRecord.receiverPhone,
           ...(authReceiver.firebaseUid ? { receiverUid: authReceiver.firebaseUid } : {}),
         };
+
+        if (!requiresAdminApproval) {
+          const nextReceiverBalance = Number(
+            ((authReceiver.balance || 0) + creditToReceiver).toFixed(2)
+          );
+          const nextReceiverComm = Number(
+            ((authReceiver.commissionBalance || 0) + receiverCommInc).toFixed(2)
+          );
+
+          committedReceiver = stripUndefined({
+            ...authReceiver,
+            balance: nextReceiverBalance,
+            commissionBalance: nextReceiverComm,
+            lastActiveAt: now,
+          });
+        }
       }
 
       committedTxRecord = nextTxRecord;
 
       // 4. Execute ALL Firestore writes atomically after all reads
-      if (senderSnap.exists()) {
-        transaction.update(senderRef, {
-          balance: committedSender.balance,
-          commissionBalance: committedSender.commissionBalance,
+      transaction.update(senderRef, {
+        balance: committedSender.balance,
+        commissionBalance: committedSender.commissionBalance,
+        lastActiveAt: now,
+      });
+
+      if (receiverRef && committedReceiver && !requiresAdminApproval) {
+        transaction.update(receiverRef, {
+          balance: committedReceiver.balance,
+          commissionBalance: committedReceiver.commissionBalance,
           lastActiveAt: now,
         });
-      } else {
-        transaction.set(senderRef, committedSender);
-      }
-
-      if (receiverRef && committedReceiver) {
-        if (receiverSnap?.exists()) {
-          transaction.update(receiverRef, {
-            balance: committedReceiver.balance,
-            commissionBalance: committedReceiver.commissionBalance,
-            lastActiveAt: now,
-          });
-        } else {
-          transaction.set(receiverRef, committedReceiver);
-        }
       }
 
       transaction.set(doc(db, TX_COL, txId), committedTxRecord);
@@ -3615,12 +3717,22 @@ export async function executeMerchantRefund(params: {
       transaction.get(origRef),
     ]);
 
-    const authMerchant = merchantSnap.exists() ? (merchantSnap.data() as AcashUser) : merchant;
+    if (!merchantSnap.exists()) {
+      throw new Error('Merchant account record not found in Acash Cloud Ledger.');
+    }
+    if (!customerSnap.exists()) {
+      throw new Error('Customer account record not found in Acash Cloud Ledger.');
+    }
+    if (!origSnap.exists()) {
+      throw new Error('Original transaction not found in Acash Cloud Ledger.');
+    }
+
+    const authMerchant = merchantSnap.data() as AcashUser;
     if (authMerchant.balance < refundAmt) {
       throw new Error('Insufficient Merchant balance to process this refund.');
     }
-    const authCustomer = customerSnap.exists() ? (customerSnap.data() as AcashUser) : customer;
-    const authOrig = origSnap.exists() ? (origSnap.data() as AcashTransaction) : orig!;
+    const authCustomer = customerSnap.data() as AcashUser;
+    const authOrig = origSnap.data() as AcashTransaction;
 
     const authRemaining = Number((authOrig.amount - (authOrig.refundedAmount || 0)).toFixed(2));
     if (refundAmt > authRemaining) {
@@ -3650,23 +3762,15 @@ export async function executeMerchantRefund(params: {
       ...(authCustomer.firebaseUid ? { receiverUid: authCustomer.firebaseUid } : {}),
     };
 
-    if (merchantSnap.exists()) {
-      transaction.update(merchantRef, {
-        balance: committedMerchant.balance,
-        lastActiveAt: now,
-      });
-    } else {
-      transaction.set(merchantRef, committedMerchant);
-    }
+    transaction.update(merchantRef, {
+      balance: committedMerchant.balance,
+      lastActiveAt: now,
+    });
 
-    if (customerSnap.exists()) {
-      transaction.update(customerRef, {
-        balance: committedCustomer.balance,
-        lastActiveAt: now,
-      });
-    } else {
-      transaction.set(customerRef, committedCustomer);
-    }
+    transaction.update(customerRef, {
+      balance: committedCustomer.balance,
+      lastActiveAt: now,
+    });
 
     transaction.set(origRef, committedOrig);
     transaction.set(doc(db, TX_COL, refundTxId), committedRefund);
@@ -3719,30 +3823,7 @@ export async function mainAdminMintTreasuryCredit(params: {
   const noteText = params.reason?.trim() || 'Main Admin Initial Treasury Credit Mint';
 
   const store = readLocalStore();
-  const currentVault = normalizeTreasuryVault(store.treasuryVault);
-  const previousBalance = currentVault.balance;
-  const newBalance = Number((previousBalance + amt).toFixed(2));
-  const mintEntry: TreasuryMintHistoryEntry = {
-    id: `MINT-${txId}`,
-    action: 'mint',
-    amount: amt,
-    previousBalance,
-    newBalance,
-    note: noteText.slice(0, 200),
-    actorEmail: params.actorEmail,
-    timestamp: now,
-  };
-  const updatedVault: MainTreasuryVault = {
-    ...currentVault,
-    balance: newBalance,
-    totalMinted: Number((currentVault.totalMinted + amt).toFixed(2)),
-    lastMintAmount: amt,
-    lastMintNote: noteText.slice(0, 200),
-    mintHistory: [mintEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
-    updatedAt: now,
-    updatedBy: params.actorEmail,
-  };
-  store.treasuryVault = updatedVault;
+  let updatedVault: MainTreasuryVault = normalizeTreasuryVault(store.treasuryVault);
 
   const txRecord: AcashTransaction = {
     txId,
@@ -3777,45 +3858,79 @@ export async function mainAdminMintTreasuryCredit(params: {
     approvedAt: now,
   };
 
-  store.transactions[txId] = txRecord;
-
-  const mintNotif: AdminNotification = {
+  let mintNotif: AdminNotification = {
     id: `NTF-MINT-${txId}`,
     title: `Main Admin Treasury Mint (+৳${amt.toLocaleString()})`,
-    message: `Main Admin added ৳${amt.toLocaleString()} to ADMIN-TREASURY. New Vault Balance: ৳${updatedVault.balance.toLocaleString()}.`,
+    message: `Main Admin added ৳${amt.toLocaleString()} to ADMIN-TREASURY.`,
     category: 'treasury',
     severity: 'info',
     createdAt: now,
     read: false,
     targetSection: 'treasury',
   };
-  store.notifications[mintNotif.id] = mintNotif;
 
-  const mintActivity = makeActivityEntry({
+  let mintActivity = makeActivityEntry({
     idPrefix: 'ACT-MINT',
     actionType: 'credit_add',
     title: `Main Admin Treasury Mint (+৳${amt.toLocaleString()})`,
-    details: `Main Admin (${params.actorEmail}) minted ৳${amt.toLocaleString('en-US', { minimumFractionDigits: 2 })} into ADMIN-TREASURY. Vault Balance: ৳${updatedVault.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Note: ${noteText}`,
+    details: `Main Admin (${params.actorEmail}) minted ৳${amt.toLocaleString('en-US', { minimumFractionDigits: 2 })} into ADMIN-TREASURY. Note: ${noteText}`,
     actorEmail: params.actorEmail,
     targetIds: ['ADMIN-TREASURY'],
     amount: amt,
     timestamp: now,
   });
-  store.activityLogs[mintActivity.id] = mintActivity;
 
-  writeLocalStore(store, true);
+  await runTransaction(db, async (transaction) => {
+    const vaultRef = doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID);
+    const vaultSnap = await transaction.get(vaultRef);
+    const currentVault = vaultSnap.exists()
+      ? normalizeTreasuryVault(vaultSnap.data() as Partial<MainTreasuryVault>)
+      : normalizeTreasuryVault(store.treasuryVault);
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), updatedVault);
-      transaction.set(doc(db, TX_COL, txId), txRecord);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, mintNotif.id), mintNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, mintActivity.id), mintActivity);
-    });
-    firestoreBackendMode = 'firestore';
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    const previousBalance = currentVault.balance;
+    const newBalance = Number((previousBalance + amt).toFixed(2));
+    const mintEntry: TreasuryMintHistoryEntry = {
+      id: `MINT-${txId}`,
+      action: 'mint',
+      amount: amt,
+      previousBalance,
+      newBalance,
+      note: noteText.slice(0, 200),
+      actorEmail: params.actorEmail,
+      timestamp: now,
+    };
+    updatedVault = {
+      ...currentVault,
+      balance: newBalance,
+      totalMinted: Number((currentVault.totalMinted + amt).toFixed(2)),
+      lastMintAmount: amt,
+      lastMintNote: noteText.slice(0, 200),
+      mintHistory: [mintEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
+      updatedAt: now,
+      updatedBy: params.actorEmail,
+    };
+    mintNotif = {
+      ...mintNotif,
+      message: `Main Admin added ৳${amt.toLocaleString()} to ADMIN-TREASURY. New Vault Balance: ৳${updatedVault.balance.toLocaleString()}.`,
+    };
+    mintActivity = {
+      ...mintActivity,
+      details: `Main Admin (${params.actorEmail}) minted ৳${amt.toLocaleString('en-US', { minimumFractionDigits: 2 })} into ADMIN-TREASURY. Vault Balance: ৳${updatedVault.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Note: ${noteText}`,
+    };
+
+    transaction.set(vaultRef, updatedVault);
+    transaction.set(doc(db, TX_COL, txId), txRecord);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, mintNotif.id), mintNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, mintActivity.id), mintActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  latestStore.treasuryVault = updatedVault;
+  latestStore.transactions[txId] = txRecord;
+  latestStore.notifications[mintNotif.id] = mintNotif;
+  latestStore.activityLogs[mintActivity.id] = mintActivity;
+  writeLocalStore(latestStore, true);
 
   return { vault: updatedVault, tx: txRecord };
 }
@@ -3841,68 +3956,82 @@ export async function mainAdminRefreshTreasuryBalance(params: {
     (nextBal === 0 ? 'Main Admin Treasury Mint Balance Reset to ৳0.00' : 'Main Admin Treasury Mint Balance Refresh');
 
   const store = readLocalStore();
-  const currentVault = normalizeTreasuryVault(store.treasuryVault);
-  const previousBalance = currentVault.balance;
   const newBalance = Number(nextBal.toFixed(2));
-  const diff = Number(Math.abs(newBalance - previousBalance).toFixed(2));
+  let updatedVault: MainTreasuryVault = normalizeTreasuryVault(store.treasuryVault);
 
-  const refreshEntry: TreasuryMintHistoryEntry = {
-    id: entryId,
-    action: 'refresh',
-    amount: diff,
-    previousBalance,
-    newBalance,
-    note: cleanReason.slice(0, 200),
-    actorEmail: params.actorEmail,
-    timestamp: now,
-  };
-
-  const updatedVault: MainTreasuryVault = {
-    ...currentVault,
-    balance: newBalance,
-    lastMintNote: cleanReason.slice(0, 200),
-    mintHistory: [refreshEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
-    updatedAt: now,
-    updatedBy: params.actorEmail,
-  };
-  store.treasuryVault = updatedVault;
-
-  const refreshNotif: AdminNotification = {
+  let refreshNotif: AdminNotification = {
     id: `NTF-${entryId}`,
     title: `Treasury Mint Balance Refreshed (৳${newBalance.toLocaleString()})`,
-    message: `Main Admin refreshed ADMIN-TREASURY balance from ৳${previousBalance.toLocaleString()} to ৳${newBalance.toLocaleString()}. Note: ${cleanReason}`,
+    message: `Main Admin refreshed ADMIN-TREASURY balance to ৳${newBalance.toLocaleString()}. Note: ${cleanReason}`,
     category: 'treasury',
     severity: 'warning',
     createdAt: now,
     read: false,
     targetSection: 'treasury',
   };
-  store.notifications[refreshNotif.id] = refreshNotif;
 
-  const refreshActivity = makeActivityEntry({
+  let refreshActivity = makeActivityEntry({
     idPrefix: 'ACT-REF',
     actionType: 'credit_add',
-    title: `Mint Balance Refreshed (৳${previousBalance.toLocaleString()} → ৳${newBalance.toLocaleString()})`,
-    details: `Main Admin (${params.actorEmail}) refreshed ADMIN-TREASURY mint balance from ৳${previousBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })} to ৳${newBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Reason: ${cleanReason}`,
+    title: `Mint Balance Refreshed (৳${newBalance.toLocaleString()})`,
+    details: `Main Admin (${params.actorEmail}) refreshed ADMIN-TREASURY mint balance to ৳${newBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Reason: ${cleanReason}`,
     actorEmail: params.actorEmail,
     targetIds: ['ADMIN-TREASURY'],
     amount: newBalance,
     timestamp: now,
   });
-  store.activityLogs[refreshActivity.id] = refreshActivity;
 
-  writeLocalStore(store, true);
+  await runTransaction(db, async (transaction) => {
+    const vaultRef = doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID);
+    const vaultSnap = await transaction.get(vaultRef);
+    const currentVault = vaultSnap.exists()
+      ? normalizeTreasuryVault(vaultSnap.data() as Partial<MainTreasuryVault>)
+      : normalizeTreasuryVault(store.treasuryVault);
+    const previousBalance = currentVault.balance;
+    const diff = Number(Math.abs(newBalance - previousBalance).toFixed(2));
 
-  try {
-    await runTransaction(db, async (transaction) => {
-      transaction.set(doc(db, SETTINGS_COL, TREASURY_VAULT_DOC_ID), updatedVault);
-      transaction.set(doc(db, ADMIN_NOTIF_COL, refreshNotif.id), refreshNotif);
-      transaction.set(doc(db, ADMIN_ACTIVITY_COL, refreshActivity.id), refreshActivity);
-    });
-    firestoreBackendMode = 'firestore';
-  } catch {
-    firestoreBackendMode = 'local_sync';
-  }
+    const refreshEntry: TreasuryMintHistoryEntry = {
+      id: entryId,
+      action: 'refresh',
+      amount: diff,
+      previousBalance,
+      newBalance,
+      note: cleanReason.slice(0, 200),
+      actorEmail: params.actorEmail,
+      timestamp: now,
+    };
+
+    updatedVault = {
+      ...currentVault,
+      balance: newBalance,
+      lastMintNote: cleanReason.slice(0, 200),
+      mintHistory: [refreshEntry, ...(currentVault.mintHistory || [])].slice(0, 250),
+      updatedAt: now,
+      updatedBy: params.actorEmail,
+    };
+
+    refreshNotif = {
+      ...refreshNotif,
+      message: `Main Admin refreshed ADMIN-TREASURY balance from ৳${previousBalance.toLocaleString()} to ৳${newBalance.toLocaleString()}. Note: ${cleanReason}`,
+    };
+
+    refreshActivity = {
+      ...refreshActivity,
+      title: `Mint Balance Refreshed (৳${previousBalance.toLocaleString()} → ৳${newBalance.toLocaleString()})`,
+      details: `Main Admin (${params.actorEmail}) refreshed ADMIN-TREASURY mint balance from ৳${previousBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })} to ৳${newBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Reason: ${cleanReason}`,
+    };
+
+    transaction.set(vaultRef, updatedVault);
+    transaction.set(doc(db, ADMIN_NOTIF_COL, refreshNotif.id), refreshNotif);
+    transaction.set(doc(db, ADMIN_ACTIVITY_COL, refreshActivity.id), refreshActivity);
+  });
+
+  firestoreBackendMode = 'firestore';
+  const latestStore = readLocalStore();
+  latestStore.treasuryVault = updatedVault;
+  latestStore.notifications[refreshNotif.id] = refreshNotif;
+  latestStore.activityLogs[refreshActivity.id] = refreshActivity;
+  writeLocalStore(latestStore, true);
 
   return updatedVault;
 }
@@ -4000,7 +4129,10 @@ export async function adminCreditAccount(params: {
       transaction.get(vaultRef),
     ]);
 
-    const authTarget = targetSnap.exists() ? (targetSnap.data() as AcashUser) : currentTarget;
+    if (!targetSnap.exists()) {
+      throw new Error(`Target account ${currentTarget.accountId} not found in Acash Cloud Ledger.`);
+    }
+    const authTarget = targetSnap.data() as AcashUser;
     const authVault = vaultSnap.exists()
       ? normalizeTreasuryVault(vaultSnap.data() as Partial<MainTreasuryVault>)
       : currentVault;
@@ -4025,14 +4157,10 @@ export async function adminCreditAccount(params: {
       ...(authTarget.firebaseUid ? { receiverUid: authTarget.firebaseUid } : {}),
     };
 
-    if (targetSnap.exists()) {
-      transaction.update(targetRef, {
-        balance: committedUser.balance,
-        lastActiveAt: now,
-      });
-    } else {
-      transaction.set(targetRef, committedUser);
-    }
+    transaction.update(targetRef, {
+      balance: committedUser.balance,
+      lastActiveAt: now,
+    });
 
     transaction.set(vaultRef, committedVault);
     transaction.set(doc(db, TX_COL, txId), committedTx);
@@ -4180,12 +4308,15 @@ export async function adminTransferBetweenAccounts(params: {
       vaultRef ? transaction.get(vaultRef) : Promise.resolve(null),
     ]);
 
-    const authTo = toSnap.exists() ? (toSnap.data() as AcashUser) : currentTo;
-    const authFrom = currentFrom
-      ? fromSnap?.exists()
-        ? (fromSnap.data() as AcashUser)
-        : currentFrom
-      : null;
+    if (!toSnap.exists()) {
+      throw new Error(`Destination account ${currentTo.accountId} not found in Acash Cloud Ledger.`);
+    }
+    if (currentFrom && (!fromSnap || !fromSnap.exists())) {
+      throw new Error(`Source account ${currentFrom.accountId} not found in Acash Cloud Ledger.`);
+    }
+
+    const authTo = toSnap.data() as AcashUser;
+    const authFrom = currentFrom ? (fromSnap!.data() as AcashUser) : null;
 
     if (authFrom && authFrom.balance < amt) {
       throw new Error(
@@ -4228,28 +4359,20 @@ export async function adminTransferBetweenAccounts(params: {
     };
 
     if (fromRef && committedFrom) {
-      if (fromSnap?.exists()) {
-        transaction.update(fromRef, {
-          balance: committedFrom.balance,
-          lastActiveAt: now,
-        });
-      } else {
-        transaction.set(fromRef, committedFrom);
-      }
+      transaction.update(fromRef, {
+        balance: committedFrom.balance,
+        lastActiveAt: now,
+      });
     }
 
     if (vaultRef && committedVault) {
       transaction.set(vaultRef, committedVault);
     }
 
-    if (toSnap.exists()) {
-      transaction.update(toRef, {
-        balance: committedTo.balance,
-        lastActiveAt: now,
-      });
-    } else {
-      transaction.set(toRef, committedTo);
-    }
+    transaction.update(toRef, {
+      balance: committedTo.balance,
+      lastActiveAt: now,
+    });
 
     transaction.set(doc(db, TX_COL, txId), committedTx);
     transaction.set(doc(db, ADMIN_NOTIF_COL, trNotif.id), trNotif);
@@ -5936,7 +6059,7 @@ export async function verifyAdminPasswordLogin(
     (sa) => sa.email.toLowerCase() === cleanEmail
   );
 
-  if (!matched && auth.currentUser?.email?.toLowerCase() === cleanEmail) {
+  if (!matched) {
     try {
       const qSa = query(
         collection(db, SECOND_ADMINS_COL),

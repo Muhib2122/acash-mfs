@@ -93,7 +93,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [refundResult, setRefundResult] = useState<AcashTransaction | null>(null);
 
   // B2B Supplier Transfer state
-  const [b2bTarget, setB2bTarget] = useState('M-300002');
+  const [b2bTarget, setB2bTarget] = useState('');
   const [b2bAmount, setB2bAmount] = useState('');
   const [b2bNote, setB2bNote] = useState('');
   const [b2bPin, setB2bPin] = useState('');
@@ -104,7 +104,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
 
   // Merchant Cash-Out (Agent / Admin) state
   const [cashOutMode, setCashOutMode] = useState<'agent' | 'admin'>('agent');
-  const [cashOutAgentId, setCashOutAgentId] = useState('A-200001');
+  const [cashOutAgentId, setCashOutAgentId] = useState('');
   const [cashOutAmount, setCashOutAmount] = useState('');
   const [cashOutNote, setCashOutNote] = useState('');
   const [cashOutPin, setCashOutPin] = useState('');

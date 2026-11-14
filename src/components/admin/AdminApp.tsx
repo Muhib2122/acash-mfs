@@ -420,17 +420,27 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [mintReason, setMintReason] = useState('Main Admin Initial Capital Mint');
   const [mintBusy, setMintBusy] = useState(false);
 
-  const [creditTarget, setCreditTarget] = useState('U-100001');
+  const [creditTarget, setCreditTarget] = useState('');
   const [creditAmount, setCreditAmount] = useState('');
   const [creditReason, setCreditReason] = useState('Admin Liquidity Top-Up');
   const [creditBusy, setCreditBusy] = useState(false);
 
   // Treasury: Inter-Account / Treasury Transfer state
   const [transferFrom, setTransferFrom] = useState('ADMIN-TREASURY');
-  const [transferTo, setTransferTo] = useState('A-200001');
+  const [transferTo, setTransferTo] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
   const [transferReason, setTransferReason] = useState('Float Allocation Transfer');
   const [transferBusy, setTransferBusy] = useState(false);
+
+  useEffect(() => {
+    if (users.length === 0) return;
+    setCreditTarget((prev) => (prev ? prev : users[0].accountId));
+    setTransferTo((prev) => {
+      if (prev && users.some((u) => u.accountId === prev)) return prev;
+      const preferredAgent = users.find((u) => u.role === 'A');
+      return (preferredAgent || users[0]).accountId;
+    });
+  }, [users]);
 
   // Treasury Refresh state
   const [refreshBalanceVal, setRefreshBalanceVal] = useState('');

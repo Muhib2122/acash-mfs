@@ -591,6 +591,69 @@
         }
       },
       "required": ["accountId", "name", "kyc", "updatedAt"]
+    },
+    "AccountNotification": {
+      "title": "AccountNotification",
+      "description": "Real-time per-account and broadcast alerts displayed in Customer, Agent, and Merchant notification centers.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "recipientId": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "recipientRole": {
+          "type": "string",
+          "enum": ["U", "A", "M", "ALL"]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "category": {
+          "type": "string",
+          "enum": ["transaction", "admin_alert", "fee_update", "security", "kyc"]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "success", "warning", "critical"]
+        },
+        "amount": {
+          "type": "number"
+        },
+        "txId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "txHash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "readBy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": ["id", "recipientId", "title", "message", "read", "createdAt"]
     }
   },
   "firestore": {
@@ -637,6 +700,10 @@
     "/acash_admin_activity_logs/{logId}": {
       "schema": { "$ref": "#/entities/AdminActivityLog" },
       "description": "Audit log of critical Admin operations."
+    },
+    "/acash_account_notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/AccountNotification" },
+      "description": "Real-time per-account and broadcast alerts for Customers, Agents, and Merchants."
     },
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminUser" },

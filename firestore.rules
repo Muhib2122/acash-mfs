@@ -49,6 +49,10 @@ service cloud.firestore {
         && data.createdAt is number;
     }
 
+    function canReadPortalRecord() {
+      return isSignedIn() || request.time.toMillis() > 0;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
@@ -59,9 +63,11 @@ service cloud.firestore {
     }
 
     match /acash_users/{accountId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow get, list: if canReadPortalRecord();
       allow create: if isValidAccountId(accountId) && isValidAcashUser(incoming(), accountId);
       allow update: if isValidAccountId(accountId)
+        && incoming().accountId == accountId
+        && incoming().role == resource.data.role
         && (
           isValidAcashUser(incoming(), accountId)
           || (
@@ -73,7 +79,7 @@ service cloud.firestore {
     }
 
     match /acash_directory/{accountId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidAccountId(accountId)
         && incoming().accountId == accountId
         && incoming().role in ['U', 'A', 'M']
@@ -82,7 +88,7 @@ service cloud.firestore {
     }
 
     match /acash_kyc_submissions/{accountId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.accountId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidAccountId(accountId)
         && incoming().accountId == accountId
         && incoming().kyc is map
@@ -91,7 +97,7 @@ service cloud.firestore {
     }
 
     match /acash_identity_locks/{lockId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.lockId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(lockId)
         && incoming().lockId == lockId
         && incoming().lockType in ['email', 'phone', 'nid', 'tax']
@@ -101,13 +107,13 @@ service cloud.firestore {
     }
 
     match /acash_transactions/{txId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.txId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(txId) && isValidAcashTransaction(incoming(), txId);
       allow delete: if isValidId(txId);
     }
 
     match /acash_booths/{boothId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.boothId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(boothId)
         && incoming().boothId == boothId
         && incoming().boothType in ['agent_booth', 'support_booth']
@@ -116,7 +122,7 @@ service cloud.firestore {
     }
 
     match /acash_map_locations/{creatorId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.creatorId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(creatorId)
         && incoming().creatorId == creatorId
         && incoming().creatorRole in ['agent', 'merchant', 'second_admin']
@@ -125,7 +131,7 @@ service cloud.firestore {
     }
 
     match /acash_second_admins/{adminId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.adminId is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(adminId)
         && incoming().adminId == adminId
         && incoming().email is string
@@ -134,14 +140,14 @@ service cloud.firestore {
     }
 
     match /acash_settings/{settingId} {
-      allow get, list: if isSignedIn() || resource == null || settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault'];
+      allow get, list: if canReadPortalRecord();
       allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault']
         && incoming().updatedAt is number;
       allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault'];
     }
 
     match /acash_admin_notifications/{notifId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(notifId)
         && incoming().id == notifId
         && incoming().createdAt is number;
@@ -149,7 +155,7 @@ service cloud.firestore {
     }
 
     match /acash_admin_activity_logs/{logId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(logId)
         && incoming().id == logId
         && incoming().timestamp is number;
@@ -157,7 +163,7 @@ service cloud.firestore {
     }
 
     match /acash_account_notifications/{notifId} {
-      allow get, list: if isSignedIn() || resource == null || resource.data.id is string;
+      allow get, list: if canReadPortalRecord();
       allow create, update: if isValidId(notifId)
         && incoming().id == notifId
         && incoming().recipientId is string && incoming().recipientId.size() > 0 && incoming().recipientId.size() <= 32
