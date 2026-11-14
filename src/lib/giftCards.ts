@@ -8,22 +8,12 @@ import march7Img from '../assets/images/gift_march_7_1794669658911.jpg';
 import valobasaImg from '../assets/images/gift_valobasa_dibos_1794669659155.jpg';
 import bondhuImg from '../assets/images/gift_bondhu_dibos_1794669658853.jpg';
 import shuvecchaImg from '../assets/images/gift_shuveccha_1794669660076.jpg';
-import { GiftCardThemeCategory } from '../types/acash';
+import { CustomGiftCardRecord, GiftCardParticleType, GiftCardThemeCategory } from '../types/acash';
 
 export const GIFT_CARD_FEE_BDT = 2;
 export const GIFT_CARD_MAX_WORDS = 50;
 
-export type GiftCardParticleType =
-  | 'crescent_lantern'
-  | 'coins'
-  | 'alpana_marigold'
-  | 'doves_palash'
-  | 'flag_fireworks'
-  | 'sunbeams'
-  | 'roses_hearts'
-  | 'fairy_tea'
-  | 'royal_mandala'
-  | 'festive_confetti';
+export type { GiftCardParticleType };
 
 export interface GiftCardTemplate {
   id: string;
@@ -39,6 +29,8 @@ export interface GiftCardTemplate {
   defaultMessageBn: string;
   defaultMessageEn: string;
   featured: boolean;
+  isCustomUploaded?: boolean;
+  active?: boolean;
 }
 
 export const GIFT_CARDS: GiftCardTemplate[] = [
@@ -284,8 +276,48 @@ export const GIFT_CARDS: GiftCardTemplate[] = [
   },
 ];
 
-export function getGiftCardTemplate(cardId?: string): GiftCardTemplate {
-  return GIFT_CARDS.find((c) => c.id === cardId) || GIFT_CARDS[0];
+let syncedCustomGiftCards: GiftCardTemplate[] = [];
+
+export function customRecordToTemplate(rec: CustomGiftCardRecord): GiftCardTemplate {
+  return {
+    id: rec.cardId,
+    titleBn: rec.titleBn,
+    titleEn: rec.titleEn,
+    subtitleBn: rec.subtitleBn,
+    subtitleEn: rec.subtitleEn,
+    themeCategory: rec.themeCategory,
+    imageUrl: rec.imageUrl,
+    gradientBg: rec.gradientBg || 'from-rose-900 via-red-800 to-amber-700',
+    accentHex: rec.accentHex || '#E11D48',
+    particleType: rec.particleType || 'festive_confetti',
+    defaultMessageBn: rec.defaultMessageBn,
+    defaultMessageEn: rec.defaultMessageEn,
+    featured: rec.featured,
+    isCustomUploaded: true,
+    active: rec.active,
+  };
+}
+
+export function syncCustomGiftCardsRegistry(records: CustomGiftCardRecord[]): void {
+  syncedCustomGiftCards = records
+    .filter((r) => r.active !== false)
+    .map(customRecordToTemplate);
+}
+
+export function getAllGiftCardTemplates(extraRecords?: CustomGiftCardRecord[]): GiftCardTemplate[] {
+  const customList = extraRecords
+    ? extraRecords.filter((r) => r.active !== false).map(customRecordToTemplate)
+    : syncedCustomGiftCards;
+  // Custom uploaded cards appear first in the carousel so newly uploaded seasonal cards stand out
+  return [...customList, ...GIFT_CARDS];
+}
+
+export function getGiftCardTemplate(
+  cardId?: string,
+  extraRecords?: CustomGiftCardRecord[]
+): GiftCardTemplate {
+  const catalog = getAllGiftCardTemplates(extraRecords);
+  return catalog.find((c) => c.id === cardId) || GIFT_CARDS[0];
 }
 
 export function countWords(text: string): number {

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bell, Home, MapPin, QrCode, ScanLine, User as UserIcon } from 'lucide-react';
 import { Language, UserRole } from '../../types/acash';
+import { usePortalTheme } from '../../lib/portalThemes';
 
 interface MobileBottomNavProps {
   role: UserRole;
@@ -23,6 +24,8 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   onOpenNotifications,
   onOpenProfile,
 }) => {
+  const { preset } = usePortalTheme();
+
   return (
     <nav
       aria-label="Account Mobile Navigation"
@@ -32,7 +35,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         <button
           type="button"
           onClick={onHome}
-          className="min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-indigo-600 dark:text-indigo-400 active:scale-95 transition-transform"
+          className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 ${preset.accentTextClass} active:scale-95 transition-transform`}
         >
           <Home className="w-5 h-5" />
           <span className="text-[10px] font-semibold tracking-tight">
@@ -43,7 +46,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         <button
           type="button"
           onClick={onOpenBoothMap}
-          className="min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 active:scale-95 transition-transform"
+          className="min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white active:scale-95 transition-transform"
         >
           <MapPin className="w-5 h-5" />
           <span className="text-[10px] font-medium tracking-tight">
@@ -57,7 +60,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
             type="button"
             onClick={onPrimaryQr}
             aria-label={role === 'U' ? 'Scan QR' : 'Show QR'}
-            className="-mt-4 w-13 h-13 rounded-2xl bg-gradient-to-br from-indigo-500 via-indigo-600 to-violet-700 text-white shadow-lg shadow-indigo-600/35 border border-white/25 flex flex-col items-center justify-center active:scale-95 transition-transform"
+            className={`-mt-4 w-13 h-13 rounded-2xl bg-gradient-to-br ${preset.mobileQrBtnGradient} text-white shadow-lg border border-white/25 flex flex-col items-center justify-center active:scale-95 transition-transform`}
           >
             {role === 'U' ? <ScanLine className="w-5 h-5" /> : <QrCode className="w-5 h-5" />}
             <span className="text-[9px] font-bold mt-0.5">

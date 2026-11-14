@@ -337,7 +337,7 @@
         },
         "actionType": {
           "type": "string",
-          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "account_delete", "aml_decision", "alert_settings", "security_update", "account_alert", "kyc_decision"]
+          "enum": ["fee_update", "fund_transfer", "credit_add", "bulk_status_change", "status_change", "account_delete", "aml_decision", "alert_settings", "security_update", "account_alert", "kyc_decision", "social_engagement"]
         },
         "title": {
           "type": "string",
@@ -657,6 +657,79 @@
         }
       },
       "required": ["id", "recipientId", "title", "message", "read", "createdAt"]
+    },
+    "CustomGiftCard": {
+      "title": "CustomGiftCard",
+      "description": "Admin-uploaded Bengali cultural or festive gift card template synchronized live across Customer Send Money portals.",
+      "type": "object",
+      "properties": {
+        "cardId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "titleBn": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "titleEn": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "subtitleBn": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "subtitleEn": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "themeCategory": {
+          "type": "string",
+          "enum": ["eid", "boishakh", "heritage", "love", "wishes", "celebration"]
+        },
+        "imageUrl": {
+          "type": "string",
+          "maxLength": 650000
+        },
+        "gradientBg": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "accentHex": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "particleType": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "defaultMessageBn": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "defaultMessageEn": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "featured": {
+          "type": "boolean"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": ["cardId", "titleBn", "titleEn", "themeCategory", "imageUrl", "featured", "active", "createdBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -694,7 +767,11 @@
     },
     "/acash_settings/{settingId}": {
       "schema": { "$ref": "#/entities/AcashSetting" },
-      "description": "Global Fee Engine and Admin Alert configuration documents."
+      "description": "Global Fee Engine, Portal Theme, and Admin Alert configuration documents."
+    },
+    "/acash_gift_cards/{cardId}": {
+      "schema": { "$ref": "#/entities/CustomGiftCard" },
+      "description": "Custom cultural gift cards uploaded by Admin in Social Engagement Management."
     },
     "/acash_admin_notifications/{notifId}": {
       "schema": { "$ref": "#/entities/AdminNotification" },

@@ -27,6 +27,7 @@ import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { QrModal } from '../common/QrModal';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { Wallet3DCard } from '../common/Wallet3DCard';
+import { usePortalTheme } from '../../lib/portalThemes';
 
 interface AgentPanelProps {
   user: AcashUser;
@@ -51,6 +52,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   unreadNotifications = 0,
   externalQrSignal = 0,
 }) => {
+  const { preset } = usePortalTheme();
   const [counterTab, setCounterTab] = useState<AgentTab>('cash_in');
   const [customerIdentifier, setCustomerIdentifier] = useState('');
   const [amount, setAmount] = useState('');
@@ -447,7 +449,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 }}
                 className={`py-2 px-2 text-xs font-semibold rounded-lg transition-colors truncate ${
                   counterTab === tab.id
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                    ? preset.activeTabClass
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
@@ -582,7 +584,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
               <button
                 type="submit"
                 disabled={isDisabled}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white transition-colors disabled:opacity-50 shadow-sm`}
               >
                 {t('continueBtn', lang)}
               </button>

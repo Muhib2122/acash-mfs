@@ -25,6 +25,7 @@ import {
   AcashTransaction,
   AcashUser,
   BillerId,
+  CustomGiftCardRecord,
   FeeConfig,
   GiftCardPayload,
   Language,
@@ -33,6 +34,7 @@ import {
 import { formatBdt, t } from '../../lib/i18n';
 import { calculateFeeBreakdown, executeFinancialTransaction } from '../../lib/acashService';
 import { formatGiftSignature, getGiftCardTemplate } from '../../lib/giftCards';
+import { usePortalTheme } from '../../lib/portalThemes';
 import { downloadAccountStatementPdf } from '../../lib/pdfGenerator';
 import { getVoiceMuted, playTransactionVoiceAlert, setVoiceMuted } from '../../lib/soundbox';
 import { TapAndHoldButton } from '../common/TapAndHoldButton';
@@ -58,6 +60,7 @@ interface CustomerPanelProps {
   onOpenNotifications?: () => void;
   unreadNotifications?: number;
   externalQrSignal?: number;
+  customGiftCards?: CustomGiftCardRecord[];
 }
 
 type ServiceTab = 'send_money' | 'cash_out' | 'mobile_recharge' | 'bill_pay' | 'merchant_payment';
@@ -82,7 +85,9 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   onOpenNotifications,
   unreadNotifications = 0,
   externalQrSignal = 0,
+  customGiftCards,
 }) => {
+  const { preset } = usePortalTheme();
   const [showBalance, setShowBalance] = useState(false);
   const [activeService, setActiveService] = useState<ServiceTab>('send_money');
   const [step, setStep] = useState<'form' | 'confirm' | 'done'>('form');
@@ -586,7 +591,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   }}
                   className={`acash-3d-tile min-h-[54px] px-3 py-2.5 rounded-2xl border text-left flex items-center sm:flex-col sm:items-start gap-2.5 sm:gap-2 ${
                     active
-                      ? 'bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/20'
+                      ? preset.activeTabClass
                       : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-300 dark:hover:border-slate-700'
                   }`}
                 >
@@ -594,7 +599,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
                       active
                         ? 'bg-white/20 text-white'
-                        : 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
+                        : preset.accentIconBgClass
                     }`}
                   >
                     <Icon className="w-4 h-4" />
@@ -766,7 +771,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => setQrMode('scan')}
-                      className="px-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-500 text-indigo-600 dark:text-indigo-400 transition-colors"
+                      className={`px-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${preset.accentBorderHoverClass} ${preset.accentTextClass} transition-colors`}
                       title={t('scanQr', lang)}
                     >
                       <ScanLine className="w-5 h-5" />
@@ -810,6 +815,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   lang={lang}
                   senderKycName={user.name}
                   draft={giftDraft}
+                  customCards={customGiftCards}
                   onChange={setGiftDraft}
                 />
               )}
@@ -878,7 +884,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               <button
                 type="submit"
                 disabled={isDisabledAccount}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white transition-colors disabled:opacity-50 shadow-sm`}
               >
                 {t('continueBtn', lang)}
               </button>

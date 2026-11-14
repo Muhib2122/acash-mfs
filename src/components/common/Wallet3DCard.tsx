@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { AcashUser, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
+import { usePortalTheme } from '../../lib/portalThemes';
 
 interface Wallet3DCardProps {
   user: AcashUser;
@@ -43,6 +44,7 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
 }) => {
   const cardRef = useRef<HTMLDivElement | null>(null);
   const [tilt, setTilt] = useState({ rx: 0, ry: 0, gx: 50, gy: 25, active: false });
+  const { preset } = usePortalTheme();
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'touch') return;
@@ -62,10 +64,10 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
 
   const gradientClasses =
     accentVariant === 'agent'
-      ? 'from-slate-950 via-[#131d47] to-[#0b2738]'
+      ? preset.agentCardGradient
       : accentVariant === 'merchant'
-        ? 'from-slate-950 via-[#1f1647] to-[#132145]'
-        : 'from-[#0d1226] via-[#1c1b4d] to-[#0f172a]';
+        ? preset.merchantCardGradient
+        : preset.customerCardGradient;
 
   const roleTitle =
     user.role === 'U'
@@ -85,7 +87,7 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
             ? `rotateX(${tilt.rx.toFixed(2)}deg) rotateY(${tilt.ry.toFixed(2)}deg) scale3d(1.008, 1.008, 1)`
             : 'rotateX(0deg) rotateY(0deg) scale3d(1, 1, 1)',
         }}
-        className={`acash-3d-card relative h-full rounded-3xl bg-gradient-to-br ${gradientClasses} border border-white/15 p-5 sm:p-6 text-white overflow-hidden flex flex-col justify-between`}
+        className={`acash-3d-card relative h-full rounded-3xl bg-gradient-to-br ${gradientClasses} border border-white/15 p-5 sm:p-6 text-white overflow-hidden flex flex-col justify-between transition-colors duration-300`}
       >
         {/* Dynamic radial specular glare following pointer */}
         <div
@@ -93,17 +95,17 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
           className="pointer-events-none absolute inset-0 transition-opacity duration-200"
           style={{
             opacity: tilt.active ? 0.5 : 0.22,
-            background: `radial-gradient(circle at ${tilt.gx}% ${tilt.gy}%, rgba(129, 140, 248, 0.38) 0%, rgba(56, 189, 248, 0.12) 32%, transparent 65%)`,
+            background: `radial-gradient(circle at ${tilt.gx}% ${tilt.gy}%, ${preset.glareRgba} 0%, ${preset.glareSecondaryRgba} 32%, transparent 65%)`,
           }}
         />
         {/* Crisp architectural edge rings for hardware depth */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -right-14 -top-14 w-52 h-52 rounded-full border border-indigo-400/20 bg-indigo-500/10"
+          className="pointer-events-none absolute -right-14 -top-14 w-52 h-52 rounded-full border border-white/15 bg-white/5"
         />
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -left-16 -bottom-16 w-48 h-48 rounded-full border border-emerald-400/15 bg-emerald-500/5"
+          className="pointer-events-none absolute -left-16 -bottom-16 w-48 h-48 rounded-full border border-white/10 bg-white/5"
         />
 
         {/* Top Identity Row */}

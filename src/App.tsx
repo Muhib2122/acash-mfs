@@ -10,9 +10,11 @@ import {
   AdminActivityLog,
   AdminNotification,
   AdminSession,
+  CustomGiftCardRecord,
   FeeConfig,
   Language,
   MainTreasuryVault,
+  PortalThemeConfig,
   SecondAdminProfile,
   ThemeMode,
 } from './types/acash';
@@ -30,13 +32,20 @@ import {
   subscribeToAllTransactions,
   subscribeToAllUsers,
   subscribeToBooths,
+  subscribeToCustomGiftCards,
   subscribeToFeeConfig,
   subscribeToMapLocations,
+  subscribeToPortalTheme,
   subscribeToSecondAdmins,
   subscribeToTreasuryVault,
   subscribeToUser,
   subscribeToUserTransactions,
 } from './lib/acashService';
+import {
+  DEFAULT_PORTAL_THEME_CONFIG,
+  PortalThemeProvider,
+  getPortalThemeDefinition,
+} from './lib/portalThemes';
 import {
   signOutFirebase,
   subscribeToFirebaseAuth,
@@ -188,6 +197,10 @@ export default function App() {
   const [mapLocations, setMapLocations] = useState<AcashMapLocation[]>([]);
   const [secondAdmins, setSecondAdmins] = useState<SecondAdminProfile[]>([]);
   const [treasuryVault, setTreasuryVault] = useState<MainTreasuryVault>(DEFAULT_TREASURY_VAULT);
+  const [portalThemeConfig, setPortalThemeConfig] = useState<PortalThemeConfig>(
+    DEFAULT_PORTAL_THEME_CONFIG
+  );
+  const [customGiftCards, setCustomGiftCards] = useState<CustomGiftCardRecord[]>([]);
 
   const [paymentIntent, setPaymentIntent] = useState<{
     to: string;
@@ -212,10 +225,20 @@ export default function App() {
   const seenNotifsRef = useRef<Set<string> | null>(null);
   const isOnline = useOnlineStatus();
 
+  const effectiveTheme: ThemeMode =
+    appMode === 'unified' && portalThemeConfig.surfacePreference !== 'user_choice'
+      ? portalThemeConfig.surfacePreference
+      : theme;
+
+  const activePortalTheme = useMemo(
+    () => getPortalThemeDefinition(portalThemeConfig.presetId),
+    [portalThemeConfig.presetId]
+  );
+
   // Sync Dark/Light root class
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
+    if (effectiveTheme === 'dark') {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
@@ -225,7 +248,7 @@ export default function App() {
     } catch {
       // ignore
     }
-  }, [theme]);
+  }, [effectiveTheme, theme]);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
@@ -260,12 +283,16 @@ export default function App() {
     const unsubBooths = subscribeToBooths(setBooths);
     const unsubMapLocations = subscribeToMapLocations(setMapLocations);
     const unsubSecondAdmins = subscribeToSecondAdmins(setSecondAdmins);
+    const unsubPortalTheme = subscribeToPortalTheme(setPortalThemeConfig);
+    const unsubCustomGiftCards = subscribeToCustomGiftCards(setCustomGiftCards);
     return () => {
       unsubAuth();
       unsubFee();
       unsubBooths();
       unsubMapLocations();
       unsubSecondAdmins();
+      unsubPortalTheme();
+      unsubCustomGiftCards();
     };
   }, []);
 
@@ -495,43 +522,46 @@ export default function App() {
         secondAdmins={secondAdmins}
         feeConfig={feeConfig}
         treasuryVault={treasuryVault}
+        customGiftCards={customGiftCards}
+        portalTheme={portalThemeConfig}
       />
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden">
-      {/* Calm 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
-          <BrandLogo
-            size="sm"
-            subtitle={
-              currentUser
-                ? `${
-                    currentUser.role === 'U'
-                      ? t('roleCustomer', lang)
-                      : currentUser.role === 'A'
-                        ? t('roleAgent', lang)
-                        : t('roleMerchant', lang)
-                  } · ${currentUser.accountId}`
-                : lang === 'bn'
-                  ? 'কাস্টমার, এজেন্ট ও মার্চেন্ট পোর্টাল'
-                  : 'Customer, Agent & Merchant'
-            }
-          />
+    <PortalThemeProvider config={portalThemeConfig}>
+      <div className={`min-h-screen ${activePortalTheme.pageAmbientClass} text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden`}>
+        {/* Calm 3-Zone Top Bar */}
+        <header className={`sticky top-0 z-30 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md border-b ${activePortalTheme.headerAccentBg}`}>
+          <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
+            <BrandLogo
+              size="sm"
+              subtitle={
+                currentUser
+                  ? `${
+                      currentUser.role === 'U'
+                        ? t('roleCustomer', lang)
+                        : currentUser.role === 'A'
+                          ? t('roleAgent', lang)
+                          : t('roleMerchant', lang)
+                    } · ${currentUser.accountId}`
+                  : lang === 'bn'
+                    ? 'কাস্টমার, এজেন্ট ও মার্চেন্ট পোর্টাল'
+                    : 'Customer, Agent & Merchant'
+              }
+            />
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {/* Get Mobile App */}
-            <button
-              type="button"
-              onClick={() => setGetAppOpen(true)}
-              className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-xs"
-              title={lang === 'bn' ? 'মোবাইল অ্যাপ নিন' : 'Get App'}
-            >
-              <Smartphone className="w-4 h-4 shrink-0" />
-              <span>{lang === 'bn' ? 'অ্যাপ নিন' : 'Get App'}</span>
-            </button>
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              {/* Get Mobile App */}
+              <button
+                type="button"
+                onClick={() => setGetAppOpen(true)}
+                className={`min-h-[40px] px-2.5 sm:px-3 rounded-xl ${activePortalTheme.headerBtnBg} text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-xs`}
+                title={lang === 'bn' ? 'মোবাইল অ্যাপ নিন' : 'Get App'}
+              >
+                <Smartphone className="w-4 h-4 shrink-0" />
+                <span>{lang === 'bn' ? 'অ্যাপ নিন' : 'Get App'}</span>
+              </button>
 
             {/* Agent & Support Booth Map */}
             <button
@@ -663,6 +693,17 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {portalThemeConfig.bannerEnabled &&
+        (portalThemeConfig.customBannerBn || portalThemeConfig.customBannerEn) && (
+          <div
+            className={`bg-gradient-to-r ${activePortalTheme.bannerGradientClass} text-white px-4 py-2 text-center text-xs font-semibold shadow-xs`}
+          >
+            {lang === 'bn'
+              ? portalThemeConfig.customBannerBn || portalThemeConfig.customBannerEn
+              : portalThemeConfig.customBannerEn || portalThemeConfig.customBannerBn}
+          </div>
+        )}
 
       {currentUser && profileOpen && (
         <ProfileModal
@@ -836,6 +877,7 @@ export default function App() {
             onOpenNotifications={() => setNotifModalOpen(true)}
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
+            customGiftCards={customGiftCards}
           />
         ) : currentUser.role === 'A' ? (
           <AgentPanel
@@ -883,6 +925,7 @@ export default function App() {
           }}
         />
       )}
-    </div>
+      </div>
+    </PortalThemeProvider>
   );
 }

@@ -166,6 +166,7 @@ export interface AdminNotification {
     | 'ledger'
     | 'activity'
     | 'booths'
+    | 'social_engagement'
     | 'admin_profile';
 }
 
@@ -204,7 +205,8 @@ export type AdminActivityType =
   | 'alert_settings'
   | 'security_update'
   | 'account_alert'
-  | 'kyc_decision';
+  | 'kyc_decision'
+  | 'social_engagement';
 
 export interface AdminActivityLog {
   id: string;
@@ -224,6 +226,59 @@ export type GiftCardThemeCategory =
   | 'love'
   | 'wishes'
   | 'celebration';
+
+export type GiftCardParticleType =
+  | 'crescent_lantern'
+  | 'coins'
+  | 'alpana_marigold'
+  | 'doves_palash'
+  | 'flag_fireworks'
+  | 'sunbeams'
+  | 'roses_hearts'
+  | 'fairy_tea'
+  | 'royal_mandala'
+  | 'festive_confetti';
+
+export interface CustomGiftCardRecord {
+  cardId: string;
+  titleBn: string;
+  titleEn: string;
+  subtitleBn: string;
+  subtitleEn: string;
+  themeCategory: GiftCardThemeCategory;
+  imageUrl: string;
+  gradientBg: string;
+  accentHex: string;
+  particleType: GiftCardParticleType;
+  defaultMessageBn: string;
+  defaultMessageEn: string;
+  featured: boolean;
+  active: boolean;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type PortalThemePresetId =
+  | 'classic_indigo'
+  | 'bkash_crimson'
+  | 'emerald_sovereign'
+  | 'boishakh_terracotta'
+  | 'royal_midnight'
+  | 'oceanic_teal';
+
+export type PortalThemeSurfacePreference = 'user_choice' | 'light' | 'dark';
+
+export interface PortalThemeConfig {
+  presetId: PortalThemePresetId;
+  customAccentHex?: string;
+  bannerEnabled: boolean;
+  customBannerBn?: string;
+  customBannerEn?: string;
+  surfacePreference: PortalThemeSurfacePreference;
+  updatedAt: number;
+  updatedBy: string;
+}
 
 export interface GiftCardPayload {
   cardId: string;

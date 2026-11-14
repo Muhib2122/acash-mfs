@@ -46,6 +46,7 @@ import {
   BillerId,
   BoothStatus,
   CreatorMapRole,
+  CustomGiftCardRecord,
   FeeBreakdown,
   FeeConfig,
   GiftCardPayload,
@@ -55,6 +56,9 @@ import {
   MainAdminCredentialConfig,
   MainTreasuryVault,
   OperatorId,
+  PortalThemeConfig,
+  PortalThemePresetId,
+  PortalThemeSurfacePreference,
   ReferralSource,
   SecondAdminProfile,
   TransactionType,
@@ -63,7 +67,14 @@ import {
   UserMapLocation,
   UserRole,
 } from '../types/acash';
-import { countWords, GIFT_CARD_FEE_BDT, GIFT_CARD_MAX_WORDS } from './giftCards';
+import {
+  clampToMaxWords,
+  countWords,
+  GIFT_CARD_FEE_BDT,
+  GIFT_CARD_MAX_WORDS,
+  syncCustomGiftCardsRegistry,
+} from './giftCards';
+import { DEFAULT_PORTAL_THEME_CONFIG, PORTAL_THEME_PRESETS } from './portalThemes';
 
 const USERS_COL = 'acash_users';
 const KYC_SUBMISSIONS_COL = 'acash_kyc_submissions';
@@ -74,6 +85,7 @@ const BOOTHS_COL = 'acash_booths';
 const MAP_LOCATIONS_COL = 'acash_map_locations';
 const SECOND_ADMINS_COL = 'acash_second_admins';
 const SETTINGS_COL = 'acash_settings';
+const GIFT_CARDS_COL = 'acash_gift_cards';
 const ADMIN_NOTIF_COL = 'acash_admin_notifications';
 const ACCOUNT_NOTIF_COL = 'acash_account_notifications';
 const ADMIN_ACTIVITY_COL = 'acash_admin_activity_logs';
@@ -81,6 +93,7 @@ const FEE_DOC_ID = 'fee_config';
 const ADMIN_ALERT_DOC_ID = 'admin_alert';
 const MAIN_ADMIN_CREDS_DOC_ID = 'main_admin_credentials';
 const TREASURY_VAULT_DOC_ID = 'treasury_vault';
+const PORTAL_THEME_DOC_ID = 'portal_theme';
 const LOCAL_DB_KEY = 'acash_local_db_v1';
 const BOTS_PURGED_FLAG_KEY = 'acash_legacy_bots_purged_v1';
 const LAST_REG_TS_KEY = 'acash_last_registration_ts';
@@ -578,6 +591,8 @@ interface LocalStoreState {
   adminAlertEmail: string;
   mainAdminCredentials: MainAdminCredentialConfig;
   treasuryVault: MainTreasuryVault;
+  customGiftCards?: Record<string, CustomGiftCardRecord>;
+  portalTheme?: PortalThemeConfig;
 }
 
 let firestoreBackendMode: 'firestore' | 'local_sync' = 'firestore';
@@ -975,6 +990,8 @@ function readLocalStore(): LocalStoreState {
         adminAlertEmail: normalizedAlertEmail,
         mainAdminCredentials: storedCreds,
         treasuryVault: normalizeTreasuryVault(parsed.treasuryVault),
+        customGiftCards: parsed.customGiftCards || {},
+        portalTheme: parsed.portalTheme || DEFAULT_PORTAL_THEME_CONFIG,
       };
       if (purgeLegacyBotRecords(hydrated)) {
         writeLocalStore(hydrated, false);
@@ -997,6 +1014,8 @@ function readLocalStore(): LocalStoreState {
     adminAlertEmail: DEFAULT_ADMIN_ALERT_EMAIL,
     mainAdminCredentials: defaultCreds,
     treasuryVault: normalizeTreasuryVault(DEFAULT_TREASURY_VAULT),
+    customGiftCards: {},
+    portalTheme: DEFAULT_PORTAL_THEME_CONFIG,
   };
   writeLocalStore(initial, false);
   return initial;
@@ -6724,5 +6743,352 @@ export async function saveSecondAdminProfileAndLocation(params: {
 
   return updated;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Social Engagement Management: Custom Gift Cards & Live Portal Theme       */
+/* -------------------------------------------------------------------------- */
+
+function normalizePortalThemeConfig(raw?: Partial<PortalThemeConfig> | null): PortalThemeConfig {
+  const src = raw || {};
+  const validPreset = PORTAL_THEME_PRESETS.some((p) => p.id === src.presetId)
+    ? (src.presetId as PortalThemePresetId)
+    : 'classic_indigo';
+  const surfacePreference: PortalThemeSurfacePreference =
+    src.surfacePreference === 'light' || src.surfacePreference === 'dark'
+      ? src.surfacePreference
+      : 'user_choice';
+
+  return {
+    presetId: validPreset,
+    ...(typeof src.customAccentHex === 'string' && src.customAccentHex
+      ? { customAccentHex: src.customAccentHex.slice(0, 20) }
+      : {}),
+    bannerEnabled: Boolean(src.bannerEnabled),
+    customBannerBn: typeof src.customBannerBn === 'string' ? src.customBannerBn.slice(0, 180) : '',
+    customBannerEn: typeof src.customBannerEn === 'string' ? src.customBannerEn.slice(0, 180) : '',
+    surfacePreference,
+    updatedAt: typeof src.updatedAt === 'number' ? src.updatedAt : Date.now(),
+    updatedBy:
+      typeof src.updatedBy === 'string' && src.updatedBy ? src.updatedBy : MAIN_ADMIN_EMAIL,
+  };
+}
+
+export function subscribeToPortalTheme(
+  callback: (theme: PortalThemeConfig) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    callback(normalizePortalThemeConfig(readLocalStore().portalTheme));
+  };
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  try {
+    unsubFs = onSnapshot(
+      doc(db, SETTINGS_COL, PORTAL_THEME_DOC_ID),
+      (snap) => {
+        if (snap.exists()) {
+          const cfg = normalizePortalThemeConfig(snap.data() as Partial<PortalThemeConfig>);
+          const store = readLocalStore();
+          store.portalTheme = cfg;
+          writeLocalStore(store, false);
+          callback(cfg);
+        }
+      },
+      () => {
+        emitLocal();
+      }
+    );
+  } catch {
+    // ignore
+  }
+
+  return () => {
+    unsubLocal();
+    unsubFs();
+  };
+}
+
+export function subscribeToCustomGiftCards(
+  callback: (cards: CustomGiftCardRecord[]) => void
+): Unsubscribe {
+  const emitLocal = () => {
+    const map = readLocalStore().customGiftCards || {};
+    const list = Object.values(map).sort((a, b) => b.createdAt - a.createdAt);
+    syncCustomGiftCardsRegistry(list);
+    callback(list);
+  };
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+
+  let unsubFs: Unsubscribe = () => {};
+  try {
+    unsubFs = onSnapshot(
+      collection(db, GIFT_CARDS_COL),
+      (snap) => {
+        const fsCards = snap.docs.map((d) => d.data() as CustomGiftCardRecord);
+        const store = readLocalStore();
+        const nextMap: Record<string, CustomGiftCardRecord> = {};
+        for (const c of fsCards) {
+          if (c && c.cardId) {
+            nextMap[c.cardId] = c;
+          }
+        }
+        store.customGiftCards = nextMap;
+        writeLocalStore(store, false);
+        const sorted = Object.values(nextMap).sort((a, b) => b.createdAt - a.createdAt);
+        syncCustomGiftCardsRegistry(sorted);
+        callback(sorted);
+      },
+      () => {
+        emitLocal();
+      }
+    );
+  } catch {
+    // ignore
+  }
+
+  return () => {
+    unsubLocal();
+    unsubFs();
+  };
+}
+
+export async function adminUpdatePortalThemeConfig(params: {
+  presetId: PortalThemePresetId;
+  bannerEnabled: boolean;
+  customBannerBn?: string;
+  customBannerEn?: string;
+  surfacePreference: PortalThemeSurfacePreference;
+  adminEmail: string;
+}): Promise<PortalThemeConfig> {
+  const now = Date.now();
+  const cfg: PortalThemeConfig = normalizePortalThemeConfig({
+    presetId: params.presetId,
+    bannerEnabled: params.bannerEnabled,
+    customBannerBn: params.customBannerBn?.trim() || '',
+    customBannerEn: params.customBannerEn?.trim() || '',
+    surfacePreference: params.surfacePreference,
+    updatedAt: now,
+    updatedBy: params.adminEmail,
+  });
+
+  const presetMeta =
+    PORTAL_THEME_PRESETS.find((p) => p.id === cfg.presetId) || PORTAL_THEME_PRESETS[0];
+
+  const store = readLocalStore();
+  store.portalTheme = cfg;
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-THEME',
+    actionType: 'social_engagement',
+    title: `Account Portal Theme Updated · ${presetMeta.nameEn}`,
+    details: `Applied "${presetMeta.nameEn}" theme (${cfg.surfacePreference}) across Customer, Agent & Merchant portals.${cfg.bannerEnabled && (cfg.customBannerEn || cfg.customBannerBn) ? ` Live Ribbon: "${cfg.customBannerBn || cfg.customBannerEn}"` : ''}`,
+    actorEmail: params.adminEmail,
+    timestamp: now,
+  });
+  store.activityLogs[actEntry.id] = actEntry;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      setDoc(doc(db, SETTINGS_COL, PORTAL_THEME_DOC_ID), stripUndefined(cfg)),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.WRITE, `${SETTINGS_COL}/${PORTAL_THEME_DOC_ID}`);
+    }
+    throw err;
+  }
+
+  return cfg;
+}
+
+export async function adminSaveCustomGiftCard(params: {
+  cardId?: string;
+  titleBn: string;
+  titleEn: string;
+  subtitleBn?: string;
+  subtitleEn?: string;
+  themeCategory: CustomGiftCardRecord['themeCategory'];
+  imageUrl: string;
+  gradientBg?: string;
+  accentHex?: string;
+  particleType?: CustomGiftCardRecord['particleType'];
+  defaultMessageBn: string;
+  defaultMessageEn: string;
+  featured?: boolean;
+  active?: boolean;
+  adminEmail: string;
+}): Promise<CustomGiftCardRecord> {
+  const now = Date.now();
+  const titleBn = params.titleBn.trim().slice(0, 120);
+  const titleEn = params.titleEn.trim().slice(0, 120);
+  const imageUrl = params.imageUrl.trim();
+  if (!titleBn || !titleEn) {
+    throw new Error('Both Bangla and English card titles are required.');
+  }
+  if (!imageUrl || imageUrl.length > 640000) {
+    throw new Error('Please upload a valid card image (compressed under 600KB).');
+  }
+
+  const cardId =
+    params.cardId?.trim() ||
+    `custom_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+  const store = readLocalStore();
+  const existing = store.customGiftCards?.[cardId];
+
+  const record: CustomGiftCardRecord = {
+    cardId,
+    titleBn,
+    titleEn,
+    subtitleBn: (params.subtitleBn?.trim() || 'বিশেষ সাংস্কৃতিক উপহার').slice(0, 180),
+    subtitleEn: (params.subtitleEn?.trim() || 'Special Cultural Gift').slice(0, 180),
+    themeCategory: params.themeCategory,
+    imageUrl,
+    gradientBg: (params.gradientBg || 'from-rose-900 via-red-800 to-amber-700').slice(0, 120),
+    accentHex: (params.accentHex || '#E11D48').slice(0, 20),
+    particleType: params.particleType || 'festive_confetti',
+    defaultMessageBn: clampToMaxWords(
+      params.defaultMessageBn.trim() || `${titleBn}-এর আন্তরিক শুভেচ্ছা ও ভালোবাসা রইল।`,
+      GIFT_CARD_MAX_WORDS
+    ).slice(0, 600),
+    defaultMessageEn: clampToMaxWords(
+      params.defaultMessageEn.trim() || `Sending warm wishes and joy on ${titleEn}!`,
+      GIFT_CARD_MAX_WORDS
+    ).slice(0, 600),
+    featured: params.featured ?? true,
+    active: params.active ?? true,
+    createdBy: existing?.createdBy || params.adminEmail,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+
+  store.customGiftCards = {
+    ...(store.customGiftCards || {}),
+    [cardId]: record,
+  };
+  syncCustomGiftCardsRegistry(Object.values(store.customGiftCards));
+
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-CARD',
+    actionType: 'social_engagement',
+    title: existing
+      ? `Gift Card Updated · ${record.titleBn}`
+      : `New Gift Card Uploaded · ${record.titleBn}`,
+    details: `Published custom cultural card "${record.titleBn} (${record.titleEn})" under ${record.themeCategory}. Active: ${record.active ? 'Yes' : 'Hidden'}.`,
+    actorEmail: params.adminEmail,
+    targetIds: [cardId],
+    timestamp: now,
+  });
+  store.activityLogs[actEntry.id] = actEntry;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      setDoc(doc(db, GIFT_CARDS_COL, cardId), record),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.WRITE, `${GIFT_CARDS_COL}/${cardId}`);
+    }
+    throw err;
+  }
+
+  return record;
+}
+
+export async function adminToggleCustomGiftCardStatus(
+  cardId: string,
+  updates: { active?: boolean; featured?: boolean },
+  adminEmail: string
+): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let existing = store.customGiftCards?.[cardId];
+  if (!existing) {
+    try {
+      const snap = await getDoc(doc(db, GIFT_CARDS_COL, cardId));
+      if (snap.exists()) {
+        existing = snap.data() as CustomGiftCardRecord;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (!existing) {
+    throw new Error('Custom gift card not found.');
+  }
+  const updated: CustomGiftCardRecord = {
+    ...existing,
+    ...(typeof updates.active === 'boolean' ? { active: updates.active } : {}),
+    ...(typeof updates.featured === 'boolean' ? { featured: updates.featured } : {}),
+    updatedAt: now,
+  };
+  store.customGiftCards = {
+    ...(store.customGiftCards || {}),
+    [cardId]: updated,
+  };
+  syncCustomGiftCardsRegistry(Object.values(store.customGiftCards));
+  writeLocalStore(store, true);
+
+  try {
+    await setDoc(doc(db, GIFT_CARDS_COL, cardId), updated, { merge: true });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.UPDATE, `${GIFT_CARDS_COL}/${cardId}`);
+    }
+    throw err;
+  }
+  void adminEmail;
+}
+
+export async function adminDeleteCustomGiftCard(
+  cardId: string,
+  adminEmail: string
+): Promise<void> {
+  const now = Date.now();
+  const store = readLocalStore();
+  const existing = store.customGiftCards?.[cardId];
+  if (store.customGiftCards?.[cardId]) {
+    delete store.customGiftCards[cardId];
+  }
+  syncCustomGiftCardsRegistry(Object.values(store.customGiftCards || {}));
+
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-CARD-DEL',
+    actionType: 'social_engagement',
+    title: `Custom Gift Card Deleted · ${existing?.titleBn || cardId}`,
+    details: `Removed uploaded cultural card "${existing?.titleEn || cardId}" from Send Money gallery.`,
+    actorEmail: adminEmail,
+    targetIds: [cardId],
+    timestamp: now,
+  });
+  store.activityLogs[actEntry.id] = actEntry;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      deleteDoc(doc(db, GIFT_CARDS_COL, cardId)),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.DELETE, `${GIFT_CARDS_COL}/${cardId}`);
+    }
+    throw err;
+  }
+}
+
 
 

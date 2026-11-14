@@ -38,6 +38,7 @@ import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { ACASH_MAIN_LOGO_SRC } from '../common/BrandLogo';
 import { Wallet3DCard } from '../common/Wallet3DCard';
+import { usePortalTheme } from '../../lib/portalThemes';
 
 interface MerchantPanelProps {
   user: AcashUser;
@@ -62,6 +63,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   unreadNotifications = 0,
   externalQrSignal = 0,
 }) => {
+  const { preset } = usePortalTheme();
   const [activeTab, setActiveTab] = useState<MerchantTab>('checkout');
   const [statementQuery, setStatementQuery] = useState('');
   const [cashierMode, setCashierMode] = useState(false);
@@ -496,7 +498,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
           onClick={() => setActiveTab('checkout')}
           className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 ${
             activeTab === 'checkout'
-              ? 'bg-indigo-600 border-indigo-600 text-white'
+              ? preset.activeTabClass
               : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
@@ -510,7 +512,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() => setActiveTab('cashout')}
               className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'cashout'
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -522,7 +524,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() => setActiveTab('refunds')}
               className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'refunds'
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -534,7 +536,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() => setActiveTab('b2b')}
               className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'b2b'
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -546,7 +548,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() => setActiveTab('analytics')}
               className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'analytics'
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -558,7 +560,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() => setActiveTab('statement')}
               className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'statement'
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
+                  ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -925,7 +927,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                 <button
                   type="submit"
                   disabled={isDisabled}
-                  className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white disabled:opacity-50 shadow-sm"
+                  className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white disabled:opacity-50 shadow-sm`}
                 >
                   {t('continueBtn', lang)}
                 </button>
@@ -1182,7 +1184,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                 <button
                   type="submit"
                   disabled={isDisabled}
-                  className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white disabled:opacity-50 shadow-sm"
+                  className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white disabled:opacity-50 shadow-sm`}
                 >
                   {t('continueBtn', lang)}
                 </button>
@@ -1370,7 +1372,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               <button
                 type="submit"
                 disabled={isDisabled}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white disabled:opacity-50 shadow-sm"
+                className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white disabled:opacity-50 shadow-sm`}
               >
                 {t('continueBtn', lang)}
               </button>

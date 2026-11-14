@@ -60,6 +60,20 @@ service cloud.firestore {
         ));
     }
 
+    function isValidCustomGiftCard(data, cardId) {
+      return data.keys().hasAll(['cardId', 'titleBn', 'titleEn', 'themeCategory', 'imageUrl', 'featured', 'active', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.cardId == cardId
+        && data.titleBn is string && data.titleBn.size() >= 1 && data.titleBn.size() <= 120
+        && data.titleEn is string && data.titleEn.size() >= 1 && data.titleEn.size() <= 120
+        && data.themeCategory in ['eid', 'boishakh', 'heritage', 'love', 'wishes', 'celebration']
+        && data.imageUrl is string && data.imageUrl.size() > 0 && data.imageUrl.size() <= 650000
+        && data.featured is bool
+        && data.active is bool
+        && data.createdBy is string && data.createdBy.size() <= 160
+        && data.createdAt is number
+        && data.updatedAt is number;
+    }
+
     function canReadPortalRecord() {
       return isSignedIn() || request.time.toMillis() > 0;
     }
@@ -152,9 +166,15 @@ service cloud.firestore {
 
     match /acash_settings/{settingId} {
       allow get, list: if canReadPortalRecord();
-      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault']
+      allow create, update: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme']
         && incoming().updatedAt is number;
-      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault'];
+      allow delete: if settingId in ['fee_config', 'admin_alert', 'main_admin_credentials', 'treasury_vault', 'portal_theme'];
+    }
+
+    match /acash_gift_cards/{cardId} {
+      allow get, list: if canReadPortalRecord();
+      allow create, update: if isValidId(cardId) && isValidCustomGiftCard(incoming(), cardId);
+      allow delete: if isValidId(cardId);
     }
 
     match /acash_admin_notifications/{notifId} {

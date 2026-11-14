@@ -14,18 +14,19 @@ import {
 } from 'lucide-react';
 import {
   AcashTransaction,
+  CustomGiftCardRecord,
   GiftCardPayload,
   GiftCardThemeCategory,
   Language,
 } from '../../types/acash';
 import {
-  GIFT_CARDS,
   GIFT_CARD_FEE_BDT,
   GIFT_CARD_MAX_WORDS,
   GiftCardTemplate,
   clampToMaxWords,
   countWords,
   formatGiftSignature,
+  getAllGiftCardTemplates,
   getGiftCardTemplate,
 } from '../../lib/giftCards';
 import { formatBdt } from '../../lib/i18n';
@@ -126,6 +127,10 @@ export const GiftCardArtFrame: React.FC<{
 }> = ({ template, lang, compact = false, className = '' }) => {
   const [imgFailed, setImgFailed] = useState(false);
 
+  useEffect(() => {
+    setImgFailed(false);
+  }, [template.imageUrl]);
+
   return (
     <div
       className={`relative overflow-hidden bg-gradient-to-br ${template.gradientBg} ${className}`}
@@ -179,6 +184,7 @@ interface GiftCardSelectorStripProps {
   lang: Language;
   senderKycName: string;
   draft: GiftCardDraftState;
+  customCards?: CustomGiftCardRecord[];
   onChange: (next: GiftCardDraftState) => void;
 }
 
@@ -186,13 +192,18 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
   lang,
   senderKycName,
   draft,
+  customCards,
   onChange,
 }) => {
   const [viewAllOpen, setViewAllOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | GiftCardThemeCategory>('ALL');
 
-  const selectedTemplate = useMemo(() => getGiftCardTemplate(draft.cardId), [draft.cardId]);
+  const catalog = useMemo(() => getAllGiftCardTemplates(customCards), [customCards]);
+  const selectedTemplate = useMemo(
+    () => getGiftCardTemplate(draft.cardId, customCards),
+    [draft.cardId, customCards]
+  );
   const wordCount = useMemo(() => countWords(draft.customMessage), [draft.customMessage]);
 
   const effectiveMessage = draft.customMessage.trim()
@@ -207,9 +218,9 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
   );
 
   const filteredGallery = useMemo(() => {
-    if (categoryFilter === 'ALL') return GIFT_CARDS;
-    return GIFT_CARDS.filter((c) => c.themeCategory === categoryFilter);
-  }, [categoryFilter]);
+    if (categoryFilter === 'ALL') return catalog;
+    return catalog.filter((c) => c.themeCategory === categoryFilter);
+  }, [categoryFilter, catalog]);
 
   const selectCard = (cardId: string) => {
     onChange({
@@ -262,14 +273,14 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
             onClick={() => setViewAllOpen(true)}
             className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] font-semibold text-white transition-colors whitespace-nowrap shadow-xs"
           >
-            {lang === 'bn' ? `সব দেখুন (${GIFT_CARDS.length})` : `View all (${GIFT_CARDS.length})`}
+            {lang === 'bn' ? `সব দেখুন (${catalog.length})` : `View all (${catalog.length})`}
           </button>
         </div>
       </div>
 
       {/* Horizontal Portrait Card Carousel */}
       <div className="flex items-stretch gap-2.5 overflow-x-auto pb-1.5 snap-x">
-        {GIFT_CARDS.slice(0, 10).map((card) => {
+        {catalog.slice(0, 14).map((card) => {
           const isSelected = draft.enabled && draft.cardId === card.id;
           return (
             <button
@@ -430,8 +441,8 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
               <div>
                 <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
                   {lang === 'bn'
-                    ? 'সাংস্কৃতিক উপহার কার্ড গ্যালারি (১৬টি কার্ড)'
-                    : 'Bengali Cultural Heritage Gift Cards'}
+                    ? `সাংস্কৃতিক উপহার কার্ড গ্যালারি (${catalog.length}টি কার্ড)`
+                    : `Bengali Cultural Heritage Gift Cards (${catalog.length})`}
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   {lang === 'bn'

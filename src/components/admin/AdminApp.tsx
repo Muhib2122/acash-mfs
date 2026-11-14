@@ -42,6 +42,7 @@ import {
   Command,
   Download,
   Gift,
+  Sparkles,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -54,9 +55,11 @@ import {
   AdminSession,
   BoothStatus,
   BoothType,
+  CustomGiftCardRecord,
   FeeConfig,
   Language,
   MainTreasuryVault,
+  PortalThemeConfig,
   SecondAdminProfile,
   SendMoneyChargeMode,
   ThemeMode,
@@ -126,6 +129,7 @@ import {
   exportLedgerToCsv,
   exportUsersToCsv,
 } from './AdminExecutiveWidgets';
+import { AdminSocialEngagementPanel } from './AdminSocialEngagementPanel';
 
 interface AdminAppProps {
   lang: Language;
@@ -147,6 +151,8 @@ interface AdminAppProps {
   secondAdmins: SecondAdminProfile[];
   feeConfig: FeeConfig;
   treasuryVault: MainTreasuryVault;
+  customGiftCards: CustomGiftCardRecord[];
+  portalTheme: PortalThemeConfig;
 }
 
 type AdminSection =
@@ -155,6 +161,7 @@ type AdminSection =
   | 'treasury'
   | 'approvals'
   | 'kyc_queue'
+  | 'social_engagement'
   | 'fees'
   | 'ledger'
   | 'activity'
@@ -216,6 +223,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   secondAdmins,
   feeConfig,
   treasuryVault,
+  customGiftCards,
+  portalTheme,
 }) => {
   const [adminEmail, setAdminEmail] = useState(DEFAULT_ADMIN_ALERT_EMAIL);
   const [adminPasscode, setAdminPasscode] = useState('');
@@ -1841,6 +1850,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     ? `লাইভ ম্যাপ ও বুথ (${booths.length + creatorLocations.filter((c) => c.isVisible).length})`
                     : `Live Map & Booths (${booths.length + creatorLocations.filter((c) => c.isVisible).length})`,
                 icon: MapPin,
+              },
+              {
+                id: 'social_engagement',
+                label:
+                  lang === 'bn'
+                    ? 'সোশ্যাল এনগেজমেন্ট'
+                    : 'Social Engagement',
+                icon: Sparkles,
               },
               ...(!isCurrentMainAdmin
                 ? [
@@ -3634,6 +3651,19 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             />
           )}
 
+          {/* SECTION: Social Engagement Management */}
+          {section === 'social_engagement' && (
+            <AdminSocialEngagementPanel
+              lang={lang}
+              adminEmail={adminSession.adminEmail}
+              transactions={transactions}
+              customGiftCards={customGiftCards}
+              portalTheme={portalTheme}
+              onInspectAccount={(accId) => setViewedAccountId(accId)}
+              onFeedback={(msg) => setFeedbackMsg(msg)}
+            />
+          )}
+
           {/* SECTION: Dynamic Fee Engine */}
           {section === 'fees' && (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
@@ -4970,6 +5000,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       { id: 'status_change', label: 'Account Status' },
                       { id: 'aml_decision', label: 'AML Decisions' },
                       { id: 'kyc_decision', label: 'KYC Reviews' },
+                      { id: 'social_engagement', label: 'Social Engagement' },
                       { id: 'account_alert', label: 'Account Alerts' },
                       { id: 'alert_settings', label: 'Alert Settings' },
                     ] as const
@@ -5007,9 +5038,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 ? 'bg-amber-50 dark:bg-amber-500/15 border-amber-200 dark:border-amber-500/35 text-amber-800 dark:text-amber-200'
                                 : log.actionType === 'status_change'
                                   ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-200 dark:border-rose-500/35 text-rose-700 dark:text-rose-200'
-                                  : log.actionType === 'aml_decision'
-                                    ? 'bg-violet-50 dark:bg-violet-500/15 border-violet-200 dark:border-violet-500/35 text-violet-700 dark:text-violet-200'
-                                    : 'bg-slate-100 dark:bg-slate-500/15 border-slate-200 dark:border-slate-500/35 text-slate-700 dark:text-slate-200';
+                                  : log.actionType === 'social_engagement'
+                                    ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-200 dark:border-rose-500/35 text-rose-700 dark:text-rose-200'
+                                    : log.actionType === 'aml_decision'
+                                      ? 'bg-violet-50 dark:bg-violet-500/15 border-violet-200 dark:border-violet-500/35 text-violet-700 dark:text-violet-200'
+                                      : 'bg-slate-100 dark:bg-slate-500/15 border-slate-200 dark:border-slate-500/35 text-slate-700 dark:text-slate-200';
 
                       return (
                         <div
@@ -6157,6 +6190,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           { id: 'approvals', label: `${t('highValueQueue', lang)} (${metrics.pendingHighValue.length})` },
           { id: 'kyc_queue', label: `KYC Queue (${metrics.pendingKycCount})` },
           { id: 'booths', label: 'Live Map & Booths' },
+          { id: 'social_engagement', label: 'Social Engagement Management' },
           { id: 'fees', label: t('feeEngine', lang) },
           { id: 'ledger', label: t('globalLedger', lang) },
           { id: 'activity', label: `Activity Log (${activityLogs.length})` },
