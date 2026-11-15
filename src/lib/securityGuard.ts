@@ -300,9 +300,7 @@ export async function signSessionPayload(params: {
   email: string;
   loggedInAt: number;
 }): Promise<string> {
-  const originHint =
-    typeof window !== 'undefined' && window.location?.host ? window.location.host : 'acash.local';
-  const raw = `${APP_SIGNING_PEPPER}|${originHint}|${params.id}|${params.role}|${params.email.toLowerCase()}|${params.loggedInAt}`;
+  const raw = `${APP_SIGNING_PEPPER}|${params.id}|${params.role}|${params.email.toLowerCase()}|${params.loggedInAt}`;
   return sha256HexString(raw);
 }
 
@@ -320,7 +318,14 @@ export async function verifySessionPayload(params: {
     email: params.email,
     loggedInAt: params.loggedInAt,
   });
-  return timingSafeEqual(expected, params.integritySig);
+  if (timingSafeEqual(expected, params.integritySig)) {
+    return true;
+  }
+  const originHint =
+    typeof window !== 'undefined' && window.location?.host ? window.location.host : 'acash.local';
+  const legacyRaw = `${APP_SIGNING_PEPPER}|${originHint}|${params.id}|${params.role}|${params.email.toLowerCase()}|${params.loggedInAt}`;
+  const legacyExpected = await sha256HexString(legacyRaw);
+  return timingSafeEqual(legacyExpected, params.integritySig);
 }
 
 // ============================================================

@@ -53,6 +53,8 @@ service cloud.firestore {
             )
           )
         ))
+        && (!('totpSecret' in data) || (data.totpSecret is string && data.totpSecret.size() >= 16 && data.totpSecret.size() <= 64))
+        && (!('totpEnrolledAt' in data) || data.totpEnrolledAt is number)
         && (!('profilePhotoUrl' in data) || isSafeImageString(data.profilePhotoUrl, 550000))
         && data.balance is number && data.balance >= 0 && data.balance <= 100000000
         && data.commissionBalance is number && data.commissionBalance >= 0 && data.commissionBalance <= 50000000

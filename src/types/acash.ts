@@ -146,6 +146,8 @@ export interface AcashUser {
   pinHash: string;
   staffPinHash?: string; // for Merchant Cashier Mode
   webauthnCredentials?: WebAuthnCredentialRecord[];
+  totpSecret?: string; // Base32 RFC 6238 secret for Google Authenticator / TOTP apps
+  totpEnrolledAt?: number;
   profilePhotoUrl?: string;
   kyc?: KycInfo;
   mapLocation?: UserMapLocation;

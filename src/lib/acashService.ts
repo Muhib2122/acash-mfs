@@ -2,6 +2,7 @@ import {
   arrayUnion,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -6204,6 +6205,111 @@ export async function removeUserWebAuthnPasskey(
   } catch {
     firestoreBackendMode = 'local_sync';
   }
+
+  return updated;
+}
+
+export async function enrollUserTotpSecret(params: {
+  accountId: string;
+  secretBase32: string;
+}): Promise<AcashUser> {
+  const cleanSecret = params.secretBase32.toUpperCase().replace(/[^A-Z2-7]/g, '');
+  if (cleanSecret.length < 16 || cleanSecret.length > 64) {
+    throw new Error('Invalid Authenticator TOTP secret key.');
+  }
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[params.accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const updated: AcashUser = stripUndefined({
+    ...user,
+    totpSecret: cleanSecret,
+    totpEnrolledAt: now,
+    lastActiveAt: now,
+  });
+
+  store.users[params.accountId] = updated;
+  writeLocalStore(store, true);
+
+  try {
+    await setDoc(doc(db, USERS_COL, params.accountId), updated, { merge: true });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    console.warn('Could not sync TOTP secret to Firestore:', err);
+  }
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: params.accountId,
+      recipientRole: user.role,
+      title: 'Google Authenticator Enabled',
+      message:
+        'Your 6-digit Authenticator App (TOTP) is now linked for secure login verification.',
+      category: 'security',
+      severity: 'success',
+      createdBy: params.accountId,
+      createdAt: now,
+    }),
+  ]);
+
+  return updated;
+}
+
+export async function removeUserTotpSecret(accountId: string): Promise<AcashUser | null> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const updatedCopy = { ...user, lastActiveAt: now };
+  delete updatedCopy.totpSecret;
+  delete updatedCopy.totpEnrolledAt;
+  const updated: AcashUser = stripUndefined(updatedCopy);
+
+  store.users[accountId] = updated;
+  writeLocalStore(store, true);
+
+  try {
+    await updateDoc(doc(db, USERS_COL, accountId), {
+      totpSecret: deleteField(),
+      totpEnrolledAt: deleteField(),
+      lastActiveAt: now,
+    });
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: accountId,
+      recipientRole: user.role,
+      title: 'Authenticator App Removed',
+      message: 'Authenticator App key removed. EmailJS verification code remains mandatory on login.',
+      category: 'security',
+      severity: 'info',
+      createdBy: accountId,
+      createdAt: now,
+    }),
+  ]);
 
   return updated;
 }

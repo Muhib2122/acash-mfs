@@ -29,9 +29,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   return (
     <nav
       aria-label="Account Mobile Navigation"
-      className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-[62px] bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-2"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-[calc(62px+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-1.5 sm:px-2"
     >
-      <div className="max-w-md mx-auto h-full grid grid-cols-5 items-center">
+      <div className="max-w-md mx-auto h-[62px] grid grid-cols-5 items-center">
         <button
           type="button"
           onClick={onHome}

@@ -57,6 +57,15 @@
           "type": "array",
           "description": "Enrolled WebAuthn device biometric passkeys (max 5)."
         },
+        "totpSecret": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Optional Base32 RFC 6238 secret for Google Authenticator / TOTP app 2FA."
+        },
+        "totpEnrolledAt": {
+          "type": "number",
+          "description": "Epoch timestamp when TOTP authenticator app was enrolled."
+        },
         "profilePhotoUrl": {
           "type": "string",
           "maxLength": 500000

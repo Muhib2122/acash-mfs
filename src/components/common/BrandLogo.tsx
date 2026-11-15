@@ -42,11 +42,11 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
       )}
       {showWordmark && (
         <div className="flex flex-col min-w-0">
-          <span className="font-display font-bold tracking-tight text-slate-900 dark:text-white leading-none text-lg whitespace-nowrap">
+          <span className="font-display font-bold tracking-tight text-slate-900 dark:text-white leading-none text-base sm:text-lg whitespace-nowrap">
             Acash
           </span>
           {subtitle && (
-            <span className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-1 whitespace-nowrap truncate max-w-[180px] sm:max-w-none">
+            <span className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5 sm:mt-1 whitespace-nowrap truncate max-w-[115px] sm:max-w-[220px] md:max-w-none">
               {subtitle}
             </span>
           )}

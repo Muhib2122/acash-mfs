@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LogOut, ShieldCheck, Globe, User as UserIcon, MapPin, Sun, Moon, Smartphone, Bell, Volume2, X } from 'lucide-react';
+import {
+  LogOut,
+  ShieldCheck,
+  Globe,
+  User as UserIcon,
+  MapPin,
+  Sun,
+  Moon,
+  Smartphone,
+  Bell,
+  Volume2,
+  MoreVertical,
+  X,
+} from 'lucide-react';
 import {
   AcashBooth,
   AcashMapLocation,
@@ -231,9 +244,8 @@ export default function App() {
   const [securityEvents, setSecurityEvents] = useState<SecurityEventRecord[]>([]);
   const [deviceAlertStatus, setDeviceAlertStatus] = useState(() => getDeviceAlertStatus());
   const [alertBannerDismissed, setAlertBannerDismissed] = useState(false);
-  const [securityNoticeMsg, setSecurityNoticeMsg] = useState('');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const ipSyncedAccountRef = useRef<string | null>(null);
-  const lastActivityRef = useRef<number>(Date.now());
 
   const [paymentIntent, setPaymentIntent] = useState<{
     to: string;
@@ -342,7 +354,6 @@ export default function App() {
   useEffect(() => {
     initSoundboxAudioUnlock();
     const onGesture = () => {
-      lastActivityRef.current = Date.now();
       window.setTimeout(() => {
         setDeviceAlertStatus(getDeviceAlertStatus());
       }, 150);
@@ -357,40 +368,72 @@ export default function App() {
     };
   }, []);
 
-  // Cryptographic integrity check on local user & admin sessions (rejects tampered tokens)
+  // Cryptographic integrity check on local sessions (never logs out on normal refresh or host migration)
   useEffect(() => {
     let cancelled = false;
     if (userSession) {
-      void verifySessionPayload({
-        id: userSession.accountId,
-        role: userSession.role,
-        email: userSession.email,
-        loggedInAt: userSession.loggedInAt,
-        integritySig: userSession.integritySig,
-      }).then((valid) => {
-        if (!cancelled && !valid) {
-          if (userSession.integritySig) {
-            recordSessionTamperEvent(userSession.accountId, 'account');
+      if (!userSession.integritySig) {
+        void signSessionPayload({
+          id: userSession.accountId,
+          role: userSession.role,
+          email: userSession.email,
+          loggedInAt: userSession.loggedInAt,
+        }).then((sig) => {
+          if (cancelled) return;
+          const upgraded: AcashSession = { ...userSession, integritySig: sig };
+          try {
+            localStorage.setItem(USER_SESSION_KEY, JSON.stringify(upgraded));
+          } catch {
+            // ignore
           }
-          handleUserLogout();
-        }
-      });
+          setUserSession(upgraded);
+        });
+      } else {
+        void verifySessionPayload({
+          id: userSession.accountId,
+          role: userSession.role,
+          email: userSession.email,
+          loggedInAt: userSession.loggedInAt,
+          integritySig: userSession.integritySig,
+        }).then((valid) => {
+          if (!cancelled && !valid) {
+            recordSessionTamperEvent(userSession.accountId, 'account');
+            handleUserLogout();
+          }
+        });
+      }
     }
     if (adminSession) {
-      void verifySessionPayload({
-        id: adminSession.adminEmail,
-        role: adminSession.adminRole,
-        email: adminSession.adminEmail,
-        loggedInAt: adminSession.loggedInAt,
-        integritySig: adminSession.integritySig,
-      }).then((valid) => {
-        if (!cancelled && !valid) {
-          if (adminSession.integritySig) {
-            recordSessionTamperEvent(adminSession.adminEmail, 'admin');
+      if (!adminSession.integritySig) {
+        void signSessionPayload({
+          id: adminSession.adminEmail,
+          role: adminSession.adminRole,
+          email: adminSession.adminEmail,
+          loggedInAt: adminSession.loggedInAt,
+        }).then((sig) => {
+          if (cancelled) return;
+          const upgraded: AdminSession = { ...adminSession, integritySig: sig };
+          try {
+            localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(upgraded));
+          } catch {
+            // ignore
           }
-          handleAdminLogout();
-        }
-      });
+          setAdminSession(upgraded);
+        });
+      } else {
+        void verifySessionPayload({
+          id: adminSession.adminEmail,
+          role: adminSession.adminRole,
+          email: adminSession.adminEmail,
+          loggedInAt: adminSession.loggedInAt,
+          integritySig: adminSession.integritySig,
+        }).then((valid) => {
+          if (!cancelled && !valid) {
+            recordSessionTamperEvent(adminSession.adminEmail, 'admin');
+            handleAdminLogout();
+          }
+        });
+      }
     }
     return () => {
       cancelled = true;
@@ -402,37 +445,6 @@ export default function App() {
     adminSession?.adminEmail,
     adminSession?.loggedInAt,
     adminSession?.integritySig,
-  ]);
-
-  // Automatic security idle session lock based on live Admin Security Policy
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const idleMs = Date.now() - lastActivityRef.current;
-      if (appMode === 'admin' && adminSession) {
-        const limitMs = (securityPolicy.adminIdleTimeoutMinutes || 15) * 60 * 1000;
-        if (idleMs > limitMs) {
-          handleAdminLogout();
-        }
-      } else if (appMode === 'unified' && userSession) {
-        const limitMs = (securityPolicy.accountIdleTimeoutMinutes || 30) * 60 * 1000;
-        if (idleMs > limitMs) {
-          handleUserLogout();
-          setSecurityNoticeMsg(
-            lang === 'bn'
-              ? 'নিরাপত্তার স্বার্থে নিষ্ক্রিয় থাকার কারণে সেশন লক করা হয়েছে। আবার লগইন করুন।'
-              : 'Session auto-locked after inactivity for 10x account security. Please sign in again.'
-          );
-        }
-      }
-    }, 15000);
-    return () => window.clearInterval(id);
-  }, [
-    appMode,
-    adminSession,
-    userSession,
-    securityPolicy.adminIdleTimeoutMinutes,
-    securityPolicy.accountIdleTimeoutMinutes,
-    lang,
   ]);
 
   // Real-time subscription for logged-in Unified App user (never auto-logout on refresh)
@@ -632,8 +644,6 @@ export default function App() {
   };
 
   const handleUserAuthenticated = async (user: AcashUser) => {
-    lastActivityRef.current = Date.now();
-    setSecurityNoticeMsg('');
     const loggedInAt = Date.now();
     const integritySig = await signSessionPayload({
       id: user.accountId,
@@ -669,6 +679,7 @@ export default function App() {
       // ignore
     }
     void signOutFirebase();
+    setMobileMenuOpen(false);
     setProfileOpen(false);
     setActiveGiftOverlayTx(null);
     setDismissedGiftIds(new Set());
@@ -678,7 +689,6 @@ export default function App() {
   };
 
   const handleAdminLogin = async (session: AdminSession) => {
-    lastActivityRef.current = Date.now();
     const integritySig = await signSessionPayload({
       id: session.adminEmail,
       role: session.adminRole,
@@ -742,168 +752,262 @@ export default function App() {
   return (
     <PortalThemeProvider config={portalThemeConfig}>
       <div className={`min-h-screen ${activePortalTheme.pageAmbientClass} text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden`}>
-        {/* Calm 3-Zone Top Bar */}
-        <header className={`sticky top-0 z-30 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md border-b ${activePortalTheme.headerAccentBg}`}>
-          <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
-            <BrandLogo
-              size="sm"
-              subtitle={
-                currentUser
-                  ? `${
-                      currentUser.role === 'U'
-                        ? t('roleCustomer', lang)
-                        : currentUser.role === 'A'
-                          ? t('roleAgent', lang)
-                          : t('roleMerchant', lang)
-                    } · ${currentUser.accountId}`
-                  : lang === 'bn'
-                    ? 'কাস্টমার, এজেন্ট ও মার্চেন্ট পোর্টাল'
-                    : 'Customer, Agent & Merchant'
-              }
-            />
+        {/* Responsive 3-Zone Top Bar — never clips Logout on phones/PWAs */}
+        <header className={`sticky top-0 z-30 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-b ${activePortalTheme.headerAccentBg}`}>
+          <div className="max-w-7xl mx-auto px-2.5 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-1.5 sm:gap-3">
+            <div className="min-w-0 flex-1">
+              <BrandLogo
+                size="sm"
+                subtitle={
+                  currentUser
+                    ? `${
+                        currentUser.role === 'U'
+                          ? t('roleCustomer', lang)
+                          : currentUser.role === 'A'
+                            ? t('roleAgent', lang)
+                            : t('roleMerchant', lang)
+                      } · ${currentUser.accountId}`
+                    : lang === 'bn'
+                      ? 'কাস্টমার, এজেন্ট ও মার্চেন্ট'
+                      : 'Customer, Agent & Merchant'
+                }
+              />
+            </div>
 
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="flex items-center gap-1 sm:gap-2 shrink-0">
               {/* Get Mobile App */}
               <button
                 type="button"
                 onClick={() => setGetAppOpen(true)}
-                className={`min-h-[40px] px-2.5 sm:px-3 rounded-xl ${activePortalTheme.headerBtnBg} text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-xs`}
+                className={`${
+                  currentUser ? 'hidden md:inline-flex' : 'inline-flex'
+                } min-h-[38px] sm:min-h-[40px] px-2.5 sm:px-3 rounded-xl ${activePortalTheme.headerBtnBg} text-xs font-semibold text-white items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-xs`}
                 title={lang === 'bn' ? 'মোবাইল অ্যাপ নিন' : 'Get App'}
               >
                 <Smartphone className="w-4 h-4 shrink-0" />
-                <span>{lang === 'bn' ? 'অ্যাপ নিন' : 'Get App'}</span>
+                <span className={currentUser ? 'inline' : 'hidden sm:inline'}>
+                  {lang === 'bn' ? 'অ্যাপ নিন' : 'Get App'}
+                </span>
               </button>
 
-            {/* Agent & Support Booth Map */}
-            <button
-              type="button"
-              onClick={() => setBoothMapOpen(true)}
-              className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/25 text-xs font-semibold text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-              title={lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
-            >
-              <MapPin className="w-4 h-4 shrink-0" />
-              <span className="hidden md:inline">
-                {lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
-              </span>
-            </button>
-
-            {/* Light / Dark Mode Switch */}
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-              title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              className="min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              {theme === 'dark' ? (
-                <Sun className="w-4 h-4 text-amber-400" />
-              ) : (
-                <Moon className="w-4 h-4 text-indigo-600" />
-              )}
-              <span className="hidden xl:inline">
-                {theme === 'dark'
-                  ? lang === 'bn'
-                    ? 'লাইট'
-                    : 'Light'
-                  : lang === 'bn'
-                    ? 'ডার্ক'
-                    : 'Dark'}
-              </span>
-            </button>
-
-            {/* Bilingual Switch EN | বাংলা */}
-            <button
-              type="button"
-              onClick={toggleLanguage}
-              className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-            >
-              <Globe className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-              <span>{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
-            </button>
-
-            {/* Switch / Link to Separate Admin Website (Hidden when standalone Unified domain has no external Admin URL) */}
-            {externalAdminUrl ? (
-              <a
-                href={externalAdminUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-              >
-                <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
-                <span className="sm:hidden">Admin</span>
-              </a>
-            ) : !portalLocked ? (
+              {/* Agent & Support Booth Map (desktop bar; on mobile accessible via Bottom Nav & Menu) */}
               <button
                 type="button"
-                onClick={() => switchAppMode('admin')}
-                className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                onClick={() => setBoothMapOpen(true)}
+                className="hidden md:inline-flex min-h-[40px] px-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/25 text-xs font-semibold text-emerald-700 dark:text-emerald-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                title={lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
               >
-                <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
-                <span className="sm:hidden">Admin</span>
+                <MapPin className="w-4 h-4 shrink-0" />
+                <span>{lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}</span>
               </button>
-            ) : null}
 
-            {currentUser && (
-              <>
+              {/* Light / Dark Mode Switch */}
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+                className="min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+              >
+                {theme === 'dark' ? (
+                  <Sun className="w-4 h-4 text-amber-400" />
+                ) : (
+                  <Moon className="w-4 h-4 text-indigo-600" />
+                )}
+                <span className="hidden xl:inline">
+                  {theme === 'dark'
+                    ? lang === 'bn'
+                      ? 'লাইট'
+                      : 'Light'
+                    : lang === 'bn'
+                      ? 'ডার্ক'
+                      : 'Dark'}
+                </span>
+              </button>
+
+              {/* Bilingual Switch */}
+              <button
+                type="button"
+                onClick={toggleLanguage}
+                className="min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                title="Switch Language (English / বাংলা)"
+              >
+                <Globe className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0 hidden sm:inline" />
+                <span className="sm:hidden">{lang === 'en' ? 'বাং' : 'EN'}</span>
+                <span className="hidden sm:inline">{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
+              </button>
+
+              {/* Switch / Link to Separate Admin Website (desktop bar or logged-out view) */}
+              {externalAdminUrl ? (
+                <a
+                  href={externalAdminUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`${
+                    currentUser ? 'hidden md:inline-flex' : 'inline-flex'
+                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0`}
+                >
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
+                  <span className="sm:hidden">Admin</span>
+                </a>
+              ) : !portalLocked ? (
                 <button
                   type="button"
-                  onClick={() => setNotifModalOpen(true)}
-                  aria-label={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
-                  title={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
-                  className="relative min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                  onClick={() => switchAppMode('admin')}
+                  className={`${
+                    currentUser ? 'hidden md:inline-flex' : 'inline-flex'
+                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0`}
                 >
-                  <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                  <span className="hidden lg:inline">
-                    {lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}
-                  </span>
-                  {unreadNotifCount > 0 && (
-                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-[10px] font-bold text-white flex items-center justify-center font-mono-tabular">
-                      {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
+                  <span className="sm:hidden">Admin</span>
+                </button>
+              ) : null}
+
+              {currentUser && (
+                <>
+                  {/* Compact Mobile Menu for secondary links (Get App, Booth Map, Admin, Profile) */}
+                  <div className="relative md:hidden">
+                    <button
+                      type="button"
+                      onClick={() => setMobileMenuOpen((prev) => !prev)}
+                      aria-label={lang === 'bn' ? 'মেনু' : 'Quick Menu'}
+                      className="min-h-[38px] min-w-[38px] rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center shrink-0"
+                    >
+                      <MoreVertical className="w-4 h-4" />
+                    </button>
+                    {mobileMenuOpen && (
+                      <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl p-2 space-y-1 z-50">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMobileMenuOpen(false);
+                            setProfileInitialTab('photo');
+                            setProfileOpen(true);
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-left"
+                        >
+                          <UserIcon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                          <span>{lang === 'bn' ? 'প্রোফাইল, ২FA ও কেওয়াইসি' : 'Profile, 2FA & KYC'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMobileMenuOpen(false);
+                            setBoothMapOpen(true);
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-left"
+                        >
+                          <MapPin className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <span>{lang === 'bn' ? 'বুথ ও এজেন্ট ম্যাপ' : 'Booth & Agent Map'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMobileMenuOpen(false);
+                            setGetAppOpen(true);
+                          }}
+                          className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-left"
+                        >
+                          <Smartphone className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                          <span>{lang === 'bn' ? 'মোবাইল অ্যাপ ডাউনলোড' : 'Get Mobile App'}</span>
+                        </button>
+                        {externalAdminUrl ? (
+                          <a
+                            href={externalAdminUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => setMobileMenuOpen(false)}
+                            className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 flex items-center gap-2.5 text-left"
+                          >
+                            <ShieldCheck className="w-4 h-4 shrink-0" />
+                            <span>{t('switchToAdmin', lang)}</span>
+                          </a>
+                        ) : !portalLocked ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMobileMenuOpen(false);
+                              switchAppMode('admin');
+                            }}
+                            className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 flex items-center gap-2.5 text-left"
+                          >
+                            <ShieldCheck className="w-4 h-4 shrink-0" />
+                            <span>{t('switchToAdmin', lang)}</span>
+                          </button>
+                        ) : null}
+                        <div className="border-t border-slate-200 dark:border-slate-800 pt-1 mt-1">
+                          <button
+                            type="button"
+                            onClick={handleUserLogout}
+                            className="w-full min-h-[40px] px-3 rounded-xl text-xs font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-500/15 hover:bg-rose-100 flex items-center gap-2.5 text-left"
+                          >
+                            <LogOut className="w-4 h-4 shrink-0" />
+                            <span>{t('logout', lang)}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setNotifModalOpen(true)}
+                    aria-label={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
+                    title={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
+                    className="relative min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                    <span className="hidden lg:inline">
+                      {lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}
                     </span>
-                  )}
-                </button>
+                    {unreadNotifCount > 0 && (
+                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-[10px] font-bold text-white flex items-center justify-center font-mono-tabular">
+                        {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+                      </span>
+                    )}
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setProfileInitialTab('photo');
-                    setProfileOpen(true);
-                  }}
-                  className="min-h-[40px] pl-1.5 pr-2.5 sm:pr-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
-                >
-                  {currentUser.profilePhotoUrl ? (
-                    <img
-                      src={currentUser.profilePhotoUrl}
-                      alt={currentUser.name}
-                      referrerPolicy="no-referrer"
-                      className="w-7 h-7 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
-                    />
-                  ) : (
-                    <span className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 flex items-center justify-center">
-                      <UserIcon className="w-3.5 h-3.5 text-indigo-700 dark:text-indigo-300" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileInitialTab('photo');
+                      setProfileOpen(true);
+                    }}
+                    className="hidden sm:inline-flex min-h-[40px] pl-1.5 pr-2.5 sm:pr-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    {currentUser.profilePhotoUrl ? (
+                      <img
+                        src={currentUser.profilePhotoUrl}
+                        alt={currentUser.name}
+                        referrerPolicy="no-referrer"
+                        className="w-7 h-7 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
+                      />
+                    ) : (
+                      <span className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 flex items-center justify-center">
+                        <UserIcon className="w-3.5 h-3.5 text-indigo-700 dark:text-indigo-300" />
+                      </span>
+                    )}
+                    <span className="hidden md:inline">
+                      {lang === 'bn' ? 'প্রোফাইল ও কেওয়াইসি' : 'Profile & KYC'}
                     </span>
-                  )}
-                  <span className="hidden md:inline">
-                    {lang === 'bn' ? 'প্রোফাইল ও কেওয়াইসি' : 'Profile & KYC'}
-                  </span>
-                </button>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={handleUserLogout}
-                  className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-                  title={t('logout', lang)}
-                >
-                  <LogOut className="w-4 h-4 shrink-0" />
-                  <span className="hidden lg:inline">{t('logout', lang)}</span>
-                </button>
-              </>
-            )}
+                  <button
+                    type="button"
+                    onClick={handleUserLogout}
+                    className="min-h-[38px] sm:min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                    title={t('logout', lang)}
+                  >
+                    <LogOut className="w-4 h-4 shrink-0" />
+                    <span>{t('logout', lang)}</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
       {portalThemeConfig.bannerEnabled &&
         (portalThemeConfig.customBannerBn || portalThemeConfig.customBannerEn) && (
@@ -915,19 +1019,6 @@ export default function App() {
               : portalThemeConfig.customBannerEn || portalThemeConfig.customBannerBn}
           </div>
         )}
-
-      {securityNoticeMsg && (
-        <div className="bg-amber-50 dark:bg-amber-500/15 border-b border-amber-200 dark:border-amber-500/30 px-4 py-2.5 text-center text-xs font-semibold text-amber-800 dark:text-amber-200 flex items-center justify-center gap-3">
-          <span>{securityNoticeMsg}</span>
-          <button
-            type="button"
-            onClick={() => setSecurityNoticeMsg('')}
-            className="text-amber-700 dark:text-amber-300 hover:opacity-80"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
 
       {currentUser &&
         !alertBannerDismissed &&
@@ -977,6 +1068,7 @@ export default function App() {
           feeConfig={feeConfig}
           lang={lang}
           initialTab={profileInitialTab}
+          onLogout={handleUserLogout}
           onClose={() => setProfileOpen(false)}
         />
       )}

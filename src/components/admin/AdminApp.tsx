@@ -48,6 +48,7 @@ import {
   ShieldAlert,
   KeyRound,
   Smartphone,
+  Menu,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -288,6 +289,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   }, [admin2faCooldownSec]);
 
   const [section, setSection] = useState<AdminSection>('overview');
+  const [adminMobileNavOpen, setAdminMobileNavOpen] = useState(false);
   const [userSearch, setUserSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | UserRole>('ALL');
   const [selectedDossierId, setSelectedDossierId] = useState<string | null>(null);
@@ -1897,16 +1899,18 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
   if (!adminSession) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200">
-        <header className="px-4 sm:px-6 py-4 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-3">
-          <BrandLogo subtitle="Separate Admin Command App" />
-          <div className="flex items-center gap-2 sm:gap-3">
+      <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden">
+        <header className="px-3 sm:px-6 h-14 sm:h-16 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <BrandLogo size="sm" subtitle="Separate Admin Command App" />
+          </div>
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
             <button
               type="button"
               onClick={onToggleTheme}
               aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              className="min-h-[38px] min-w-[38px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors"
+              className="min-h-[38px] min-w-[38px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
             >
               {theme === 'dark' ? (
                 <Sun className="w-4 h-4 text-amber-400" />
@@ -1918,28 +1922,31 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             <button
               type="button"
               onClick={onToggleLang}
-              className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200"
+              className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
             >
-              {lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}
+              <span className="sm:hidden">{lang === 'en' ? 'বাং' : 'EN'}</span>
+              <span className="hidden sm:inline">{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
             </button>
             {externalUserPortalUrl ? (
               <a
                 href={externalUserPortalUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="px-3.5 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25"
+                className="min-h-[38px] px-2.5 sm:px-3.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 whitespace-nowrap shrink-0"
               >
-                <ArrowLeftRight className="w-3.5 h-3.5" />
-                <span>{t('switchToApp', lang)}</span>
+                <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{t('switchToApp', lang)}</span>
+                <span className="sm:hidden">App</span>
               </a>
             ) : !portalLocked ? (
               <button
                 type="button"
                 onClick={onSwitchToUnifiedApp}
-                className="px-3.5 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25"
+                className="min-h-[38px] px-2.5 sm:px-3.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 whitespace-nowrap shrink-0"
               >
-                <ArrowLeftRight className="w-3.5 h-3.5" />
-                <span>{t('switchToApp', lang)}</span>
+                <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{t('switchToApp', lang)}</span>
+                <span className="sm:hidden">App</span>
               </button>
             ) : null}
           </div>
@@ -2217,12 +2224,36 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col lg:flex-row transition-colors duration-200 overflow-x-hidden">
-      {/* Left Admin Sidebar */}
-      <aside className="lg:w-64 shrink-0 bg-white dark:bg-[#121622] border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 p-5 flex flex-col justify-between">
-        <div className="space-y-6">
-          <BrandLogo subtitle="Admin Command App" />
+      {/* Mobile Drawer Backdrop */}
+      {adminMobileNavOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-xs lg:hidden"
+          onClick={() => setAdminMobileNavOpen(false)}
+        />
+      )}
 
-          <nav className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-1 gap-1.5">
+      {/* Left Admin Sidebar (Fixed Drawer on Mobile, Permanent Rail on Desktop lg+) */}
+      <aside
+        className={`${
+          adminMobileNavOpen
+            ? 'fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] flex shadow-2xl overflow-y-auto'
+            : 'hidden lg:flex lg:w-64'
+        } shrink-0 bg-white dark:bg-[#121622] border-r border-slate-200 dark:border-slate-800 p-4 sm:p-5 flex-col justify-between`}
+      >
+        <div className="space-y-5">
+          <div className="flex items-center justify-between gap-2">
+            <BrandLogo size="sm" subtitle="Admin Command App" />
+            <button
+              type="button"
+              onClick={() => setAdminMobileNavOpen(false)}
+              className="lg:hidden min-h-[36px] min-w-[36px] rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+              aria-label="Close navigation"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <nav className="grid grid-cols-1 gap-1.5">
             {[
               { id: 'overview', label: 'Platform Overview', icon: Activity },
               { id: 'treasury', label: 'Credit Add & Transfer', icon: PlusCircle },
@@ -2295,7 +2326,10 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setSection(item.id as AdminSection)}
+                  onClick={() => {
+                    setSection(item.id as AdminSection);
+                    setAdminMobileNavOpen(false);
+                  }}
                   className={`min-h-[42px] px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition-colors text-left ${
                     active
                       ? 'bg-indigo-600 text-white shadow-sm'
@@ -2310,12 +2344,108 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           </nav>
         </div>
 
-        <div className="hidden lg:block space-y-2.5 pt-6 border-t border-slate-200 dark:border-slate-800">
+        <div className="space-y-2.5 pt-6 mt-6 border-t border-slate-200 dark:border-slate-800">
           <div className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 flex items-center gap-1.5">
             <Shield className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
             <span>{isCurrentMainAdmin ? 'Main Admin (Map Pin Exempt)' : `2nd Admin (${activeSecondAdmin?.adminId || adminSession.adminId || 'ADM'})`}</span>
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{adminSession.adminEmail}</div>
+          <div className="lg:hidden space-y-2 pt-1">
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setCmdPaletteOpen(true);
+                  setAdminMobileNavOpen(false);
+                }}
+                className="py-2 px-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1"
+              >
+                <Command className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>Quick Jump</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBroadcastModalOpen(true);
+                  setAdminMobileNavOpen(false);
+                }}
+                className="py-2 px-2.5 rounded-xl bg-indigo-600 text-[11px] font-semibold text-white inline-flex items-center justify-center gap-1"
+              >
+                <Megaphone className="w-3.5 h-3.5" />
+                <span>{lang === 'bn' ? 'অ্যালার্ট পাঠান' : 'Push Alert'}</span>
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={toggleAdminVoiceMute}
+                className="py-2 px-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1"
+              >
+                {voiceMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-500" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-500" />}
+                <span>{voiceMuted ? 'Voice Muted' : 'Voice On'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleToggleAdminGender(adminGender === 'male' ? 'female' : 'male')}
+                className="py-2 px-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 inline-flex items-center justify-center gap-1"
+              >
+                <span>{adminGender === 'female' ? 'F→M Voice' : 'M→F Voice'}</span>
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await requestNativeAlertGestureAccess(lang);
+                setDeviceAlertStatus(getDeviceAlertStatus());
+                setFeedbackMsg(
+                  res.permission === 'granted'
+                    ? 'OS Phone/PC Notification & Sound Gesture enabled.'
+                    : `Sound & Haptics unlocked (OS Notification permission: ${res.permission}).`
+                );
+                setAdminMobileNavOpen(false);
+              }}
+              className={`w-full py-2 px-2.5 rounded-xl border text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 ${
+                deviceAlertStatus.notificationPermission === 'granted' && deviceAlertStatus.audioUnlocked
+                  ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/35 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-200 dark:border-indigo-500/35 text-indigo-700 dark:text-indigo-300'
+              }`}
+            >
+              <Bell className="w-3.5 h-3.5" />
+              <span>
+                {deviceAlertStatus.notificationPermission === 'granted' && deviceAlertStatus.audioUnlocked
+                  ? lang === 'bn'
+                    ? 'ডিভাইস অ্যালার্ট চালু'
+                    : 'Device Alerts On'
+                  : lang === 'bn'
+                    ? 'ডিভাইস অ্যালার্ট চালু করুন'
+                    : 'Enable Device Alerts'}
+              </span>
+            </button>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  downloadGlobalLedgerPdf(transactions, users, feeConfig, adminSession.adminEmail);
+                  setAdminMobileNavOpen(false);
+                }}
+                className="py-2 px-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-[11px] font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center justify-center gap-1"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Audit PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  downloadUsersDirectoryPdf(users, adminSession.adminEmail);
+                  setAdminMobileNavOpen(false);
+                }}
+                className="py-2 px-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Users PDF</span>
+              </button>
+            </div>
+          </div>
           {externalUserPortalUrl ? (
             <a
               href={externalUserPortalUrl}
@@ -2339,7 +2469,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           <button
             type="button"
             onClick={onAdminLogout}
-            className="w-full py-2.5 px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-200 inline-flex items-center justify-center gap-2"
+            className="w-full min-h-[42px] py-2.5 px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-200 inline-flex items-center justify-center gap-2"
           >
             <LogOut className="w-3.5 h-3.5" />
             <span>{t('logout', lang)}</span>
@@ -2349,32 +2479,44 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
       {/* Main Admin Workspace */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="px-4 sm:px-6 py-4 border-b border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3 bg-white/90 dark:bg-[#0B0D14]/90 backdrop-blur-md sticky top-0 z-30">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-display text-lg font-bold text-slate-900 dark:text-white">{t('adminPortal', lang)}</h1>
-              <span
-                className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border ${
-                  isCurrentMainAdmin
-                    ? 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/35'
-                    : 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/35'
-                }`}
-              >
-                {isCurrentMainAdmin ? 'Main Admin' : '2nd Admin'}
-              </span>
+        <header className="px-3 sm:px-6 py-2.5 sm:py-3.5 border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-2 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md sticky top-0 z-30">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => setAdminMobileNavOpen(true)}
+              aria-label="Open Admin Menu"
+              className="lg:hidden min-h-[38px] min-w-[38px] rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center shrink-0"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <h1 className="font-display text-sm sm:text-lg font-bold text-slate-900 dark:text-white truncate">
+                  {t('adminPortal', lang)}
+                </h1>
+                <span
+                  className={`hidden sm:inline-block px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border whitespace-nowrap shrink-0 ${
+                    isCurrentMainAdmin
+                      ? 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/35'
+                      : 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/35'
+                  }`}
+                >
+                  {isCurrentMainAdmin ? 'Main Admin' : '2nd Admin'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 hidden xl:block truncate">{t('adminSubtitle', lang)}</p>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">{t('adminSubtitle', lang)}</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 justify-end">
             <button
               type="button"
               onClick={() => setCmdPaletteOpen(true)}
-              className="min-h-[38px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors"
+              className="hidden md:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
               title="Quick Command Search (Ctrl+K / Cmd+K)"
             >
               <Command className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-              <span className="hidden md:inline">Quick Jump</span>
-              <kbd className="hidden sm:inline px-1.5 py-0.5 rounded bg-white dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-[10px] font-mono-tabular text-slate-500">
+              <span>Quick Jump</span>
+              <kbd className="px-1.5 py-0.5 rounded bg-white dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-[10px] font-mono-tabular text-slate-500">
                 ⌘K
               </kbd>
             </button>
@@ -2383,7 +2525,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               <button
                 type="button"
                 onClick={() => setSection('admin_profile')}
-                className="min-h-[38px] px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/35 hover:bg-amber-100 dark:hover:bg-amber-500/25 text-xs font-semibold text-amber-800 dark:text-amber-200 inline-flex items-center gap-1.5"
+                className="hidden md:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/35 hover:bg-amber-100 dark:hover:bg-amber-500/25 text-xs font-semibold text-amber-800 dark:text-amber-200 items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 <MapPin className="w-3.5 h-3.5 text-amber-600 dark:text-amber-300" />
                 <span>{lang === 'bn' ? 'আমার লোকেশন পিন' : 'My Profile & Map Pin'}</span>
@@ -2391,7 +2533,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             )}
 
             {/* Admin Voice Alert Mute + Gender Switch (Opposite Voice) */}
-            <div className="inline-flex items-center rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-0.5">
+            <div className="hidden lg:inline-flex items-center rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-0.5 shrink-0">
               <button
                 type="button"
                 onClick={toggleAdminVoiceMute}
@@ -2423,7 +2565,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     : `Sound & Haptics unlocked (OS Notification permission: ${res.permission}).`
                 );
               }}
-              className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              className={`hidden md:inline-flex min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
                 deviceAlertStatus.notificationPermission === 'granted' &&
                 deviceAlertStatus.audioUnlocked
                   ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/35 text-emerald-700 dark:text-emerald-300'
@@ -2444,12 +2586,12 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               </span>
             </button>
 
-            {/* Instant Admin Console Security Lock */}
+            {/* Instant Admin Console Security Lock (Desktop rail already has Logout; Mobile header shows explicit Logout button) */}
             <button
               type="button"
               onClick={onAdminLogout}
               title={lang === 'bn' ? 'কনসোল লক করুন' : 'Lock Admin Console'}
-              className="min-h-[38px] px-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+              className="hidden lg:inline-flex min-h-[38px] px-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
             >
               <Lock className="w-3.5 h-3.5 shrink-0" />
               <span className="hidden 2xl:inline">{lang === 'bn' ? 'লক করুন' : 'Lock'}</span>
@@ -2461,7 +2603,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               onClick={onToggleTheme}
               aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              className="min-h-[38px] min-w-[38px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors"
+              className="min-h-[38px] min-w-[38px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors shrink-0"
             >
               {theme === 'dark' ? (
                 <Sun className="w-4 h-4 text-amber-400" />
@@ -2476,10 +2618,10 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               <button
                 type="button"
                 onClick={() => setNotifDrawerOpen((prev) => !prev)}
-                className="relative min-h-[38px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-100 inline-flex items-center gap-2"
+                className="relative min-h-[38px] px-2.5 sm:px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-100 inline-flex items-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0"
               >
-                <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                <span className="hidden sm:inline">Notifications</span>
+                <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="hidden md:inline">Notifications</span>
                 {unreadNotifications.length > 0 && (
                   <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-indigo-600 text-[10px] font-bold text-white">
                     {unreadNotifications.length}
@@ -2488,7 +2630,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               </button>
 
               {notifDrawerOpen && (
-                <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl z-50 overflow-hidden">
+                <div className="absolute right-0 mt-2 w-[min(92vw,24rem)] rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl z-50 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                     <div className="text-xs font-bold text-slate-900 dark:text-white">
                       Admin Notifications ({unreadNotifications.length} unread)
@@ -2600,11 +2742,11 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             <button
               type="button"
               onClick={() => setBroadcastModalOpen(true)}
-              className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 shadow-sm transition-colors"
+              className="hidden sm:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap shrink-0"
               title={lang === 'bn' ? 'অ্যাকাউন্ট পোর্টালে লাইভ অ্যালার্ট পাঠান' : 'Send Live Alert to Accounts'}
             >
-              <Megaphone className="w-3.5 h-3.5" />
-              <span>{lang === 'bn' ? 'অ্যালার্ট পাঠান' : 'Push Alert'}</span>
+              <Megaphone className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden md:inline">{lang === 'bn' ? 'অ্যালার্ট পাঠান' : 'Push Alert'}</span>
             </button>
 
             <button
@@ -2612,50 +2754,34 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               onClick={() =>
                 downloadGlobalLedgerPdf(transactions, users, feeConfig, adminSession.adminEmail)
               }
-              className="px-3 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5"
+              className="hidden xl:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-200 items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              <FileText className="w-3.5 h-3.5" />
+              <FileText className="w-3.5 h-3.5 shrink-0" />
               <span>Audit PDF</span>
             </button>
             <button
               type="button"
               onClick={() => downloadUsersDirectoryPdf(users, adminSession.adminEmail)}
-              className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+              className="hidden xl:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              <FileText className="w-3.5 h-3.5" />
+              <FileText className="w-3.5 h-3.5 shrink-0" />
               <span>Users PDF</span>
             </button>
             <button
               type="button"
               onClick={onToggleLang}
-              className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200"
+              className="min-h-[38px] px-2.5 sm:px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
             >
-              {lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}
+              <span className="sm:hidden">{lang === 'en' ? 'বাং' : 'EN'}</span>
+              <span className="hidden sm:inline">{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
             </button>
-            {externalUserPortalUrl ? (
-              <a
-                href={externalUserPortalUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="lg:hidden px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200"
-              >
-                {t('switchToApp', lang)}
-              </a>
-            ) : !portalLocked ? (
-              <button
-                type="button"
-                onClick={onSwitchToUnifiedApp}
-                className="lg:hidden px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200"
-              >
-                {t('switchToApp', lang)}
-              </button>
-            ) : null}
             <button
               type="button"
               onClick={onAdminLogout}
-              className="lg:hidden px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs font-semibold text-rose-700 dark:text-rose-200"
+              className="lg:hidden min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs font-semibold text-rose-700 dark:text-rose-200 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              {t('logout', lang)}
+              <LogOut className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('logout', lang)}</span>
             </button>
           </div>
         </header>
@@ -2663,7 +2789,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         {/* Persistent Live Admin Notification Bar */}
         {latestUnread && (
           <div
-            className={`px-6 py-2.5 border-b flex flex-wrap items-center justify-between gap-3 text-xs ${
+            className={`px-3 sm:px-6 py-2.5 border-b flex flex-wrap items-center justify-between gap-2 sm:gap-3 text-xs ${
               latestUnread.severity === 'critical'
                 ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-500/35 text-rose-900 dark:text-rose-100'
                 : latestUnread.severity === 'warning'

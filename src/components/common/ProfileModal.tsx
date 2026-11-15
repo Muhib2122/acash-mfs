@@ -2,9 +2,13 @@ import React, { useEffect, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
+  Copy,
   FileBadge2,
   Fingerprint,
   KeyRound,
+  LogOut,
+  QrCode,
+  RefreshCw,
   ShieldCheck,
   Smartphone,
   Trash2,
@@ -14,11 +18,14 @@ import {
   FileText,
   MapPin,
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { AcashTransaction, AcashUser, FeeConfig, Language, UserGender } from '../../types/acash';
 import {
   changeUserSecurityPin,
+  enrollUserTotpSecret,
   enrollUserWebAuthnPasskey,
   formatUserReferralSource,
+  removeUserTotpSecret,
   removeUserWebAuthnPasskey,
   saveUserMapLocation,
   updateUserGender,
@@ -26,6 +33,12 @@ import {
   updateUserProfilePhoto,
   verifyUserSecurityPin,
 } from '../../lib/acashService';
+import {
+  buildTotpOtpAuthUri,
+  formatTotpSecretForDisplay,
+  generateTotpBase32Secret,
+  verifyTotpCode,
+} from '../../lib/totp';
 import {
   authorizeTransactionWithBiometrics,
   detectWebAuthnCapability,
@@ -46,6 +59,7 @@ interface ProfileModalProps {
   feeConfig?: FeeConfig;
   lang: Language;
   initialTab?: ProfileTab;
+  onLogout?: () => void;
   onClose: () => void;
 }
 
@@ -83,6 +97,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   feeConfig,
   lang,
   initialTab = 'photo',
+  onLogout,
   onClose,
 }) => {
   const canSetMapLocation = user.role === 'A' || user.role === 'M';
@@ -120,6 +135,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [bioPinConfirm, setBioPinConfirm] = useState('');
   const [bioDeviceLabel, setBioDeviceLabel] = useState('');
   const [bioBusy, setBioBusy] = useState(false);
+
+  // Google Authenticator (TOTP) 2FA login state
+  const [pendingTotpSecret, setPendingTotpSecret] = useState<string | null>(null);
+  const [totpCodeInput, setTotpCodeInput] = useState('');
+  const [totpPinConfirm, setTotpPinConfirm] = useState('');
+  const [totpBusy, setTotpBusy] = useState(false);
+  const [totpCopied, setTotpCopied] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -325,6 +347,59 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     }
   };
 
+  const handleEnrollTotpApp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingTotpSecret) return;
+    setErrorMsg('');
+    setStatusMsg('');
+    setTotpBusy(true);
+    try {
+      await verifyUserSecurityPin(user.accountId, totpPinConfirm);
+      const valid = await verifyTotpCode(pendingTotpSecret, totpCodeInput, 1);
+      if (!valid) {
+        throw new Error(
+          lang === 'bn'
+            ? 'Authenticator অ্যাপের ৬ সংখ্যার কোডটি মেলেনি। ফোনের স্বয়ংক্রিয় সময় (Auto Date/Time) চালু আছে কিনা দেখে বর্তমান কোড দিন।'
+            : '6-digit Authenticator code did not match. Ensure device Automatic Date/Time is enabled and enter the current code.'
+        );
+      }
+      await enrollUserTotpSecret({
+        accountId: user.accountId,
+        secretBase32: pendingTotpSecret,
+      });
+      setPendingTotpSecret(null);
+      setTotpCodeInput('');
+      setTotpPinConfirm('');
+      setStatusMsg(
+        lang === 'bn'
+          ? 'Google Authenticator সফলভাবে যুক্ত হয়েছে! এখন প্রতি নতুন লগইনে এই কোড বা EmailJS কোড ব্যবহার করতে পারবেন।'
+          : 'Google Authenticator linked! You can now use 6-digit Authenticator codes or EmailJS verification codes on every new login.'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Authenticator setup failed.');
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
+  const handleRemoveTotpApp = async () => {
+    setErrorMsg('');
+    setStatusMsg('');
+    setTotpBusy(true);
+    try {
+      await removeUserTotpSecret(user.accountId);
+      setStatusMsg(
+        lang === 'bn'
+          ? 'Authenticator অ্যাপের কী সরানো হয়েছে। নতুন লগইনে EmailJS কোড চালু থাকবে।'
+          : 'Authenticator App removed. EmailJS verification code remains mandatory for new logins.'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not remove Authenticator key.');
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
   const handleSaveMapLocation = async (loc: RealLocationValue) => {
     setErrorMsg('');
     setStatusMsg('');
@@ -383,46 +458,58 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           : 'Merchant (M)';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="w-full max-w-2xl rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/75 backdrop-blur-sm p-2.5 sm:p-4 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-2xl sm:rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-2 sm:my-6">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-[#0E121D]">
-          <div className="flex items-center gap-3">
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 bg-slate-50 dark:bg-[#0E121D]">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             {user.profilePhotoUrl ? (
               <img
                 src={user.profilePhotoUrl}
                 alt={user.name}
-                className="w-10 h-10 rounded-xl object-cover border border-slate-200 dark:border-slate-700"
+                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
               />
             ) : (
-              <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center">
-                <UserIcon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center shrink-0">
+                <UserIcon className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-600 dark:text-indigo-400" />
               </div>
             )}
-            <div>
-              <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
-                {lang === 'bn' ? 'প্রোফাইল, পিন ও কেওয়াইসি' : 'Creator Profile, PIN & KYC'}
+            <div className="min-w-0">
+              <h3 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
+                {lang === 'bn' ? 'প্রোফাইল, ২FA ও কেওয়াইসি' : 'Profile, 2FA & KYC'}
               </h3>
-              <p className="text-xs text-indigo-600 dark:text-indigo-400 font-mono-tabular">
+              <p className="text-[11px] sm:text-xs text-indigo-600 dark:text-indigo-400 font-mono-tabular truncate">
                 {user.accountId} · {roleLabel}
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="min-h-[38px] min-w-[38px] rounded-xl flex items-center justify-center text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
-            aria-label="Close profile"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+                <span>{lang === 'bn' ? 'লগআউট' : 'Logout'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="min-h-[38px] min-w-[38px] rounded-xl flex items-center justify-center text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+              aria-label="Close profile"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Sub-Tabs */}
-        <div className="px-6 pt-4">
+        <div className="px-4 sm:px-6 pt-3 sm:pt-4">
           <div
-            className={`grid gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${
+            className={`grid gap-1 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${
               canSetMapLocation ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'
             }`}
           >
@@ -433,13 +520,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+              className={`min-h-[38px] py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                 tab === 'photo'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Camera className="w-3.5 h-3.5" />
+              <Camera className="w-3.5 h-3.5 shrink-0" />
               <span>{lang === 'bn' ? 'ছবি ও তথ্য' : 'Photo & Info'}</span>
             </button>
             {canSetMapLocation && (
@@ -450,14 +537,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   setErrorMsg('');
                   setStatusMsg('');
                 }}
-                className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                className={`min-h-[38px] py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                   tab === 'location'
                     ? 'bg-emerald-600 text-white shadow-sm'
                     : 'text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 dark:hover:text-white'
                 }`}
               >
-                <MapPin className="w-3.5 h-3.5" />
-                <span>{lang === 'bn' ? 'ম্যাপ লোকেশন' : 'Map Location'}</span>
+                <MapPin className="w-3.5 h-3.5 shrink-0" />
+                <span>{lang === 'bn' ? 'ম্যাপ লোকেশন' : 'Map Pin'}</span>
               </button>
             )}
             <button
@@ -467,14 +554,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+              className={`min-h-[38px] py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                 tab === 'kyc'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <FileBadge2 className="w-3.5 h-3.5" />
-              <span>{lang === 'bn' ? 'কেওয়াইসি আপডেট' : 'Update KYC'}</span>
+              <FileBadge2 className="w-3.5 h-3.5 shrink-0" />
+              <span>{lang === 'bn' ? 'কেওয়াইসি' : 'KYC'}</span>
             </button>
             <button
               type="button"
@@ -483,19 +570,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+              className={`min-h-[38px] py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                 tab === 'pin'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               <Fingerprint className="w-3.5 h-3.5 shrink-0" />
-              <span>{lang === 'bn' ? 'পিন ও বায়োমেট্রিক' : 'PIN & Biometrics'}</span>
+              <span>{lang === 'bn' ? '২FA ও পিন' : '2FA & PIN'}</span>
             </button>
           </div>
         </div>
 
-        <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+        <div className="p-4 sm:p-6 space-y-5 max-h-[calc(100dvh-210px)] overflow-y-auto">
           {statusMsg && (
             <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/35 text-xs text-emerald-700 dark:text-emerald-200 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
@@ -1031,6 +1118,212 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 </form>
               </div>
 
+              {/* Google Authenticator / TOTP App 2FA Setup for Mandatory Login Verification */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 flex items-center justify-center shrink-0">
+                      <QrCode className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                    </div>
+                    <div>
+                      <h4 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                        {lang === 'bn'
+                          ? 'Google Authenticator / TOTP লগইন ২FA'
+                          : 'Google Authenticator App (Login 2FA)'}
+                      </h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        {lang === 'bn'
+                          ? 'প্রতি নতুন লগইনে EmailJS কোড অথবা আপনার ফোনের Google Authenticator কোড দিয়ে নিরাপদে সাইন-ইন করুন।'
+                          : 'Every new login requires an EmailJS verification code or a 6-digit code from Google Authenticator / Authy.'}
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border whitespace-nowrap ${
+                      user.totpSecret
+                        ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/30'
+                        : 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/30'
+                    }`}
+                  >
+                    {user.totpSecret
+                      ? lang === 'bn'
+                        ? 'Authenticator যুক্ত'
+                        : 'Authenticator Active'
+                      : lang === 'bn'
+                        ? 'Email OTP সক্রিয়'
+                        : 'Email OTP Active'}
+                  </span>
+                </div>
+
+                {user.totpSecret && !pendingTotpSecret ? (
+                  <div className="p-3.5 rounded-xl bg-white dark:bg-[#121622] border border-emerald-200 dark:border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs text-slate-700 dark:text-slate-200 space-y-0.5">
+                      <div className="font-semibold text-emerald-700 dark:text-emerald-300">
+                        {lang === 'bn'
+                          ? 'আপনার অ্যাকাউন্টে Google Authenticator সংযুক্ত আছে'
+                          : 'Google Authenticator is linked to this account'}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
+                        {user.totpEnrolledAt
+                          ? `Linked ${new Date(user.totpEnrolledAt).toLocaleDateString()}`
+                          : 'Active TOTP Key'}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={totpBusy}
+                        onClick={() => {
+                          setPendingTotpSecret(generateTotpBase32Secret());
+                          setTotpCodeInput('');
+                          setTotpPinConfirm('');
+                          setErrorMsg('');
+                        }}
+                        className="min-h-[36px] px-3 rounded-lg bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>{lang === 'bn' ? 'কী রিসেট করুন' : 'Rotate Key'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={totpBusy}
+                        onClick={handleRemoveTotpApp}
+                        className="min-h-[36px] px-3 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{lang === 'bn' ? 'অ্যাপ সরান' : 'Remove App'}</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : !pendingTotpSecret ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingTotpSecret(generateTotpBase32Secret());
+                      setTotpCodeInput('');
+                      setTotpPinConfirm('');
+                      setErrorMsg('');
+                    }}
+                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <QrCode className="w-4 h-4 shrink-0" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'Google Authenticator QR তৈরি ও সেটআপ করুন'
+                        : 'Set Up Google Authenticator (Generate QR & Key)'}
+                    </span>
+                  </button>
+                ) : (
+                  <form
+                    onSubmit={handleEnrollTotpApp}
+                    className="p-4 rounded-xl bg-white dark:bg-[#121622] border border-indigo-200 dark:border-indigo-500/35 space-y-4"
+                  >
+                    <div className="flex flex-col sm:flex-row items-center gap-4">
+                      <div className="p-3 rounded-2xl bg-white border border-slate-200 shadow-xs shrink-0">
+                        <QRCodeSVG
+                          value={buildTotpOtpAuthUri({
+                            secret: pendingTotpSecret,
+                            accountEmail: user.email || user.accountId,
+                            issuer: 'Acash',
+                          })}
+                          size={148}
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-2 text-xs">
+                        <div className="font-semibold text-slate-900 dark:text-white">
+                          {lang === 'bn'
+                            ? 'ধাপ ১: Google Authenticator / Authy অ্যাপ দিয়ে QR কোড স্ক্যান করুন'
+                            : 'Step 1: Scan QR with Google Authenticator or Authy'}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {lang === 'bn'
+                            ? 'অথবা নিচের সেটআপ কী ম্যানুয়ালি প্রবেশ করান:'
+                            : 'Or enter setup key manually:'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 min-w-0 px-2.5 py-2 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 font-mono-tabular text-[11px] font-bold text-indigo-700 dark:text-indigo-300 break-all">
+                            {formatTotpSecretForDisplay(pendingTotpSecret)}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(pendingTotpSecret);
+                              setTotpCopied(true);
+                              window.setTimeout(() => setTotpCopied(false), 2000);
+                            }}
+                            className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 shrink-0"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>{totpCopied ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                          {lang === 'bn' ? 'অ্যাপের ৬ সংখ্যার কোড *' : '6-Digit App Code *'}
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          maxLength={6}
+                          inputMode="numeric"
+                          value={totpCodeInput}
+                          onChange={(e) => setTotpCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="000000"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular font-bold tracking-[0.3em] text-center text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                          {lang === 'bn' ? 'বর্তমান সিকিউরিটি পিন *' : 'Current Security PIN *'}
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          maxLength={5}
+                          inputMode="numeric"
+                          value={totpPinConfirm}
+                          onChange={(e) => setTotpPinConfirm(e.target.value.replace(/\D/g, ''))}
+                          placeholder="••••"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular tracking-widest text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPendingTotpSecret(null);
+                          setTotpCodeInput('');
+                          setTotpPinConfirm('');
+                        }}
+                        className="min-h-[40px] px-4 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+                      >
+                        {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={totpBusy || totpCodeInput.length !== 6 || totpPinConfirm.length < 4}
+                        className="min-h-[40px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>
+                          {totpBusy
+                            ? 'Verifying...'
+                            : lang === 'bn'
+                              ? 'যাচাই করে সেভ করুন'
+                              : 'Verify & Link Authenticator'}
+                        </span>
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+
               {/* Change Security PIN Section */}
               <form
                 onSubmit={handleChangePin}
@@ -1139,6 +1432,24 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             />
           )}
         </div>
+
+        {onLogout && (
+          <div className="px-4 sm:px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0E121D] flex items-center justify-between gap-3">
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+              {lang === 'bn'
+                ? 'সেশন নিরাপদ রাখতে কাজ শেষে লগআউট করুন'
+                : 'Signed in persistently until you log out'}
+            </span>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="min-h-[40px] px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            >
+              <LogOut className="w-4 h-4 shrink-0" />
+              <span>{lang === 'bn' ? 'অ্যাকাউন্ট লগআউট' : 'Sign Out'}</span>
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

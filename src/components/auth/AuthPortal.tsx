@@ -14,6 +14,7 @@ import {
   Loader2,
   MapPin,
   FileCheck2,
+  Smartphone,
   X,
 } from 'lucide-react';
 import { User as FirebaseUser } from 'firebase/auth';
@@ -49,6 +50,7 @@ import {
   SecurityChallenge,
   timingSafeEqual,
 } from '../../lib/securityGuard';
+import { verifyTotpCode } from '../../lib/totp';
 import { BrandLogo } from '../common/BrandLogo';
 
 interface AuthPortalProps {
@@ -75,12 +77,12 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [pin, setPin] = useState('');
-  const [requireLoginOtp, setRequireLoginOtp] = useState(false);
   const [referredByType, setReferredByType] = useState<ReferralSource>('own_app');
   const [referredByAgentIdentifier, setReferredByAgentIdentifier] = useState('');
 
-  // OTP state
+  // Mandatory 2FA / OTP state
   const [otpStep, setOtpStep] = useState(false);
+  const [login2faChannel, setLogin2faChannel] = useState<'email' | 'authenticator'>('email');
   const [generatedOtp, setGeneratedOtp] = useState('');
   const [otpExpiresAt, setOtpExpiresAt] = useState(0);
   const [otpAttempts, setOtpAttempts] = useState(0);
@@ -146,7 +148,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     });
 
     if (matched) {
-      onAuthenticated(matched);
+      await beginMandatoryLogin2fa(matched);
       return;
     }
 
@@ -159,6 +161,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     });
     setMode('register');
     setOtpStep(false);
+    setPendingLoginUser(null);
     setName(fbUser.displayName || '');
     setEmail(fbEmail);
     setPin('');
@@ -257,7 +260,9 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     if (!res.sent) {
       setGeneratedOtp('');
       setOtpExpiresAt(0);
-      setOtpStep(false);
+      if (!pendingLoginUser?.totpSecret) {
+        setOtpStep(false);
+      }
       throw new Error(
         lang === 'bn'
           ? `EmailJS থেকে ${normalizedEmail}-এ ভেরিফিকেশন কোড পাঠানো যায়নি (${res.error || 'Delivery failed'})। অনুগ্রহ করে সঠিক Gmail দিন অথবা উপরে "গুগল (Firebase Auth)" ব্যবহার করুন।`
@@ -272,6 +277,32 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     setOtpStep(true);
   };
 
+  const beginMandatoryLogin2fa = async (user: AcashUser) => {
+    setMode('login');
+    setPendingLoginUser(user);
+    setOtpInput('');
+    setOtpAttempts(0);
+    setGeneratedOtp('');
+    setOtpExpiresAt(0);
+    setOtpStatusMsg('');
+    setError('');
+
+    const hasTotp = Boolean(user.totpSecret && user.totpSecret.length >= 16);
+    if (hasTotp) {
+      setLogin2faChannel('authenticator');
+      setOtpStatusMsg(
+        lang === 'bn'
+          ? `${user.accountId} এর Google Authenticator থেকে ৬-সংখ্যার কোড দিন অথবা EmailJS কোডে সুইচ করুন।`
+          : `Enter the 6-digit code from Google Authenticator for ${user.accountId}, or switch to EmailJS code below.`
+      );
+      setOtpStep(true);
+      return;
+    }
+
+    setLogin2faChannel('email');
+    await triggerOtpSend(user.email, user.name, user.role);
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -282,13 +313,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
         identifier,
         pin,
       });
-
-      if (requireLoginOtp) {
-        setPendingLoginUser(user);
-        await triggerOtpSend(user.email, user.name, user.role);
-      } else {
-        onAuthenticated(user);
-      }
+      await beginMandatoryLogin2fa(user);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Authentication failed.');
     } finally {
@@ -470,7 +495,65 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     e.preventDefault();
     setError('');
 
+    const trimmedCode = otpInput.trim();
     const targetEmail = (pendingLoginUser ? pendingLoginUser.email : email).trim().toLowerCase();
+
+    if (mode === 'login' && pendingLoginUser) {
+      const hasTotp = Boolean(
+        pendingLoginUser.totpSecret && pendingLoginUser.totpSecret.length >= 16
+      );
+      const emailOtpValid =
+        generatedOtp.length === 6 &&
+        otpExpiresAt > Date.now() &&
+        timingSafeEqual(trimmedCode, generatedOtp);
+      const totpValid = hasTotp
+        ? await verifyTotpCode(pendingLoginUser.totpSecret!, trimmedCode, 1)
+        : false;
+
+      if (totpValid || emailOtpValid) {
+        onAuthenticated(pendingLoginUser);
+        return;
+      }
+
+      if (login2faChannel === 'email' && !hasTotp && (!otpExpiresAt || Date.now() > otpExpiresAt)) {
+        setError(
+          lang === 'bn'
+            ? 'ইমেইল ওটিপি কোডের মেয়াদ শেষ হয়ে গেছে। অনুগ্রহ করে Resend OTP চাপুন।'
+            : 'This Email OTP has expired. Please tap Resend OTP to receive a fresh code.'
+        );
+        return;
+      }
+
+      const nextAttempts = otpAttempts + 1;
+      setOtpAttempts(nextAttempts);
+      if (nextAttempts >= 5) {
+        setGeneratedOtp('');
+        setOtpExpiresAt(0);
+        setPendingLoginUser(null);
+        setOtpStep(false);
+        recordOtpAbuseEvent(
+          targetEmail,
+          `5 consecutive failed login 2FA attempts for ${targetEmail}; active challenge terminated.`
+        );
+        setError(
+          lang === 'bn'
+            ? '৫ বার ভুল ২FA কোড দেওয়ায় সাইন-ইন বাতিল হয়েছে। অনুগ্রহ করে আবার লগইন শুরু করুন।'
+            : '5 wrong verification attempts detected. Please start sign-in again.'
+        );
+        return;
+      }
+      setError(
+        lang === 'bn'
+          ? `ভুল ৬-সংখ্যার কোড (${5 - nextAttempts} বার বাকি)। ${
+              hasTotp
+                ? 'সঠিক Google Authenticator বা EmailJS কোড দিন।'
+                : 'আপনার জিমেইল চেক করে সঠিক ৬-সংখ্যার কোড দিন।'
+            }`
+          : `Invalid 6-digit verification code (${5 - nextAttempts} attempts remaining).`
+      );
+      return;
+    }
+
     if (!otpExpiresAt || Date.now() > otpExpiresAt) {
       setError(
         lang === 'bn'
@@ -480,7 +563,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
       return;
     }
 
-    if (generatedOtp.length !== 6 || !timingSafeEqual(otpInput.trim(), generatedOtp)) {
+    if (generatedOtp.length !== 6 || !timingSafeEqual(trimmedCode, generatedOtp)) {
       const nextAttempts = otpAttempts + 1;
       setOtpAttempts(nextAttempts);
       if (nextAttempts >= 5) {
@@ -507,36 +590,32 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
     setLoading(true);
     try {
-      if (mode === 'login' && pendingLoginUser) {
-        onAuthenticated(pendingLoginUser);
-      } else {
-        if (!gender) {
-          throw new Error('Please select Gender before completing registration.');
-        }
-        if (!tcaAccepted) {
-          throw new Error('Terms & Conditions Agreement (TCA) acceptance is required.');
-        }
-        const created = await registerAcashUser({
-          role,
-          name,
-          businessName: role !== 'U' ? businessName : undefined,
-          gender,
-          termsAcceptedAt: Date.now(),
-          phone,
-          email: email.trim().toLowerCase(),
-          pin,
-          referredByType,
-          referredByAgentIdentifier:
-            referredByType === 'agent' ? referredByAgentIdentifier : undefined,
-          verificationMethod: 'emailjs_otp',
-          emailJsOtpVerified: true,
-        });
-        setCloudSynced(
-          getBackendSyncMode() === 'firestore' ||
-            Boolean(created.firebaseUid && auth.currentUser?.emailVerified)
-        );
-        setNewlyCreatedUser(created);
+      if (!gender) {
+        throw new Error('Please select Gender before completing registration.');
       }
+      if (!tcaAccepted) {
+        throw new Error('Terms & Conditions Agreement (TCA) acceptance is required.');
+      }
+      const created = await registerAcashUser({
+        role,
+        name,
+        businessName: role !== 'U' ? businessName : undefined,
+        gender,
+        termsAcceptedAt: Date.now(),
+        phone,
+        email: email.trim().toLowerCase(),
+        pin,
+        referredByType,
+        referredByAgentIdentifier:
+          referredByType === 'agent' ? referredByAgentIdentifier : undefined,
+        verificationMethod: 'emailjs_otp',
+        emailJsOtpVerified: true,
+      });
+      setCloudSynced(
+        getBackendSyncMode() === 'firestore' ||
+          Boolean(created.firebaseUid && auth.currentUser?.emailVerified)
+      );
+      setNewlyCreatedUser(created);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Account creation failed.');
     } finally {
@@ -660,10 +739,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 lg:py-12">
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-10 items-stretch">
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-5 sm:py-8 lg:py-12">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 lg:gap-10 items-stretch">
         {/* Left Calm Welcome Panel */}
-        <div className="lg:col-span-5 flex flex-col justify-between rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-9 shadow-sm dark:shadow-none">
+        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl sm:rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-8 lg:p-9 shadow-sm dark:shadow-none">
           <div className="space-y-6">
             <BrandLogo size="lg" subtitle={t('tagline', lang)} />
 
@@ -700,7 +779,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
         </div>
 
         {/* Right Interactive Auth Card */}
-        <div className="lg:col-span-7 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 sm:p-8 flex flex-col justify-center shadow-sm dark:shadow-none">
+        <div className="lg:col-span-7 rounded-2xl sm:rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-7 lg:p-8 flex flex-col justify-center shadow-sm dark:shadow-none">
           {/* Google Sign-In with Firebase Auth */}
           <div className="mb-5">
             {googleIdentity ? (
@@ -925,19 +1004,14 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     </div>
                   </div>
 
-                  <label className="flex items-center gap-2.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer select-none pt-1">
-                    <input
-                      type="checkbox"
-                      checked={requireLoginOtp}
-                      onChange={(e) => setRequireLoginOtp(e.target.checked)}
-                      className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <span>
+                  <div className="p-3 rounded-xl bg-indigo-50/80 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 flex items-start gap-2.5 text-xs text-indigo-800 dark:text-indigo-200">
+                    <ShieldCheck className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed">
                       {lang === 'bn'
-                        ? 'লগইনের সময় জিমেইল ওটিপি ২-স্টেপ ভেরিফিকেশন ব্যবহার করুন'
-                        : 'Require Gmail 2FA OTP verification via EmailJS on sign in'}
+                        ? 'নিরাপত্তা নীতি: প্রতিটি নতুন লগইনে EmailJS ভেরিফিকেশন কোড অথবা Google Authenticator কোড দেওয়া বাধ্যতামূলক।'
+                        : 'Mandatory Login Guard: Every new sign-in requires an EmailJS verification code or a 6-digit Google Authenticator code.'}
                     </span>
-                  </label>
+                  </div>
 
                   {error && (
                     <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
@@ -1249,31 +1323,105 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             </>
           ) : (
             <form onSubmit={handleVerifyOtpAndFinalize} className="space-y-4">
+              {mode === 'login' && pendingLoginUser && (
+                <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800">
+                  <button
+                    type="button"
+                    disabled={!pendingLoginUser.totpSecret || loading}
+                    onClick={() => {
+                      setLogin2faChannel('authenticator');
+                      setOtpInput('');
+                      setError('');
+                    }}
+                    className={`min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                      login2faChannel === 'authenticator' && pendingLoginUser.totpSecret
+                        ? 'bg-emerald-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-400 disabled:opacity-45'
+                    }`}
+                  >
+                    <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {pendingLoginUser.totpSecret
+                        ? lang === 'bn'
+                          ? 'Google Auth কোড'
+                          : 'Google Auth Code'
+                        : lang === 'bn'
+                          ? 'Auth (সেটআপ নেই)'
+                          : 'Google Auth (Off)'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={async () => {
+                      setLogin2faChannel('email');
+                      setOtpInput('');
+                      setError('');
+                      if (!generatedOtp || Date.now() > otpExpiresAt) {
+                        setLoading(true);
+                        try {
+                          await triggerOtpSend(
+                            pendingLoginUser.email,
+                            pendingLoginUser.name,
+                            pendingLoginUser.role
+                          );
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'Failed to send Email OTP.');
+                        } finally {
+                          setLoading(false);
+                        }
+                      }
+                    }}
+                    className={`min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                      login2faChannel === 'email'
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Mail className="w-3.5 h-3.5 shrink-0" />
+                    <span>{lang === 'bn' ? 'ইমেইল কোড' : 'EmailJS Code'}</span>
+                  </button>
+                </div>
+              )}
+
               <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 space-y-1.5">
                 <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700 dark:text-indigo-200">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                  <span>EmailJS Gmail Verification</span>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>
+                    {mode === 'login' && pendingLoginUser && login2faChannel === 'authenticator' && pendingLoginUser.totpSecret
+                      ? lang === 'bn'
+                        ? 'Google Authenticator / TOTP যাচাই'
+                        : 'Google Authenticator / TOTP Verification'
+                      : 'EmailJS Gmail Verification'}
+                  </span>
                 </div>
                 <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">{otpStatusMsg}</p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                  {lang === 'bn'
-                    ? 'ইনবক্সে না পেলে অবশ্যই Gmail-এর Spam / Promotions ফোল্ডার চেক করুন, অথবা Resend OTP চাপুন।'
-                    : 'Check both Inbox and Spam / Promotions folders in Gmail, or tap Resend OTP below.'}
-                </p>
+                {login2faChannel === 'email' && (
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                    {lang === 'bn'
+                      ? 'ইনবক্সে না পেলে অবশ্যই Gmail-এর Spam / Promotions ফোল্ডার চেক করুন, অথবা Resend OTP চাপুন।'
+                      : 'Check both Inbox and Spam / Promotions folders in Gmail, or tap Resend OTP below.'}
+                  </p>
+                )}
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                  {t('otpCode', lang)}
+                  {mode === 'login' && login2faChannel === 'authenticator' && pendingLoginUser?.totpSecret
+                    ? lang === 'bn'
+                      ? 'Google Authenticator ৬-সংখ্যার কোড'
+                      : '6-Digit Google Authenticator Code'
+                    : t('otpCode', lang)}
                 </label>
                 <input
                   type="text"
                   required
                   maxLength={6}
                   inputMode="numeric"
+                  autoFocus
                   value={otpInput}
-                  onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, ''))}
-                  placeholder="6-digit OTP"
+                  onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
                   className="w-full px-4 py-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-center font-mono-tabular text-xl tracking-[0.4em] text-slate-900 dark:text-white placeholder:text-slate-400 placeholder:tracking-normal placeholder:text-sm focus:outline-none focus:border-indigo-500"
                 />
               </div>
@@ -1286,8 +1434,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
 
               <button
                 type="submit"
-                disabled={loading}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors"
+                disabled={loading || otpInput.trim().length !== 6}
+                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                 <span>{t('verifyAndContinue', lang)}</span>
@@ -1296,37 +1444,44 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               <div className="flex items-center justify-between text-xs pt-1">
                 <button
                   type="button"
-                  onClick={() => setOtpStep(false)}
+                  onClick={() => {
+                    setOtpStep(false);
+                    setPendingLoginUser(null);
+                    setOtpInput('');
+                    setError('');
+                  }}
                   className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
                 >
                   {t('back', lang)}
                 </button>
-                <button
-                  type="button"
-                  disabled={loading || otpCooldownSec > 0}
-                  onClick={async () => {
-                    setLoading(true);
-                    setError('');
-                    try {
-                      const targetEmail = pendingLoginUser ? pendingLoginUser.email : email;
-                      const targetName = pendingLoginUser ? pendingLoginUser.name : name;
-                      const targetRole = pendingLoginUser ? pendingLoginUser.role : role;
-                      await triggerOtpSend(targetEmail, targetName, targetRole);
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : 'Failed to resend OTP.');
-                    } finally {
-                      setLoading(false);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60 whitespace-nowrap shrink-0"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                  <span>
-                    {otpCooldownSec > 0
-                      ? `${t('resendOtp', lang)} (${otpCooldownSec}s)`
-                      : t('resendOtp', lang)}
-                  </span>
-                </button>
+                {(mode === 'register' || login2faChannel === 'email') && (
+                  <button
+                    type="button"
+                    disabled={loading || otpCooldownSec > 0}
+                    onClick={async () => {
+                      setLoading(true);
+                      setError('');
+                      try {
+                        const targetEmail = pendingLoginUser ? pendingLoginUser.email : email;
+                        const targetName = pendingLoginUser ? pendingLoginUser.name : name;
+                        const targetRole = pendingLoginUser ? pendingLoginUser.role : role;
+                        await triggerOtpSend(targetEmail, targetName, targetRole);
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : 'Failed to resend OTP.');
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60 whitespace-nowrap shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    <span>
+                      {otpCooldownSec > 0
+                        ? `${t('resendOtp', lang)} (${otpCooldownSec}s)`
+                        : t('resendOtp', lang)}
+                    </span>
+                  </button>
+                )}
               </div>
             </form>
           )}
