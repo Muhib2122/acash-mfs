@@ -3,26 +3,42 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
+  Copy,
+  KeyRound,
   Lock,
+  Mail,
+  QrCode,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Smartphone,
+  Trash2,
   Unlock,
   Volume2,
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import {
+  AdminTwoFactorMethod,
   Language,
   SecurityEventRecord,
   SecurityPolicyConfig,
 } from '../../types/acash';
 import {
   adminResolveAndUnlockSecurityTarget,
+  adminSaveTotpEnrollment,
   adminUpdateSecurityPolicy,
+  getAdminTotpSecretForEmail,
 } from '../../lib/acashService';
 import {
   formatDurationRemaining,
   getActiveLockouts,
 } from '../../lib/securityGuard';
+import {
+  buildTotpOtpAuthUri,
+  formatTotpSecretForDisplay,
+  generateTotpBase32Secret,
+  verifyTotpCode,
+} from '../../lib/totp';
 import {
   DeviceAlertStatus,
   getDeviceAlertStatus,
@@ -47,11 +63,19 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
 }) => {
   const [draftPolicy, setDraftPolicy] = useState<SecurityPolicyConfig>(securityPolicy);
   const [savingPolicy, setSavingPolicy] = useState(false);
+  const [toggling2fa, setToggling2fa] = useState(false);
+  const [pendingTotpSecret, setPendingTotpSecret] = useState<string | null>(null);
+  const [totpVerifyInput, setTotpVerifyInput] = useState('');
+  const [totpSetupBusy, setTotpSetupBusy] = useState(false);
+  const [totpSetupError, setTotpSetupError] = useState('');
+  const [copiedSecret, setCopiedSecret] = useState(false);
   const [unlockingKey, setUnlockingKey] = useState<string | null>(null);
   const [activeLockouts, setActiveLockouts] = useState(() => getActiveLockouts());
   const [deviceStatus, setDeviceStatus] = useState<DeviceAlertStatus>(() =>
     getDeviceAlertStatus()
   );
+
+  const enrolledTotpSecret = getAdminTotpSecretForEmail(adminEmail, securityPolicy);
 
   useEffect(() => {
     setDraftPolicy(securityPolicy);
@@ -108,6 +132,108 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
       );
     } finally {
       setUnlockingKey(null);
+    }
+  };
+
+  const handleToggleAdmin2fa = async (nextEnabled: boolean) => {
+    setToggling2fa(true);
+    try {
+      const updated = await adminUpdateSecurityPolicy(
+        {
+          ...draftPolicy,
+          admin2faEnabled: nextEnabled,
+        },
+        adminEmail
+      );
+      setDraftPolicy(updated);
+      onFeedback(
+        nextEnabled
+          ? lang === 'bn'
+            ? `অ্যাডমিন ২FA চালু করা হয়েছে (${updated.admin2faMethod})। পরবর্তী লগইনে EmailJS বা Authenticator কোড প্রয়োজন হবে।`
+            : `Admin Login 2FA ENABLED (${updated.admin2faMethod.replace(/_/g, ' ')}). Next Command Console login will require 2FA verification.`
+          : lang === 'bn'
+            ? 'অ্যাডমিন লগইন ২FA বন্ধ করা হয়েছে।'
+            : 'Admin Login 2FA disabled.'
+      );
+    } catch (err) {
+      onFeedback(err instanceof Error ? err.message : 'Failed to toggle Admin 2FA.');
+    } finally {
+      setToggling2fa(false);
+    }
+  };
+
+  const handleChange2faMethod = async (nextMethod: AdminTwoFactorMethod) => {
+    setToggling2fa(true);
+    try {
+      const updated = await adminUpdateSecurityPolicy(
+        {
+          ...draftPolicy,
+          admin2faMethod: nextMethod,
+        },
+        adminEmail
+      );
+      setDraftPolicy(updated);
+      onFeedback(
+        nextMethod === 'email_otp'
+          ? 'Admin 2FA set to EmailJS Temporary Verification Code.'
+          : nextMethod === 'authenticator_app'
+            ? enrolledTotpSecret
+              ? 'Admin 2FA set to Authenticator App (Google / Authy / Microsoft).'
+              : 'Admin 2FA set to Authenticator App (EmailJS fallback remains active until you scan & verify your Authenticator QR below).'
+            : 'Admin 2FA set to Both (sends EmailJS code and also accepts Authenticator App 6-digit TOTP).'
+      );
+    } catch (err) {
+      onFeedback(err instanceof Error ? err.message : 'Failed to update 2FA mode.');
+    } finally {
+      setToggling2fa(false);
+    }
+  };
+
+  const handleVerifyAndSaveTotp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingTotpSecret) return;
+    setTotpSetupError('');
+    setTotpSetupBusy(true);
+    try {
+      const valid = await verifyTotpCode(pendingTotpSecret, totpVerifyInput, 1);
+      if (!valid) {
+        setTotpSetupError(
+          lang === 'bn'
+            ? '৬ সংখ্যার Authenticator কোডটি মেলেনি। ফোনের সময় (Automatic date/time) ও কোড আবার চেক করুন।'
+            : '6-digit Authenticator code did not match. Confirm device time is automatic and enter the current code.'
+        );
+        return;
+      }
+      await adminSaveTotpEnrollment({
+        targetAdminEmail: adminEmail,
+        secretBase32: pendingTotpSecret,
+        actorEmail: adminEmail,
+      });
+      setPendingTotpSecret(null);
+      setTotpVerifyInput('');
+      onFeedback(
+        lang === 'bn'
+          ? `${adminEmail} এর জন্য Google/TOTP Authenticator অ্যাপ সফলভাবে যুক্ত হয়েছে।`
+          : `Authenticator App verified and bound to ${adminEmail}.`
+      );
+    } catch (err) {
+      setTotpSetupError(err instanceof Error ? err.message : 'Failed to verify TOTP code.');
+    } finally {
+      setTotpSetupBusy(false);
+    }
+  };
+
+  const handleRevokeTotp = async () => {
+    setTotpSetupBusy(true);
+    try {
+      await adminSaveTotpEnrollment({
+        targetAdminEmail: adminEmail,
+        secretBase32: null,
+        actorEmail: adminEmail,
+      });
+      onFeedback(`Authenticator App key revoked for ${adminEmail}. EmailJS 2FA remains available.`);
+    } finally {
+      setTotpSetupBusy(false);
     }
   };
 
@@ -233,6 +359,311 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
             <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
               + 6s duplicate replay block
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Admin 2FA Toggle + EmailJS & Google Authenticator Setup */}
+      <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 shadow-sm space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs font-bold text-indigo-600 dark:text-indigo-400">
+              <KeyRound className="w-4 h-4 shrink-0" />
+              <span>
+                {lang === 'bn'
+                  ? 'অ্যাডমিন লগইন ২-ফ্যাক্টর অথেন্টিকেশন (2FA)'
+                  : 'Admin Command Console 2-Factor Authentication (2FA)'}
+              </span>
+            </div>
+            <h3 className="font-display text-lg font-bold text-slate-900 dark:text-white">
+              {lang === 'bn'
+                ? 'EmailJS ভেরিফিকেশন কোড ও Google / TOTP অথেন্টিকেটর সুরক্ষা'
+                : 'EmailJS Temporary Code & Authenticator App Verification'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-2xl">
+              {lang === 'bn'
+                ? `চালু করলে কমান্ড কনসোলে ঢোকার আগে ${adminEmail}-এ অস্থায়ী কোড যাবে অথবা Google Authenticator / Authy / Microsoft Authenticator থেকে ৬ সংখ্যার কোড দিয়ে যাচাই করতে হবে।`
+                : `When enabled, Admin login requires a temporary 6-digit verification code sent via EmailJS to ${adminEmail} and/or a live 6-digit TOTP code from Google Authenticator or any standard authenticator app before console access is granted.`}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={securityPolicy.admin2faEnabled}
+            disabled={toggling2fa}
+            onClick={() => void handleToggleAdmin2fa(!securityPolicy.admin2faEnabled)}
+            className={`min-h-[42px] px-4 py-2 rounded-xl border text-xs font-bold inline-flex items-center gap-2.5 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 ${
+              securityPolicy.admin2faEnabled
+                ? 'bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-500'
+                : 'bg-slate-100 dark:bg-[#0B0D14] border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-indigo-400'
+            }`}
+          >
+            <span
+              className={`w-8 h-4 rounded-full p-0.5 transition-colors flex items-center ${
+                securityPolicy.admin2faEnabled ? 'bg-white/25 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+              }`}
+            >
+              <span className="w-3 h-3 rounded-full bg-white shadow-xs" />
+            </span>
+            <span>
+              {toggling2fa
+                ? 'Updating...'
+                : securityPolicy.admin2faEnabled
+                  ? lang === 'bn'
+                    ? 'অ্যাডমিন ২FA চালু আছে'
+                    : 'Admin 2FA: ON'
+                  : lang === 'bn'
+                    ? 'অ্যাডমিন ২FA বন্ধ আছে'
+                    : 'Admin 2FA: OFF'}
+            </span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Verification Channel Selection */}
+          <div className="lg:col-span-5 space-y-3">
+            <div className="text-xs font-bold text-slate-700 dark:text-slate-200">
+              {lang === 'bn' ? '২FA ভেরিফিকেশন মাধ্যম নির্বাচন করুন' : 'Select Verification Method'}
+            </div>
+            <div className="space-y-2">
+              {(
+                [
+                  {
+                    id: 'both' as AdminTwoFactorMethod,
+                    title:
+                      lang === 'bn'
+                        ? 'দুটোই চালু (EmailJS কোড + Authenticator অ্যাপ)'
+                        : 'Both Enabled (EmailJS Code + Authenticator App)',
+                    desc:
+                      lang === 'bn'
+                        ? 'লগইনে ইমেইলে অস্থায়ী কোড পাঠাবে এবং Authenticator কোডও গ্রহণ করবে।'
+                        : 'Sends temporary EmailJS code on login and also accepts 6-digit Authenticator TOTP codes.',
+                    icon: ShieldCheck,
+                  },
+                  {
+                    id: 'email_otp' as AdminTwoFactorMethod,
+                    title:
+                      lang === 'bn'
+                        ? 'শুধু EmailJS অস্থায়ী কোড'
+                        : 'EmailJS Temporary Verification Code Only',
+                    desc: `Sends a 10-minute 6-digit code directly to ${adminEmail} via EmailJS.`,
+                    icon: Mail,
+                  },
+                  {
+                    id: 'authenticator_app' as AdminTwoFactorMethod,
+                    title:
+                      lang === 'bn'
+                        ? 'Google / যেকোনো Authenticator অ্যাপ (TOTP)'
+                        : 'Authenticator App Only (Google, Authy, Microsoft)',
+                    desc: enrolledTotpSecret
+                      ? 'Requires live 6-digit rotating TOTP code from your enrolled Authenticator app.'
+                      : 'Requires Authenticator TOTP (uses EmailJS code as safe fallback until QR enrolled).',
+                    icon: Smartphone,
+                  },
+                ] as const
+              ).map((opt) => {
+                const Icon = opt.icon;
+                const active = securityPolicy.admin2faMethod === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    disabled={toggling2fa}
+                    onClick={() => void handleChange2faMethod(opt.id)}
+                    className={`w-full text-left p-3.5 rounded-2xl border transition-colors flex items-start gap-3 ${
+                      active
+                        ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-300 dark:border-indigo-500/40'
+                        : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <Icon
+                      className={`w-4 h-4 mt-0.5 shrink-0 ${
+                        active ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white">
+                        {opt.title}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        {opt.desc}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Authenticator App TOTP Enrollment Card */}
+          <div className="lg:col-span-7 p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <QrCode className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>
+                    {lang === 'bn'
+                      ? 'Google Authenticator / TOTP অ্যাপ সেটআপ'
+                      : 'Google Authenticator / TOTP App Enrollment'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
+                  <span>{adminEmail}</span>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className={
+                      enrolledTotpSecret
+                        ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                        : 'text-amber-600 dark:text-amber-400 font-semibold'
+                    }
+                  >
+                    {enrolledTotpSecret ? 'Authenticator Active' : 'Not Yet Enrolled'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingTotpSecret(generateTotpBase32Secret(20));
+                    setTotpVerifyInput('');
+                    setTotpSetupError('');
+                    setCopiedSecret(false);
+                  }}
+                  className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <QrCode className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {enrolledTotpSecret
+                      ? lang === 'bn'
+                        ? 'নতুন QR কী তৈরি করুন'
+                        : 'Rotate Authenticator Key'
+                      : lang === 'bn'
+                        ? 'Authenticator QR সেটআপ করুন'
+                        : 'Setup Authenticator App'}
+                  </span>
+                </button>
+
+                {enrolledTotpSecret && !pendingTotpSecret && (
+                  <button
+                    type="button"
+                    disabled={totpSetupBusy}
+                    onClick={() => void handleRevokeTotp()}
+                    className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>{lang === 'bn' ? 'রিমুভ' : 'Revoke Key'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {pendingTotpSecret ? (
+              <form onSubmit={handleVerifyAndSaveTotp} className="grid grid-cols-1 sm:grid-cols-12 gap-4 pt-2 border-t border-slate-200 dark:border-slate-800 items-center">
+                <div className="sm:col-span-5 flex flex-col items-center justify-center p-3 rounded-2xl bg-white border border-slate-200">
+                  <QRCodeSVG
+                    value={buildTotpOtpAuthUri({
+                      secret: pendingTotpSecret,
+                      accountEmail: adminEmail,
+                      issuer: 'Acash Admin',
+                    })}
+                    size={148}
+                    level="M"
+                    fgColor="#0f172a"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-2 text-center">
+                    Scan with Google Authenticator, Microsoft Authenticator or Authy
+                  </span>
+                </div>
+
+                <div className="sm:col-span-7 space-y-3">
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
+                      Manual Setup Key (Time-based / SHA1 / 6 digits)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 px-3 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-mono-tabular font-bold text-slate-900 dark:text-white tracking-wider break-all">
+                        {formatTotpSecretForDisplay(pendingTotpSecret)}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(pendingTotpSecret);
+                          setCopiedSecret(true);
+                        }}
+                        className="px-2.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400 inline-flex items-center gap-1 shrink-0"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>{copiedSecret ? 'Copied' : 'Copy'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                      {lang === 'bn'
+                        ? 'অ্যাপ থেকে ৬ সংখ্যার কোড লিখে কনফার্ম করুন'
+                        : 'Enter 6-Digit Code Shown in Your Authenticator App'}
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      required
+                      value={totpVerifyInput}
+                      onChange={(e) => setTotpVerifyInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder="123456"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular tracking-[0.25em] text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  {totpSetupError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] text-rose-700 dark:text-rose-300">
+                      {totpSetupError}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="submit"
+                      disabled={totpSetupBusy || totpVerifyInput.length !== 6}
+                      className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white disabled:opacity-50 transition-colors"
+                    >
+                      {totpSetupBusy ? 'Verifying...' : 'Verify & Bind Authenticator'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingTotpSecret(null);
+                        setTotpVerifyInput('');
+                        setTotpSetupError('');
+                      }}
+                      className="py-2.5 px-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed pt-1 border-t border-slate-200 dark:border-slate-800">
+                {enrolledTotpSecret ? (
+                  <p>
+                    {lang === 'bn'
+                      ? `${adminEmail} অ্যাকাউন্টের সাথে TOTP Authenticator কী যুক্ত আছে। Google Authenticator বা অন্য কোনো Authenticator অ্যাপের ৬ সংখ্যার কোড দিয়ে লগইন যাচাই করা যাবে।`
+                      : `An RFC 6238 TOTP key is active for ${adminEmail}. You can sign in using rotating 6-digit codes from Google Authenticator, Microsoft Authenticator, Authy, 1Password, or Bitwarden.`}
+                  </p>
+                ) : (
+                  <p>
+                    {lang === 'bn'
+                      ? 'Google Authenticator, Microsoft Authenticator, Authy বা যেকোনো TOTP অ্যাপ যুক্ত করতে উপরের "Setup Authenticator App" বাটনে ক্লিক করে QR কোড স্ক্যান করুন।'
+                      : 'Click "Setup Authenticator App" above to scan a QR code with Google Authenticator, Authy, Microsoft Authenticator, or any TOTP password manager.'}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -27,9 +27,11 @@ import {
 } from './firebase';
 import {
   sendAccountCreatedEmails,
+  sendAdmin2faCodeEmail,
   sendHighValueDecisionEmails,
   sendHighValuePendingEmails,
 } from './emailjs';
+import { verifyTotpCode } from './totp';
 import {
   AcashBooth,
   AcashDirectoryEntry,
@@ -87,6 +89,7 @@ import { DEFAULT_PORTAL_THEME_CONFIG, PORTAL_THEME_PRESETS } from './portalTheme
 import { detectIpGeolocation } from './ipGeo';
 import {
   assertSafeImageDataUrl,
+  checkAndRecordOtpSendQuota,
   checkAndRecordRegistrationBurst,
   checkAndRecordTxFlood,
   checkAttemptLockout,
@@ -101,6 +104,9 @@ import {
   sanitizePlainText,
   secureRandomDigits,
   secureRandomHex,
+  sha256HexString,
+  timingSafeEqual,
+  toSafeAdminTotpKey,
   unlockRateLimitEntry,
   verifySecretAgainstStored,
 } from './securityGuard';
@@ -8255,6 +8261,7 @@ export async function adminResolveAndUnlockSecurityTarget(params: {
     unlockRateLimitEntry('tx_pin', cleanTarget);
     unlockRateLimitEntry('merchant_unlock', cleanTarget);
     unlockRateLimitEntry('admin_login', cleanTarget);
+    unlockRateLimitEntry('admin_2fa', cleanTarget);
   }
 
   const store = readLocalStore();
@@ -8322,6 +8329,192 @@ export function recordSessionTamperEvent(identifier: string, portal: 'admin' | '
     targetIdentifier: identifier,
   });
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Admin 2-Factor Authentication (EmailJS OTP + TOTP Authenticator Apps)     */
+/* -------------------------------------------------------------------------- */
+
+export function getAdminTotpSecretForEmail(
+  email: string,
+  policy?: SecurityPolicyConfig
+): string | null {
+  const effective = policy || getEffectiveSecurityPolicy();
+  const key = toSafeAdminTotpKey(email);
+  return effective.adminTotpSecrets?.[key] || null;
+}
+
+export async function adminSaveTotpEnrollment(params: {
+  targetAdminEmail: string;
+  secretBase32: string | null;
+  actorEmail: string;
+}): Promise<SecurityPolicyConfig> {
+  const current = getEffectiveSecurityPolicy();
+  const key = toSafeAdminTotpKey(params.targetAdminEmail);
+  const nextSecrets = { ...(current.adminTotpSecrets || {}) };
+
+  if (params.secretBase32) {
+    const clean = params.secretBase32.toUpperCase().replace(/[^A-Z2-7]/g, '');
+    if (!/^[A-Z2-7]{16,64}$/.test(clean)) {
+      throw new Error('Invalid Authenticator Base32 secret.');
+    }
+    nextSecrets[key] = clean;
+  } else {
+    delete nextSecrets[key];
+  }
+
+  const updated = await adminUpdateSecurityPolicy(
+    {
+      adminTotpSecrets: nextSecrets,
+    },
+    params.actorEmail
+  );
+
+  const now = Date.now();
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-2FATOTP',
+    actionType: 'security_update',
+    title: params.secretBase32
+      ? `Authenticator App Enrolled · ${params.targetAdminEmail}`
+      : `Authenticator App Removed · ${params.targetAdminEmail}`,
+    details: params.secretBase32
+      ? `TOTP Authenticator key bound for ${params.targetAdminEmail} by ${params.actorEmail}.`
+      : `TOTP Authenticator key revoked for ${params.targetAdminEmail} by ${params.actorEmail}.`,
+    actorEmail: params.actorEmail,
+    targetIds: [params.targetAdminEmail],
+    timestamp: now,
+  });
+  const store = readLocalStore();
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+  void setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act).catch(() => {});
+
+  return updated;
+}
+
+export async function sendAdmin2faChallengeEmail(params: {
+  adminEmail: string;
+  adminName: string;
+  adminRole: 'main_admin' | 'second_admin';
+}): Promise<{
+  codeHash: string;
+  expiresAt: number;
+  sent: boolean;
+  error?: string;
+  cooldownSec: number;
+}> {
+  const cleanEmail = params.adminEmail.trim().toLowerCase();
+  const quota = checkAndRecordOtpSendQuota(`admin2fa:${cleanEmail}`);
+  if (!quota.allowed) {
+    recordOtpAbuseEvent(cleanEmail, quota.reason || 'Admin 2FA OTP flood blocked');
+    throw new Error(quota.reason || 'Please wait before requesting another 2FA code.');
+  }
+
+  const code = secureRandomDigits(6);
+  const codeHash = await sha256HexString(`A2FA:${cleanEmail}:${code}`);
+  const expiresAt = Date.now() + 10 * 60 * 1000;
+
+  const emailRes = await sendAdmin2faCodeEmail({
+    toEmail: cleanEmail,
+    adminName: params.adminName,
+    code,
+    adminRoleLabel: params.adminRole === 'main_admin' ? 'Main Admin' : '2nd Admin',
+  });
+
+  return {
+    codeHash,
+    expiresAt,
+    sent: emailRes.sent,
+    error: emailRes.error,
+    cooldownSec: quota.cooldownRemainingSec || 45,
+  };
+}
+
+export async function verifyAdmin2faChallengeCode(params: {
+  adminEmail: string;
+  enteredCode: string;
+  emailCodeHash?: string;
+  emailCodeExpiresAt?: number;
+  policy?: SecurityPolicyConfig;
+}): Promise<{ verifiedVia: 'email_otp' | 'authenticator_app' }> {
+  const cleanEmail = params.adminEmail.trim().toLowerCase();
+  const cleanCode = params.enteredCode.replace(/\s+/g, '').trim();
+  const secPolicy = params.policy || getEffectiveSecurityPolicy();
+
+  const lockout = checkAttemptLockout('admin_2fa', cleanEmail);
+  if (!lockout.allowed) {
+    throw new Error(
+      `Admin 2FA locked after repeated invalid codes. Retry in ${formatDurationRemaining(lockout.remainingMs)}.`
+    );
+  }
+
+  if (!/^\d{6}$/.test(cleanCode)) {
+    throw new Error('Enter the 6-digit verification code from your Email or Authenticator app.');
+  }
+
+  const enrolledSecret = getAdminTotpSecretForEmail(cleanEmail, secPolicy);
+  const method = secPolicy.admin2faMethod || 'email_otp';
+  const allowEmailCheck =
+    method === 'email_otp' ||
+    method === 'both' ||
+    (method === 'authenticator_app' && !enrolledSecret);
+  const allowTotpCheck =
+    (method === 'authenticator_app' || method === 'both') && Boolean(enrolledSecret);
+
+  if (
+    allowEmailCheck &&
+    params.emailCodeHash &&
+    params.emailCodeExpiresAt &&
+    Date.now() <= params.emailCodeExpiresAt
+  ) {
+    const candidateHash = await sha256HexString(`A2FA:${cleanEmail}:${cleanCode}`);
+    if (timingSafeEqual(candidateHash, params.emailCodeHash)) {
+      clearSecurityAttempts('admin_2fa', cleanEmail);
+      return { verifiedVia: 'email_otp' };
+    }
+  }
+
+  if (allowTotpCheck && enrolledSecret) {
+    const okTotp = await verifyTotpCode(enrolledSecret, cleanCode, 1);
+    if (okTotp) {
+      clearSecurityAttempts('admin_2fa', cleanEmail);
+      return { verifiedVia: 'authenticator_app' };
+    }
+  }
+
+  const res = recordFailedSecurityAttempt(
+    'admin_2fa',
+    cleanEmail,
+    secPolicy.maxLoginFailures,
+    secPolicy.lockoutMinutes
+  );
+
+  if (res.locked) {
+    void logSecurityEvent({
+      eventType: 'admin_2fa_failed',
+      severity: 'critical',
+      title: `Admin 2FA Lockout Triggered · ${cleanEmail}`,
+      details: `${res.attempts} failed Admin 2FA verification attempts triggered automatic lockout.`,
+      targetIdentifier: cleanEmail,
+      attempts: res.attempts,
+      blockedUntil: res.lockedUntil,
+    });
+    throw new Error(
+      `Admin 2FA Security Lockout (${res.attempts} invalid attempts). Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+    );
+  }
+
+  const expiredEmailNote =
+    allowEmailCheck &&
+    params.emailCodeExpiresAt &&
+    Date.now() > params.emailCodeExpiresAt
+      ? ' (Email code expired — request a new code or enter your Authenticator code.)'
+      : '';
+
+  throw new Error(
+    `Invalid 2FA verification code.${expiredEmailNote} (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left before lockout)`
+  );
+}
+
 
 
 

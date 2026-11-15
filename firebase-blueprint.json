@@ -775,7 +775,7 @@
     },
     "SecurityEvent": {
       "title": "SecurityEvent",
-      "description": "Real-time intrusion detection, brute-force lockout, spam flood block, and session tamper audit event.",
+      "description": "Real-time intrusion detection, brute-force lockout, 2FA failures, spam flood block, and session tamper audit event.",
       "type": "object",
       "properties": {
         "id": {
@@ -783,37 +783,60 @@
           "pattern": "^[a-zA-Z0-9_\\-]+$",
           "maxLength": 64
         },
-        "portal": {
-          "type": "string",
-          "enum": ["unified", "admin"]
-        },
         "eventType": {
           "type": "string",
-          "enum": ["brute_force_lockout", "spam_flood_blocked", "session_tamper", "xss_payload_blocked", "otp_abuse", "admin_unlock", "policy_change"]
+          "enum": [
+            "brute_force_lockout",
+            "admin_login_lockout",
+            "admin_2fa_failed",
+            "spam_flood_blocked",
+            "spam_tx_blocked",
+            "registration_spam_blocked",
+            "session_tamper",
+            "session_tamper_detected",
+            "xss_payload_blocked",
+            "otp_abuse",
+            "admin_unlock",
+            "policy_change"
+          ]
         },
         "severity": {
           "type": "string",
-          "enum": ["low", "medium", "high", "critical"]
+          "enum": ["info", "warning", "critical"]
         },
-        "targetIdentifier": {
+        "title": {
           "type": "string",
-          "maxLength": 160
+          "maxLength": 200
         },
         "details": {
           "type": "string",
           "maxLength": 600
         },
+        "targetIdentifier": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "attempts": {
+          "type": "number"
+        },
         "blockedUntil": {
+          "type": "number"
+        },
+        "createdAt": {
           "type": "number"
         },
         "resolved": {
           "type": "boolean"
         },
-        "timestamp": {
+        "resolvedAt": {
           "type": "number"
+        },
+        "resolvedBy": {
+          "type": "string",
+          "maxLength": 160
         }
       },
-      "required": ["id", "portal", "eventType", "severity", "targetIdentifier", "details", "timestamp"]
+      "required": ["id", "eventType", "severity", "title", "details", "targetIdentifier", "createdAt", "resolved"]
     }
   },
   "firestore": {

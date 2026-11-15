@@ -1,4 +1,4 @@
-import { SecurityPolicyConfig } from '../types/acash';
+import { AdminTwoFactorMethod, SecurityPolicyConfig } from '../types/acash';
 
 const RATE_SHIELD_KEY = 'acash_rate_shield_v1';
 const TX_FLOOD_KEY = 'acash_tx_flood_v1';
@@ -8,6 +8,10 @@ const GIFT_QUOTA_KEY = 'acash_gift_quota_v1';
 
 const APP_SIGNING_PEPPER = 'ACASH_ZERO_TRUST_SEC2_PEPPER_2026_BD';
 
+export function toSafeAdminTotpKey(email: string): string {
+  return email.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+}
+
 export const DEFAULT_SECURITY_POLICY: SecurityPolicyConfig = {
   strictAntiSpamMode: true,
   maxTxPerMinute: 6,
@@ -16,6 +20,9 @@ export const DEFAULT_SECURITY_POLICY: SecurityPolicyConfig = {
   adminIdleTimeoutMinutes: 15,
   accountIdleTimeoutMinutes: 30,
   requireChallengeOnAdminFail: true,
+  admin2faEnabled: false,
+  admin2faMethod: 'both',
+  adminTotpSecrets: {},
   updatedAt: 0,
   updatedBy: 'System Security Baseline',
 };
@@ -29,6 +36,22 @@ export function normalizeSecurityPolicy(
     if (!Number.isFinite(n)) return fallback;
     return Math.min(max, Math.max(min, Math.round(n)));
   };
+  const method: AdminTwoFactorMethod =
+    src.admin2faMethod === 'email_otp' ||
+    src.admin2faMethod === 'authenticator_app' ||
+    src.admin2faMethod === 'both'
+      ? src.admin2faMethod
+      : DEFAULT_SECURITY_POLICY.admin2faMethod;
+
+  const cleanSecrets: Record<string, string> = {};
+  if (src.adminTotpSecrets && typeof src.adminTotpSecrets === 'object') {
+    for (const [k, v] of Object.entries(src.adminTotpSecrets)) {
+      if (typeof v === 'string' && /^[A-Z2-7]{16,64}$/.test(v.toUpperCase())) {
+        cleanSecrets[toSafeAdminTotpKey(k)] = v.toUpperCase();
+      }
+    }
+  }
+
   return {
     strictAntiSpamMode:
       typeof src.strictAntiSpamMode === 'boolean'
@@ -53,6 +76,12 @@ export function normalizeSecurityPolicy(
       typeof src.requireChallengeOnAdminFail === 'boolean'
         ? src.requireChallengeOnAdminFail
         : DEFAULT_SECURITY_POLICY.requireChallengeOnAdminFail,
+    admin2faEnabled:
+      typeof src.admin2faEnabled === 'boolean'
+        ? src.admin2faEnabled
+        : DEFAULT_SECURITY_POLICY.admin2faEnabled,
+    admin2faMethod: method,
+    adminTotpSecrets: cleanSecrets,
     updatedAt: typeof src.updatedAt === 'number' ? src.updatedAt : 0,
     updatedBy:
       typeof src.updatedBy === 'string' && src.updatedBy

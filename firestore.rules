@@ -123,17 +123,20 @@ service cloud.firestore {
     }
 
     function isValidSecurityEvent(data, eventId) {
-      return data.keys().hasAll(['id', 'portal', 'eventType', 'severity', 'targetIdentifier', 'details', 'timestamp'])
-        && data.keys().hasOnly(['id', 'portal', 'eventType', 'severity', 'targetIdentifier', 'details', 'blockedUntil', 'resolved', 'timestamp'])
+      return data.keys().hasAll(['id', 'eventType', 'severity', 'title', 'details', 'targetIdentifier', 'createdAt', 'resolved'])
+        && data.keys().hasOnly(['id', 'eventType', 'severity', 'title', 'details', 'targetIdentifier', 'attempts', 'blockedUntil', 'createdAt', 'resolved', 'resolvedAt', 'resolvedBy'])
         && data.id == eventId
-        && data.portal in ['unified', 'admin']
-        && data.eventType in ['brute_force_lockout', 'spam_flood_blocked', 'session_tamper', 'xss_payload_blocked', 'otp_abuse', 'admin_unlock', 'policy_change']
-        && data.severity in ['low', 'medium', 'high', 'critical']
-        && data.targetIdentifier is string && data.targetIdentifier.size() >= 1 && data.targetIdentifier.size() <= 160
+        && data.eventType in ['brute_force_lockout', 'admin_login_lockout', 'admin_2fa_failed', 'spam_flood_blocked', 'spam_tx_blocked', 'registration_spam_blocked', 'session_tamper', 'session_tamper_detected', 'xss_payload_blocked', 'otp_abuse', 'admin_unlock', 'policy_change']
+        && data.severity in ['info', 'warning', 'critical']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
         && data.details is string && data.details.size() >= 1 && data.details.size() <= 600
+        && data.targetIdentifier is string && data.targetIdentifier.size() >= 1 && data.targetIdentifier.size() <= 160
+        && (!('attempts' in data) || data.attempts is number)
         && (!('blockedUntil' in data) || data.blockedUntil is number)
-        && (!('resolved' in data) || data.resolved is bool)
-        && data.timestamp is number;
+        && data.createdAt is number
+        && data.resolved is bool
+        && (!('resolvedAt' in data) || data.resolvedAt is number)
+        && (!('resolvedBy' in data) || (data.resolvedBy is string && data.resolvedBy.size() <= 160));
     }
 
     function canReadPortalRecord() {

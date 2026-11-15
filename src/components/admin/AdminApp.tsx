@@ -46,6 +46,8 @@ import {
   Globe,
   Crosshair,
   ShieldAlert,
+  KeyRound,
+  Smartphone,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -56,6 +58,7 @@ import {
   AdminActivityType,
   AdminNotification,
   AdminSession,
+  AdminTwoFactorMethod,
   BoothStatus,
   BoothType,
   CustomGiftCardRecord,
@@ -75,7 +78,7 @@ import {
   UserRole,
 } from '../../types/acash';
 import { formatBdt, formatCompactBdt, t } from '../../lib/i18n';
-import { consumeGoogleRedirectResult, signInWithGoogleSmart } from '../../lib/firebase';
+import { consumeGoogleRedirectResult, signInWithGoogleSmart, signOutFirebase } from '../../lib/firebase';
 import {
   getVoiceMuted,
   playTransactionVoiceAlert,
@@ -116,15 +119,19 @@ import {
   calculateFeeBreakdown,
   changeMainAdminPassword,
   formatUserReferralSource,
+  getAdminTotpSecretForEmail,
+  getEffectiveSecurityPolicy,
   isMainAdminEmail,
   mainAdminMintTreasuryCredit,
   mainAdminRefreshTreasuryBalance,
   markAdminNotificationRead,
   markAllAdminNotificationsRead,
   saveSecondAdminProfileAndLocation,
+  sendAdmin2faChallengeEmail,
   setAdminAlertEmail,
   subscribeToAdminAlertEmail,
   syncAutoIpMapLocation,
+  verifyAdmin2faChallengeCode,
   verifyAdminPasswordLogin,
 } from '../../lib/acashService';
 import { sendAccountStatusEmail } from '../../lib/emailjs';
@@ -257,7 +264,28 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const [adminFailedCount, setAdminFailedCount] = useState(0);
   const [adminChallenge, setAdminChallenge] = useState(() => createSecurityChallenge(lang));
   const [adminChallengeAns, setAdminChallengeAns] = useState('');
+  const [pending2fa, setPending2fa] = useState<{
+    candidateSession: AdminSession;
+    method: AdminTwoFactorMethod;
+    hasTotpApp: boolean;
+    emailCodeHash?: string;
+    emailCodeExpiresAt?: number;
+    emailSent: boolean;
+    emailStatusNote?: string;
+  } | null>(null);
+  const [admin2faCodeInput, setAdmin2faCodeInput] = useState('');
+  const [admin2faBusy, setAdmin2faBusy] = useState(false);
+  const [admin2faResending, setAdmin2faResending] = useState(false);
+  const [admin2faCooldownSec, setAdmin2faCooldownSec] = useState(0);
   const [deviceAlertStatus, setDeviceAlertStatus] = useState(() => getDeviceAlertStatus());
+
+  useEffect(() => {
+    if (admin2faCooldownSec <= 0) return;
+    const id = window.setInterval(() => {
+      setAdmin2faCooldownSec((s) => (s > 0 ? s - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [admin2faCooldownSec]);
 
   const [section, setSection] = useState<AdminSection>('overview');
   const [userSearch, setUserSearch] = useState('');
@@ -965,6 +993,128 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     };
   }, [filteredLedgerTransactions, feeConfig.highValueThreshold]);
 
+  const startOrGrantAdminSession = async (draftSession: AdminSession) => {
+    const activePolicy = securityPolicy?.updatedAt ? securityPolicy : getEffectiveSecurityPolicy();
+    if (!activePolicy.admin2faEnabled) {
+      onAdminLogin(draftSession);
+      setAdminPasscode('');
+      if (draftSession.adminRole === 'second_admin') {
+        setSection('admin_profile');
+      } else {
+        setSection('overview');
+      }
+      return;
+    }
+
+    const hasTotpApp = Boolean(
+      getAdminTotpSecretForEmail(draftSession.adminEmail, activePolicy)
+    );
+    const method: AdminTwoFactorMethod = activePolicy.admin2faMethod || 'both';
+    const shouldSendEmail =
+      method === 'email_otp' || method === 'both' || (method === 'authenticator_app' && !hasTotpApp);
+
+    let emailCodeHash: string | undefined;
+    let emailCodeExpiresAt: number | undefined;
+    let emailSent = false;
+    let emailStatusNote: string | undefined;
+
+    if (shouldSendEmail) {
+      try {
+        const delivery = await sendAdmin2faChallengeEmail({
+          adminEmail: draftSession.adminEmail,
+          adminName: draftSession.adminName,
+          adminRole: draftSession.adminRole,
+        });
+        emailCodeHash = delivery.codeHash;
+        emailCodeExpiresAt = delivery.expiresAt;
+        emailSent = delivery.sent;
+        setAdmin2faCooldownSec(delivery.cooldownSec || 45);
+        emailStatusNote = delivery.sent
+          ? `Temporary 6-digit code sent via EmailJS to ${draftSession.adminEmail}.`
+          : `EmailJS delivery notice: ${delivery.error || 'Could not dispatch email.'}`;
+      } catch (sendErr) {
+        emailStatusNote =
+          sendErr instanceof Error ? sendErr.message : '2FA email throttle active.';
+      }
+    }
+
+    setAdmin2faCodeInput('');
+    setPending2fa({
+      candidateSession: draftSession,
+      method,
+      hasTotpApp,
+      emailCodeHash,
+      emailCodeExpiresAt,
+      emailSent,
+      emailStatusNote,
+    });
+  };
+
+  const handleVerifyAdmin2fa = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pending2fa) return;
+    setAuthError('');
+    setAdmin2faBusy(true);
+    try {
+      const activePolicy = securityPolicy?.updatedAt ? securityPolicy : getEffectiveSecurityPolicy();
+      await verifyAdmin2faChallengeCode({
+        adminEmail: pending2fa.candidateSession.adminEmail,
+        enteredCode: admin2faCodeInput,
+        emailCodeHash: pending2fa.emailCodeHash,
+        emailCodeExpiresAt: pending2fa.emailCodeExpiresAt,
+        policy: activePolicy,
+      });
+      const granted = {
+        ...pending2fa.candidateSession,
+        loggedInAt: Date.now(),
+      };
+      setPending2fa(null);
+      setAdmin2faCodeInput('');
+      setAdminPasscode('');
+      onAdminLogin(granted);
+      if (granted.adminRole === 'second_admin') {
+        setSection('admin_profile');
+      } else {
+        setSection('overview');
+      }
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Invalid 2FA verification code.');
+    } finally {
+      setAdmin2faBusy(false);
+    }
+  };
+
+  const handleResendAdmin2faCode = async () => {
+    if (!pending2fa || admin2faCooldownSec > 0 || admin2faResending) return;
+    setAuthError('');
+    setAdmin2faResending(true);
+    try {
+      const delivery = await sendAdmin2faChallengeEmail({
+        adminEmail: pending2fa.candidateSession.adminEmail,
+        adminName: pending2fa.candidateSession.adminName,
+        adminRole: pending2fa.candidateSession.adminRole,
+      });
+      setAdmin2faCooldownSec(delivery.cooldownSec || 45);
+      setPending2fa((prev) =>
+        prev
+          ? {
+              ...prev,
+              emailCodeHash: delivery.codeHash,
+              emailCodeExpiresAt: delivery.expiresAt,
+              emailSent: delivery.sent,
+              emailStatusNote: delivery.sent
+                ? `New temporary 6-digit verification code sent via EmailJS to ${prev.candidateSession.adminEmail}.`
+                : `EmailJS delivery notice: ${delivery.error || 'Could not dispatch email.'}`,
+            }
+          : prev
+      );
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Could not resend 2FA code.');
+    } finally {
+      setAdmin2faResending(false);
+    }
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -988,7 +1138,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       const verified = await verifyAdminPasswordLogin(adminEmail, adminPasscode);
       setAdminFailedCount(0);
       setAdminChallengeAns('');
-      onAdminLogin({
+      await startOrGrantAdminSession({
         adminEmail: verified.adminEmail,
         adminName: verified.adminName,
         adminRole: verified.adminRole,
@@ -997,12 +1147,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         profilePhotoUrl: verified.profilePhotoUrl,
         loggedInAt: Date.now(),
       });
-      setAdminPasscode('');
-      if (verified.adminRole === 'second_admin') {
-        setSection('admin_profile');
-      } else {
-        setSection('overview');
-      }
     } catch (err) {
       setAdminFailedCount((c) => c + 1);
       setAdminChallenge(createSecurityChallenge(lang));
@@ -1333,7 +1477,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       displayName: fbUser.displayName,
       photoURL: fbUser.photoURL,
     });
-    onAdminLogin({
+    await startOrGrantAdminSession({
       adminEmail: verified.adminEmail,
       adminName: verified.adminName,
       adminRole: verified.adminRole,
@@ -1343,11 +1487,6 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       firebaseUid: fbUser.uid,
       loggedInAt: Date.now(),
     });
-    if (verified.adminRole === 'second_admin') {
-      setSection('admin_profile');
-    } else {
-      setSection('overview');
-    }
   };
 
   useEffect(() => {
@@ -1807,28 +1946,155 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         </header>
 
         <div className="flex-1 flex items-center justify-center p-4">
-          <form
-            onSubmit={handleLogin}
-            className="w-full max-w-md rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-7 sm:p-8 space-y-5 shadow-xl"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center">
-                <ShieldCheck className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
-              </div>
-              <div>
-                <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
-                  {t('adminPortal', lang)}
-                </h1>
-                <p className="text-xs text-slate-500 dark:text-slate-400">{t('adminSubtitle', lang)}</p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              disabled={googleAdminBusy}
-              onClick={handleGoogleAdminSignIn}
-              className="w-full py-3 px-4 rounded-xl bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900 text-sm font-semibold shadow-sm inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
+          {pending2fa ? (
+            <form
+              onSubmit={handleVerifyAdmin2fa}
+              className="w-full max-w-md rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-7 sm:p-8 space-y-5 shadow-xl"
             >
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 flex items-center justify-center">
+                  <KeyRound className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <div className="min-w-0">
+                  <h1 className="font-display text-lg font-bold text-slate-900 dark:text-white">
+                    {lang === 'bn' ? 'অ্যাডমিন ২FA নিরাপত্তা যাচাই' : 'Admin 2-Factor Verification'}
+                  </h1>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                    {pending2fa.candidateSession.adminEmail} ·{' '}
+                    {pending2fa.candidateSession.adminRole === 'main_admin' ? 'Main Admin' : '2nd Admin'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-2 text-xs">
+                {(pending2fa.method === 'email_otp' ||
+                  pending2fa.method === 'both' ||
+                  (pending2fa.method === 'authenticator_app' && !pending2fa.hasTotpApp)) && (
+                  <div className="flex items-start gap-2 text-slate-700 dark:text-slate-200">
+                    <Mail className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mt-0.5 shrink-0" />
+                    <span>
+                      {pending2fa.emailStatusNote ||
+                        `Temporary 6-digit verification code sent via EmailJS to ${pending2fa.candidateSession.adminEmail}.`}
+                    </span>
+                  </div>
+                )}
+
+                {(pending2fa.method === 'authenticator_app' || pending2fa.method === 'both') &&
+                  pending2fa.hasTotpApp && (
+                    <div className="flex items-start gap-2 text-emerald-700 dark:text-emerald-300">
+                      <Smartphone className="w-4 h-4 mt-0.5 shrink-0" />
+                      <span>
+                        {lang === 'bn'
+                          ? 'Google Authenticator / Authy / Microsoft Authenticator থেকে ৬ সংখ্যার TOTP কোডও ব্যবহার করতে পারেন।'
+                          : 'Or enter the 6-digit rotating code from your Google Authenticator, Microsoft Authenticator, or Authy app.'}
+                      </span>
+                    </div>
+                  )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                  {lang === 'bn' ? '৬ সংখ্যার ২FA ভেরিফিকেশন কোড' : '6-Digit 2FA Verification Code'}
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoFocus
+                  maxLength={6}
+                  required
+                  value={admin2faCodeInput}
+                  onChange={(e) => setAdmin2faCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  className="w-full px-4 py-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-center text-xl font-bold font-mono-tabular tracking-[0.4em] text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              {authError && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
+                  {authError}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={admin2faBusy || admin2faCodeInput.length !== 6}
+                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
+              >
+                {admin2faBusy
+                  ? 'Verifying 2FA Code...'
+                  : lang === 'bn'
+                    ? 'কোড যাচাই করে কমান্ড কনসোলে প্রবেশ করুন'
+                    : 'Verify 2FA & Enter Command Console'}
+              </button>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                {(pending2fa.method === 'email_otp' ||
+                  pending2fa.method === 'both' ||
+                  !pending2fa.hasTotpApp) && (
+                  <button
+                    type="button"
+                    disabled={admin2faCooldownSec > 0 || admin2faResending}
+                    onClick={() => void handleResendAdmin2faCode()}
+                    className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-50 disabled:no-underline"
+                  >
+                    {admin2faResending
+                      ? 'Sending Email Code...'
+                      : admin2faCooldownSec > 0
+                        ? `Resend Email Code (${admin2faCooldownSec}s)`
+                        : 'Resend EmailJS Verification Code'}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (pending2fa.candidateSession.firebaseUid) {
+                      void signOutFirebase();
+                    }
+                    setPending2fa(null);
+                    setAdmin2faCodeInput('');
+                    setAuthError('');
+                  }}
+                  className="text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white ml-auto"
+                >
+                  {lang === 'bn' ? 'ফিরে যান' : 'Cancel & Switch Admin'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form
+              onSubmit={handleLogin}
+              className="w-full max-w-md rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-7 sm:p-8 space-y-5 shadow-xl"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center">
+                  <ShieldCheck className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
+                </div>
+                <div>
+                  <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
+                    {t('adminPortal', lang)}
+                  </h1>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{t('adminSubtitle', lang)}</p>
+                </div>
+              </div>
+
+              {securityPolicy.admin2faEnabled && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/35 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
+                  <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {lang === 'bn'
+                      ? '২-ফ্যাক্টর অথেন্টিকেশন (EmailJS / Authenticator) সক্রিয় আছে'
+                      : `2FA Guard Active (${securityPolicy.admin2faMethod.replace(/_/g, ' ')})`}
+                  </span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                disabled={googleAdminBusy}
+                onClick={handleGoogleAdminSignIn}
+                className="w-full py-3 px-4 rounded-xl bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900 text-sm font-semibold shadow-sm inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
+              >
               <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
                 <path
                   fill="#4285F4"
@@ -1936,13 +2202,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               </div>
             )}
 
-            <button
-              type="submit"
-              className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white shadow-sm transition-colors"
-            >
-              Access Admin Command Console
-            </button>
-          </form>
+              <button
+                type="submit"
+                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white shadow-sm transition-colors"
+              >
+                Access Admin Command Console
+              </button>
+            </form>
+          )}
         </div>
       </div>
     );

@@ -464,6 +464,7 @@ export interface AdminSession {
 export type SecurityEventType =
   | 'brute_force_lockout'
   | 'admin_login_lockout'
+  | 'admin_2fa_failed'
   | 'spam_flood_blocked'
   | 'spam_tx_blocked'
   | 'registration_spam_blocked'
@@ -491,6 +492,8 @@ export interface SecurityEventRecord {
   resolvedBy?: string;
 }
 
+export type AdminTwoFactorMethod = 'email_otp' | 'authenticator_app' | 'both';
+
 export interface SecurityPolicyConfig {
   strictAntiSpamMode: boolean;
   maxTxPerMinute: number;
@@ -499,6 +502,9 @@ export interface SecurityPolicyConfig {
   adminIdleTimeoutMinutes: number;
   accountIdleTimeoutMinutes: number;
   requireChallengeOnAdminFail: boolean;
+  admin2faEnabled: boolean;
+  admin2faMethod: AdminTwoFactorMethod;
+  adminTotpSecrets: Record<string, string>;
   updatedAt: number;
   updatedBy: string;
 }

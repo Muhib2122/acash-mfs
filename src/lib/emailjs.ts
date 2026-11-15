@@ -85,6 +85,57 @@ export async function sendOtpEmail(params: {
   }
 }
 
+export async function sendAdmin2faCodeEmail(params: {
+  toEmail: string;
+  adminName: string;
+  code: string;
+  adminRoleLabel: string;
+}): Promise<SendEmailResult> {
+  const cleanEmail = params.toEmail.trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    return { sent: false, error: 'Invalid registered admin email address' };
+  }
+
+  ensureInitialized();
+
+  const nowStr = new Date().toLocaleString();
+  const templateParams = {
+    to_email: cleanEmail,
+    email: cleanEmail,
+    user_email: cleanEmail,
+    recipient: cleanEmail,
+    recipient_email: cleanEmail,
+    to: cleanEmail,
+    reply_to: cleanEmail,
+    to_name: params.adminName || 'Acash Admin',
+    name: params.adminName || 'Acash Admin',
+    from_name: 'Acash Security 2FA',
+    subject: `Acash Admin Command 2FA Code: ${params.code}`,
+    otp: params.code,
+    passcode: params.code,
+    code: params.code,
+    account_id: params.adminRoleLabel,
+    time: nowStr,
+    role: params.adminRoleLabel,
+    app_name: 'Acash Admin Console',
+    message: `Your temporary Admin Command Console 2FA verification code is ${params.code}. It expires in 10 minutes. If you did not attempt to sign in, lock your Admin console immediately.`,
+  };
+
+  try {
+    await emailjs.send(
+      EMAILJS_CONFIG.serviceId,
+      EMAILJS_CONFIG.templateId,
+      templateParams,
+      EMAILJS_CONFIG.publicKey
+    );
+    return { sent: true };
+  } catch (err) {
+    const message = extractEmailJsError(err);
+    console.warn('EmailJS Admin 2FA error:', message);
+    return { sent: false, error: message };
+  }
+}
+
 export async function sendAccountStatusEmail(params: {
   toEmail: string;
   toName: string;
