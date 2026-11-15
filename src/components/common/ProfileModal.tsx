@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
   FileBadge2,
+  Fingerprint,
   KeyRound,
   ShieldCheck,
+  Smartphone,
+  Trash2,
   Upload,
   User as UserIcon,
   X,
@@ -14,12 +17,21 @@ import {
 import { AcashTransaction, AcashUser, FeeConfig, Language, UserGender } from '../../types/acash';
 import {
   changeUserSecurityPin,
+  enrollUserWebAuthnPasskey,
   formatUserReferralSource,
+  removeUserWebAuthnPasskey,
   saveUserMapLocation,
   updateUserGender,
   updateUserKyc,
   updateUserProfilePhoto,
+  verifyUserSecurityPin,
 } from '../../lib/acashService';
+import {
+  authorizeTransactionWithBiometrics,
+  detectWebAuthnCapability,
+  registerCustomerBiometricPasskey,
+  WebAuthnCapability,
+} from '../../lib/webauthn';
 import {
   downloadAccountStatementPdf,
   downloadCreatorKycProfilePdf,
@@ -102,6 +114,24 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [currentPin, setCurrentPin] = useState('');
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
+
+  // WebAuthn Biometrics state
+  const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
+  const [bioPinConfirm, setBioPinConfirm] = useState('');
+  const [bioDeviceLabel, setBioDeviceLabel] = useState('');
+  const [bioBusy, setBioBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    void detectWebAuthnCapability().then((cap) => {
+      if (!mounted) return;
+      setWebauthnCap(cap);
+      setBioDeviceLabel((prev) => prev || cap.defaultDeviceLabel);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -217,6 +247,81 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setErrorMsg(err instanceof Error ? err.message : 'PIN change failed.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleEnrollBiometricPasskey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setStatusMsg('');
+    setBioBusy(true);
+    try {
+      await verifyUserSecurityPin(user.accountId, bioPinConfirm);
+      const cred = await registerCustomerBiometricPasskey({
+        accountId: user.accountId,
+        userEmailOrPhone: user.email || user.phone || user.accountId,
+        displayName: user.name,
+        deviceLabel: bioDeviceLabel.trim() || webauthnCap?.defaultDeviceLabel,
+        existingCredentialIds: (user.webauthnCredentials || []).map((c) => c.credentialId),
+      });
+      await enrollUserWebAuthnPasskey({
+        accountId: user.accountId,
+        credential: cred,
+      });
+      setBioPinConfirm('');
+      setStatusMsg(
+        lang === 'bn'
+          ? `"${cred.deviceLabel}" বায়োমেট্রিক পাসকি সফলভাবে যুক্ত হয়েছে! এখন পিন না লিখেই লেনদেন নিশ্চিত করতে পারবেন।`
+          : `Device biometrics "${cred.deviceLabel}" enrolled! You can now confirm transactions with fingerprint or face recognition.`
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Biometric passkey enrollment failed.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleTestBiometricPrompt = async () => {
+    const creds = user.webauthnCredentials || [];
+    if (creds.length === 0) return;
+    setErrorMsg('');
+    setStatusMsg('');
+    setBioBusy(true);
+    try {
+      await authorizeTransactionWithBiometrics({
+        accountId: user.accountId,
+        txType: 'send_money',
+        amount: 1,
+        target: 'BIOMETRIC-CHECK',
+        credentials: creds,
+      });
+      setStatusMsg(
+        lang === 'bn'
+          ? 'বায়োমেট্রিক স্বাক্ষর সফলভাবে যাচাই হয়েছে!'
+          : 'Biometric passkey signature verified cleanly with your device!'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Biometric verification test failed.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleRemoveBiometricPasskey = async (credentialId: string) => {
+    setErrorMsg('');
+    setStatusMsg('');
+    setBioBusy(true);
+    try {
+      await removeUserWebAuthnPasskey(user.accountId, credentialId);
+      setStatusMsg(
+        lang === 'bn'
+          ? 'বায়োমেট্রিক পাসকি সফলভাবে মুছে ফেলা হয়েছে।'
+          : 'Biometric passkey removed from this account.'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not remove biometric passkey.');
+    } finally {
+      setBioBusy(false);
     }
   };
 
@@ -378,14 +483,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+              className={`py-2 px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                 tab === 'pin'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>{lang === 'bn' ? 'পিন পরিবর্তন' : 'Change PIN'}</span>
+              <Fingerprint className="w-3.5 h-3.5 shrink-0" />
+              <span>{lang === 'bn' ? 'পিন ও বায়োমেট্রিক' : 'PIN & Biometrics'}</span>
             </button>
           </div>
         </div>
@@ -774,70 +879,231 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             </form>
           )}
 
-          {/* TAB 3: Change Security PIN */}
+          {/* TAB 3: Biometric Passkeys (WebAuthn) & Change Security PIN */}
           {tab === 'pin' && (
-            <form onSubmit={handleChangePin} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                  {lang === 'bn' ? 'বর্তমান পিন' : 'Current Security PIN'}
-                </label>
-                <input
-                  type="password"
-                  required
-                  maxLength={5}
-                  inputMode="numeric"
-                  value={currentPin}
-                  onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ''))}
-                  placeholder="••••"
-                  className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
-                />
+            <div className="space-y-6">
+              {/* Device Biometrics / WebAuthn Enrollment */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center shrink-0">
+                      <Fingerprint className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                    </div>
+                    <div>
+                      <h4 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                        {lang === 'bn'
+                          ? 'ডিভাইস বায়োমেট্রিক লেনদেন নিশ্চিতকরণ (WebAuthn)'
+                          : 'Device Biometric Transaction Confirmation (WebAuthn)'}
+                      </h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        {lang === 'bn'
+                          ? 'ফোন বা কম্পিউটারের ফিঙ্গারপ্রিন্ট / ফেস আইডি দিয়ে পিন না লিখেই নিরাপদে লেনদেন নিশ্চিত করুন।'
+                          : 'Confirm transactions with Fingerprint, Face ID, or Windows Hello instead of typing your passcode.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {(user.webauthnCredentials?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      disabled={bioBusy}
+                      onClick={handleTestBiometricPrompt}
+                      className="min-h-[38px] px-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-xs font-semibold text-indigo-600 dark:text-indigo-400 whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      {bioBusy
+                        ? 'Verifying...'
+                        : lang === 'bn'
+                          ? 'বায়োমেট্রিক টেস্ট করুন'
+                          : 'Test Biometric Prompt'}
+                    </button>
+                  )}
+                </div>
+
+                {webauthnCap && !webauthnCap.supported && (
+                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-xs text-amber-800 dark:text-amber-200">
+                    {lang === 'bn'
+                      ? 'এই ব্রাউজারে WebAuthn বায়োমেট্রিক্স সাপোর্টেড নয়। নিরাপদ ব্রাউজার ব্যবহার করুন।'
+                      : 'WebAuthn biometric credentials are not supported in this browser environment.'}
+                  </div>
+                )}
+
+                {webauthnCap?.supported && webauthnCap.inEmbeddedFrame && (
+                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-xs text-amber-800 dark:text-amber-200">
+                    {lang === 'bn'
+                      ? 'এমবেডেড প্রিভিউ ফ্রেমে ব্রাউজার বায়োমেট্রিক প্রম্পট সীমাবদ্ধ করতে পারে—নতুন ট্যাবে খুললে পূর্ণ ফিঙ্গারপ্রিন্ট/ফেস আইডি কাজ করবে।'
+                      : 'Embedded preview frames may restrict OS biometric prompts. If blocked, open the portal directly in its own browser tab.'}
+                  </div>
+                )}
+
+                {(user.webauthnCredentials?.length || 0) > 0 && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                      {lang === 'bn' ? 'নিবন্ধিত বায়োমেট্রিক ডিভাইস' : 'Enrolled Biometric Passkeys'}
+                    </div>
+                    <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800">
+                      {(user.webauthnCredentials || []).map((cred) => (
+                        <div
+                          key={cred.credentialId}
+                          className="px-3.5 py-2.5 flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <Smartphone className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                {cred.deviceLabel}
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
+                                ID: {cred.credentialId.slice(0, 14)}… ·{' '}
+                                {cred.lastUsedAt
+                                  ? `Used ${new Date(cred.lastUsedAt).toLocaleDateString()}`
+                                  : `Added ${new Date(cred.createdAt).toLocaleDateString()}`}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={bioBusy}
+                            onClick={() => handleRemoveBiometricPasskey(cred.credentialId)}
+                            className="min-h-[36px] px-2.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 text-[11px] font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1 shrink-0 whitespace-nowrap"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{lang === 'bn' ? 'মুছুন' : 'Remove'}</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <form onSubmit={handleEnrollBiometricPasskey} className="space-y-3 pt-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        {lang === 'bn' ? 'ডিভাইসের নাম' : 'Device Label'}
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={60}
+                        value={bioDeviceLabel}
+                        onChange={(e) => setBioDeviceLabel(e.target.value)}
+                        placeholder={webauthnCap?.defaultDeviceLabel || 'My Device Biometrics'}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        {lang === 'bn'
+                          ? 'পাসকি যুক্ত করতে বর্তমান পিন দিন *'
+                          : 'Security PIN to Authorize Setup *'}
+                      </label>
+                      <input
+                        type="password"
+                        required
+                        maxLength={5}
+                        inputMode="numeric"
+                        value={bioPinConfirm}
+                        onChange={(e) => setBioPinConfirm(e.target.value.replace(/\D/g, ''))}
+                        placeholder="••••"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-mono-tabular text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={
+                      bioBusy ||
+                      bioPinConfirm.length < 4 ||
+                      (webauthnCap !== null && !webauthnCap.supported)
+                    }
+                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                  >
+                    <Fingerprint className="w-4 h-4 shrink-0" />
+                    <span>
+                      {bioBusy
+                        ? lang === 'bn'
+                          ? 'ডিভাইস স্ক্যান করা হচ্ছে...'
+                          : 'Waiting for Device Biometrics...'
+                        : lang === 'bn'
+                          ? 'ফিঙ্গারপ্রিন্ট / ফেস আইডি যুক্ত করুন'
+                          : 'Register Device Biometrics (Fingerprint / Face ID)'}
+                    </span>
+                  </button>
+                </form>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                    {lang === 'bn' ? 'নতুন পিন (৪-৫ সংখ্যা)' : 'New PIN (4-5 Digits)'}
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    maxLength={5}
-                    inputMode="numeric"
-                    value={newPin}
-                    onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
-                    placeholder="••••"
-                    className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                    {lang === 'bn' ? 'নতুন পিন নিশ্চিত করুন' : 'Confirm New PIN'}
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    maxLength={5}
-                    inputMode="numeric"
-                    value={confirmPin}
-                    onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
-                    placeholder="••••"
-                    className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={busy || currentPin.length < 4 || newPin.length < 4}
-                className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+              {/* Change Security PIN Section */}
+              <form
+                onSubmit={handleChangePin}
+                className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800"
               >
-                {busy
-                  ? 'Updating PIN...'
-                  : lang === 'bn'
-                    ? 'নিরাপত্তা পিন পরিবর্তন করুন'
-                    : 'Update Security PIN'}
-              </button>
-            </form>
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-100">
+                  <KeyRound className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <span>
+                    {lang === 'bn' ? 'সিকিউরিটি পিন পরিবর্তন করুন' : 'Change Security PIN (Fallback Passcode)'}
+                  </span>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                    {lang === 'bn' ? 'বর্তমান পিন' : 'Current Security PIN'}
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    maxLength={5}
+                    inputMode="numeric"
+                    value={currentPin}
+                    onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      {lang === 'bn' ? 'নতুন পিন (৪-৫ সংখ্যা)' : 'New PIN (4-5 Digits)'}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      maxLength={5}
+                      inputMode="numeric"
+                      value={newPin}
+                      onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="••••"
+                      className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      {lang === 'bn' ? 'নতুন পিন নিশ্চিত করুন' : 'Confirm New PIN'}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      maxLength={5}
+                      inputMode="numeric"
+                      value={confirmPin}
+                      onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                      placeholder="••••"
+                      className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={busy || currentPin.length < 4 || newPin.length < 4}
+                  className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+                >
+                  {busy
+                    ? 'Updating PIN...'
+                    : lang === 'bn'
+                      ? 'নিরাপত্তা পিন পরিবর্তন করুন'
+                      : 'Update Security PIN'}
+                </button>
+              </form>
+            </div>
           )}
 
           {/* TAB 4: Direct-on-Map Location Picker (Agents & Merchants Only) */}

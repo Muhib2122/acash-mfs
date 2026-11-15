@@ -39,6 +39,20 @@ service cloud.firestore {
         && data.email is string && data.email.size() <= 160
         && data.pinHash is string && data.pinHash.size() >= 4 && data.pinHash.size() <= 128
         && (!('staffPinHash' in data) || (data.staffPinHash is string && data.staffPinHash.size() >= 4 && data.staffPinHash.size() <= 128))
+        && (!('webauthnCredentials' in data) || (
+          data.webauthnCredentials is list
+          && data.webauthnCredentials.size() <= 5
+          && (
+            data.webauthnCredentials.size() == 0
+            || (
+              data.webauthnCredentials[0] is map
+              && data.webauthnCredentials[0].credentialId is string
+              && data.webauthnCredentials[0].credentialId.size() <= 512
+              && data.webauthnCredentials[0].publicKeySpki is string
+              && data.webauthnCredentials[0].publicKeySpki.size() <= 1024
+            )
+          )
+        ))
         && (!('profilePhotoUrl' in data) || isSafeImageString(data.profilePhotoUrl, 550000))
         && data.balance is number && data.balance >= 0 && data.balance <= 100000000
         && data.commissionBalance is number && data.commissionBalance >= 0 && data.commissionBalance <= 50000000
@@ -84,7 +98,8 @@ service cloud.firestore {
           && data.giftCard.senderDisplayName is string && data.giftCard.senderDisplayName.size() <= 140
           && data.giftCard.isCustomEdited is bool
           && (!('customImageUrl' in data.giftCard) || isSafeImageString(data.giftCard.customImageUrl, 450000))
-        ));
+        ))
+        && (!('authMethod' in data) || data.authMethod in ['pin', 'biometric']);
     }
 
     function isImmutableTransactionCorePreserved(inData, exData) {
@@ -126,7 +141,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'eventType', 'severity', 'title', 'details', 'targetIdentifier', 'createdAt', 'resolved'])
         && data.keys().hasOnly(['id', 'eventType', 'severity', 'title', 'details', 'targetIdentifier', 'attempts', 'blockedUntil', 'createdAt', 'resolved', 'resolvedAt', 'resolvedBy'])
         && data.id == eventId
-        && data.eventType in ['brute_force_lockout', 'admin_login_lockout', 'admin_2fa_failed', 'spam_flood_blocked', 'spam_tx_blocked', 'registration_spam_blocked', 'session_tamper', 'session_tamper_detected', 'xss_payload_blocked', 'otp_abuse', 'admin_unlock', 'policy_change']
+        && data.eventType in ['brute_force_lockout', 'admin_login_lockout', 'admin_2fa_failed', 'biometric_verification_failed', 'spam_flood_blocked', 'spam_tx_blocked', 'registration_spam_blocked', 'session_tamper', 'session_tamper_detected', 'xss_payload_blocked', 'otp_abuse', 'admin_unlock', 'policy_change']
         && data.severity in ['info', 'warning', 'critical']
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
         && data.details is string && data.details.size() >= 1 && data.details.size() <= 600

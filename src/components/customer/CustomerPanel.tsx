@@ -20,6 +20,9 @@ import {
   VolumeX,
   Bell,
   Gift,
+  Fingerprint,
+  KeyRound,
+  Loader2,
 } from 'lucide-react';
 import {
   AcashTransaction,
@@ -38,6 +41,12 @@ import { formatGiftSignature, getGiftCardTemplate } from '../../lib/giftCards';
 import { usePortalTheme } from '../../lib/portalThemes';
 import { downloadAccountStatementPdf } from '../../lib/pdfGenerator';
 import { getVoiceMuted, playTransactionVoiceAlert, setVoiceMuted } from '../../lib/soundbox';
+import { triggerHapticGesture } from '../../lib/deviceAlerts';
+import {
+  authorizeTransactionWithBiometrics,
+  detectWebAuthnCapability,
+  WebAuthnCapability,
+} from '../../lib/webauthn';
 import { TapAndHoldButton } from '../common/TapAndHoldButton';
 import { OperatorLogo, OPERATORS, detectOperatorFromPhone } from '../common/OperatorLogo';
 import { QrModal } from '../common/QrModal';
@@ -59,6 +68,7 @@ interface CustomerPanelProps {
   onClearPaymentIntent?: () => void;
   onOpenBoothMap?: () => void;
   onOpenNotifications?: () => void;
+  onOpenBiometricSettings?: () => void;
   unreadNotifications?: number;
   externalQrSignal?: number;
   customGiftCards?: CustomGiftCardRecord[];
@@ -85,6 +95,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   onClearPaymentIntent,
   onOpenBoothMap,
   onOpenNotifications,
+  onOpenBiometricSettings,
   unreadNotifications = 0,
   externalQrSignal = 0,
   customGiftCards,
@@ -116,6 +127,8 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [completedTx, setCompletedTx] = useState<AcashTransaction | null>(null);
+  const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
 
   // Modals & Ledger filters
   const [qrMode, setQrMode] = useState<'show' | 'scan' | null>(null);
@@ -137,6 +150,20 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     txHash: string;
   } | null>(null);
   const seenTxIdsRef = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void detectWebAuthnCapability().then((cap) => {
+      if (mounted) setWebauthnCap(cap);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const enrolledBiometrics = user.webauthnCredentials || [];
+  const biometricsReady =
+    enrolledBiometrics.length > 0 && Boolean(webauthnCap?.supported);
 
   useEffect(() => {
     seenTxIdsRef.current = null;
@@ -282,7 +309,94 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     }
 
     setPin('');
+    setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
     setStep('confirm');
+  };
+
+  const buildGiftCardPayload = (): GiftCardPayload | undefined => {
+    if (activeService !== 'send_money' || !giftDraft.enabled) return undefined;
+    const tpl = getGiftCardTemplate(giftDraft.cardId, customGiftCards, giftCardPolicy);
+    const rawMsg = giftDraft.customMessage.trim();
+    const defaultMsg = lang === 'bn' ? tpl.defaultMessageBn : tpl.defaultMessageEn;
+    return {
+      cardId: tpl.id,
+      cardTitleBn: tpl.titleBn,
+      cardTitleEn: tpl.titleEn,
+      themeCategory: tpl.themeCategory,
+      message: rawMsg || defaultMsg,
+      signaturePrefix: giftDraft.signaturePrefix,
+      senderDisplayName: (giftDraft.senderDisplayName.trim() || user.name).slice(0, 60),
+      isCustomEdited: Boolean(rawMsg),
+      ...(tpl.isCustomUploaded && tpl.imageUrl && tpl.imageUrl.length <= 420000
+        ? {
+            customImageUrl: tpl.imageUrl,
+            customGradientBg: tpl.gradientBg,
+            customAccentHex: tpl.accentHex,
+          }
+        : {}),
+    };
+  };
+
+  const handleBiometricConfirmTransaction = async () => {
+    setError('');
+    if (!biometricsReady) {
+      setError(
+        lang === 'bn'
+          ? 'বায়োমেট্রিক পাসকি সক্রিয় নয়। পিন ব্যবহার করুন।'
+          : 'Biometric passkey is not ready on this device. Please use Security PIN.'
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const targetStr =
+        activeService === 'mobile_recharge'
+          ? rechargePhone
+          : activeService === 'bill_pay'
+            ? `${selectedBiller}:${billAccount}`
+            : recipient;
+
+      const biometricProof = await authorizeTransactionWithBiometrics({
+        accountId: user.accountId,
+        txType: activeService,
+        amount: numericAmount,
+        target: targetStr,
+        credentials: enrolledBiometrics,
+      });
+
+      const tx = await executeFinancialTransaction({
+        type: activeService,
+        senderId: user.accountId,
+        receiverIdentifier: recipient,
+        amount: numericAmount,
+        biometricProof,
+        feeConfig,
+        operator: activeService === 'mobile_recharge' ? selectedOperator : undefined,
+        rechargeNumber: activeService === 'mobile_recharge' ? rechargePhone : undefined,
+        rechargeType: activeService === 'mobile_recharge' ? rechargeType : undefined,
+        biller: activeService === 'bill_pay' ? selectedBiller : undefined,
+        billAccountNumber: activeService === 'bill_pay' ? billAccount : undefined,
+        billMonth: activeService === 'bill_pay' ? billMonth : undefined,
+        note,
+        giftCard: buildGiftCardPayload(),
+      });
+
+      triggerHapticGesture('success');
+      setCompletedTx(tx);
+      setStep('done');
+      setAmount('');
+      setNote('');
+      setPin('');
+      if (tx.giftCard) {
+        setFlightTx(tx);
+      }
+    } catch (err) {
+      triggerHapticGesture('warning');
+      setError(err instanceof Error ? err.message : 'Biometric confirmation failed.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleTapAndHoldConfirmed = async () => {
@@ -294,30 +408,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
 
     setSubmitting(true);
     try {
-      let giftCardPayload: GiftCardPayload | undefined;
-      if (activeService === 'send_money' && giftDraft.enabled) {
-        const tpl = getGiftCardTemplate(giftDraft.cardId, customGiftCards, giftCardPolicy);
-        const rawMsg = giftDraft.customMessage.trim();
-        const defaultMsg = lang === 'bn' ? tpl.defaultMessageBn : tpl.defaultMessageEn;
-        giftCardPayload = {
-          cardId: tpl.id,
-          cardTitleBn: tpl.titleBn,
-          cardTitleEn: tpl.titleEn,
-          themeCategory: tpl.themeCategory,
-          message: rawMsg || defaultMsg,
-          signaturePrefix: giftDraft.signaturePrefix,
-          senderDisplayName: (giftDraft.senderDisplayName.trim() || user.name).slice(0, 60),
-          isCustomEdited: Boolean(rawMsg),
-          ...(tpl.isCustomUploaded && tpl.imageUrl && tpl.imageUrl.length <= 420000
-            ? {
-                customImageUrl: tpl.imageUrl,
-                customGradientBg: tpl.gradientBg,
-                customAccentHex: tpl.accentHex,
-              }
-            : {}),
-        };
-      }
-
       const tx = await executeFinancialTransaction({
         type: activeService,
         senderId: user.accountId,
@@ -332,9 +422,10 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         billAccountNumber: activeService === 'bill_pay' ? billAccount : undefined,
         billMonth: activeService === 'bill_pay' ? billMonth : undefined,
         note,
-        giftCard: giftCardPayload,
+        giftCard: buildGiftCardPayload(),
       });
 
+      triggerHapticGesture('success');
       setCompletedTx(tx);
       setStep('done');
       setAmount('');
@@ -344,6 +435,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         setFlightTx(tx);
       }
     } catch (err) {
+      triggerHapticGesture('warning');
       setError(err instanceof Error ? err.message : 'Transaction failed.');
     } finally {
       setSubmitting(false);
@@ -518,6 +610,28 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   >
                     <MapPin className="w-3.5 h-3.5" />
                     <span>{lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}</span>
+                  </button>
+                )}
+                {onOpenBiometricSettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenBiometricSettings}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap ${
+                      enrolledBiometrics.length > 0
+                        ? 'bg-emerald-500/20 border-emerald-400/40 hover:bg-emerald-500/30 text-emerald-100'
+                        : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
+                    }`}
+                  >
+                    <Fingerprint className={`w-3.5 h-3.5 ${enrolledBiometrics.length > 0 ? 'text-emerald-300' : 'text-indigo-200'}`} />
+                    <span>
+                      {enrolledBiometrics.length > 0
+                        ? lang === 'bn'
+                          ? 'বায়োমেট্রিক চালু'
+                          : 'Biometrics On'
+                        : lang === 'bn'
+                          ? 'বায়োমেট্রিক সেট করুন'
+                          : 'Enable Biometrics'}
+                    </span>
                   </button>
                 )}
                 <button
@@ -982,37 +1096,162 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 })()}
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                  {t('enterPinConfirm', lang)}
-                </label>
-                <div className="relative">
-                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="password"
-                    maxLength={5}
-                    inputMode="numeric"
-                    value={pin}
-                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
-                    placeholder="••••"
-                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              {error && (
-                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
-                  {error}
+              {biometricsReady && (
+                <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmAuthMode('biometric');
+                      setError('');
+                    }}
+                    className={`min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                      confirmAuthMode === 'biometric'
+                        ? 'bg-emerald-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Fingerprint className="w-4 h-4 shrink-0" />
+                    <span>
+                      {lang === 'bn' ? 'বায়োমেট্রিক (ফিঙ্গার/ফেস)' : 'Biometrics (Face / Touch)'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmAuthMode('pin');
+                      setError('');
+                    }}
+                    className={`min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                      confirmAuthMode === 'pin'
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <KeyRound className="w-4 h-4 shrink-0" />
+                    <span>{lang === 'bn' ? 'সিকিউরিটি পিন' : 'Security PIN'}</span>
+                  </button>
                 </div>
               )}
 
-              <TapAndHoldButton
-                lang={lang}
-                loading={submitting}
-                disabled={pin.length < 4}
-                amountLabel={`${t('totalDeduction', lang)}: ${formatBdt(totalDebit, lang)}`}
-                onConfirm={handleTapAndHoldConfirmed}
-              />
+              {biometricsReady && confirmAuthMode === 'biometric' ? (
+                <div className="space-y-3">
+                  <div className="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                      <Fingerprint className="w-6 h-6" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white">
+                        {lang === 'bn'
+                          ? 'পিন ছাড়াই বায়োমেট্রিক নিশ্চিতকরণ প্রস্তুত'
+                          : 'Passwordless Biometric Confirmation Ready'}
+                      </div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                        {enrolledBiometrics[0]?.deviceLabel} ·{' '}
+                        {lang === 'bn'
+                          ? 'নিচের বাটনে ট্যাপ করে স্ক্যান করুন'
+                          : 'Tap below to verify with Fingerprint or Face ID'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {error && (
+                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300 space-y-1.5">
+                      <div>{error}</div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmAuthMode('pin');
+                          setError('');
+                        }}
+                        className="font-semibold underline text-indigo-700 dark:text-indigo-300"
+                      >
+                        {lang === 'bn' ? 'পরিবর্তে পিন ব্যবহার করুন' : 'Switch to Security PIN instead'}
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleBiometricConfirmTransaction}
+                    className="w-full min-h-[54px] px-5 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 hover:from-emerald-500 hover:to-teal-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2.5 shadow-lg shadow-emerald-600/20 active:scale-[0.99] transition-all disabled:opacity-60"
+                  >
+                    {submitting ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                        <span>
+                          {lang === 'bn'
+                            ? 'বায়োমেট্রিক যাচাই হচ্ছে...'
+                            : 'Verifying Device Biometrics...'}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Fingerprint className="w-5 h-5 shrink-0" />
+                        <span>
+                          {lang === 'bn'
+                            ? `ফিঙ্গারপ্রিন্ট / ফেস আইডি দিয়ে নিশ্চিত করুন (${formatBdt(totalDebit, lang)})`
+                            : `Confirm with Biometrics (${formatBdt(totalDebit, lang)})`}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      {t('enterPinConfirm', lang)}
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="password"
+                        maxLength={5}
+                        inputMode="numeric"
+                        value={pin}
+                        onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                        placeholder="••••"
+                        className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  {!biometricsReady && webauthnCap?.supported && onOpenBiometricSettings && (
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+                        <Fingerprint className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <span>
+                          {lang === 'bn'
+                            ? 'ভবিষ্যতে পিন না লিখেই ফিঙ্গারপ্রিন্ট/ফেস আইডি দিয়ে লেনদেন করতে চান?'
+                            : 'Skip typing passcodes next time with Fingerprint or Face ID.'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={onOpenBiometricSettings}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[11px] font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+                      >
+                        {lang === 'bn' ? 'বায়োমেট্রিক চালু করুন' : 'Enable Biometrics'}
+                      </button>
+                    </div>
+                  )}
+
+                  {error && (
+                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
+                      {error}
+                    </div>
+                  )}
+
+                  <TapAndHoldButton
+                    lang={lang}
+                    loading={submitting}
+                    disabled={pin.length < 4}
+                    amountLabel={`${t('totalDeduction', lang)}: ${formatBdt(totalDebit, lang)}`}
+                    onConfirm={handleTapAndHoldConfirmed}
+                  />
+                </>
+              )}
 
               <button
                 type="button"

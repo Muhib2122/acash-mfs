@@ -1142,6 +1142,10 @@ export default function App() {
             onClearPaymentIntent={() => setPaymentIntent(null)}
             onOpenBoothMap={() => setBoothMapOpen(true)}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenBiometricSettings={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
             customGiftCards={customGiftCards}

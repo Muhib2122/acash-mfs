@@ -53,6 +53,10 @@
           "type": "string",
           "maxLength": 128
         },
+        "webauthnCredentials": {
+          "type": "array",
+          "description": "Enrolled WebAuthn device biometric passkeys (max 5)."
+        },
         "profilePhotoUrl": {
           "type": "string",
           "maxLength": 500000
@@ -199,6 +203,10 @@
         },
         "giftCard": {
           "type": "object"
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": ["pin", "biometric"]
         },
         "settledOnce": {
           "type": "boolean"
@@ -789,6 +797,7 @@
             "brute_force_lockout",
             "admin_login_lockout",
             "admin_2fa_failed",
+            "biometric_verification_failed",
             "spam_flood_blocked",
             "spam_tx_blocked",
             "registration_spam_blocked",

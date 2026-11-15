@@ -161,6 +161,22 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 </span>
               </div>
             )}
+            {tx.authMethod && (
+              <div className="flex items-center justify-between px-4 py-3 gap-2">
+                <span className="text-slate-500 dark:text-slate-400">
+                  {lang === 'bn' ? 'অনুমোদন পদ্ধতি' : 'Authorization'}
+                </span>
+                <span className="text-slate-900 dark:text-white font-medium text-right">
+                  {tx.authMethod === 'biometric'
+                    ? lang === 'bn'
+                      ? 'ডিভাইস বায়োমেট্রিক্স (WebAuthn)'
+                      : 'Device Biometrics (WebAuthn)'
+                    : lang === 'bn'
+                      ? 'সিকিউরিটি পিন'
+                      : 'Security PIN'}
+                </span>
+              </div>
+            )}
             {tx.note && (
               <div className="flex items-center justify-between px-4 py-3 gap-2">
                 <span className="text-slate-500 dark:text-slate-400">{lang === 'bn' ? 'নোট' : 'Reference'}</span>

@@ -32,6 +32,7 @@ import {
   sendHighValuePendingEmails,
 } from './emailjs';
 import { verifyTotpCode } from './totp';
+import { verifyBiometricTransactionProof } from './webauthn';
 import {
   AcashBooth,
   AcashDirectoryEntry,
@@ -46,6 +47,7 @@ import {
   AdminActivityType,
   AdminNotification,
   BillerId,
+  BiometricTxAuthorizationProof,
   BoothStatus,
   CreatorMapRole,
   CustomGiftCardRecord,
@@ -74,6 +76,7 @@ import {
   UserGender,
   UserMapLocation,
   UserRole,
+  WebAuthnCredentialRecord,
 } from '../types/acash';
 import {
   clampToMaxWords,
@@ -3401,7 +3404,8 @@ export async function executeFinancialTransaction(params: {
   senderId: string;
   receiverIdentifier: string;
   amount: number;
-  pin: string;
+  pin?: string;
+  biometricProof?: BiometricTxAuthorizationProof;
   feeConfig: FeeConfig;
   operator?: OperatorId;
   rechargeNumber?: string;
@@ -3486,33 +3490,96 @@ export async function executeFinancialTransaction(params: {
   if (!senderLocal) throw new Error('Sender account does not exist.');
   if (senderLocal.status !== 'active') throw new Error('Your account is currently disabled by Admin.');
 
-  const pinCheck = await verifySecretAgainstStored(params.pin, senderLocal.pinHash, hashPin);
-  if (!pinCheck.valid) {
-    const res = recordFailedSecurityAttempt(
-      'tx_pin',
-      params.senderId,
-      secPolicy.maxLoginFailures,
-      secPolicy.lockoutMinutes
-    );
-    if (res.locked) {
+  let usedBiometricAuth = false;
+  let updatedSenderWebauthnCreds: WebAuthnCredentialRecord[] | undefined;
+
+  if (params.biometricProof) {
+    const enrolled = senderLocal.webauthnCredentials || [];
+    const expectedOrigin =
+      typeof window !== 'undefined' ? window.location.origin : undefined;
+    const bioCheck = await verifyBiometricTransactionProof({
+      proof: params.biometricProof,
+      enrolledCredentials: enrolled,
+      expectedAccountId: params.senderId,
+      expectedTxType: params.type,
+      expectedAmount: amount,
+      expectedOrigin,
+    });
+
+    if (!bioCheck.valid) {
+      const res = recordFailedSecurityAttempt(
+        'tx_pin',
+        params.senderId,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
       void logSecurityEvent({
-        eventType: 'brute_force_lockout',
-        severity: 'critical',
-        title: `Transaction PIN Lockout · ${params.senderId}`,
-        details: `${res.attempts} invalid Transaction PIN attempts triggered lockout on ${params.type} (৳${amount}).`,
+        eventType: 'biometric_verification_failed',
+        severity: res.locked ? 'critical' : 'warning',
+        title: `Biometric Verification Failed · ${params.senderId}`,
+        details: `${bioCheck.reason || 'Invalid WebAuthn biometric proof'} on ${params.type} (৳${amount}).`,
         targetIdentifier: params.senderId,
         attempts: res.attempts,
-        blockedUntil: res.lockedUntil,
+        ...(res.locked ? { blockedUntil: res.lockedUntil } : {}),
       });
+      if (res.locked) {
+        throw new Error(
+          `Transaction Locked (${res.attempts} failed verifications). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
       throw new Error(
-        `Transaction PIN Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        `Biometric verification failed: ${bioCheck.reason || 'Could not validate signature.'}`
       );
     }
-    throw new Error(
-      `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+
+    clearSecurityAttempts('tx_pin', params.senderId);
+    usedBiometricAuth = true;
+    const usedAt = Date.now();
+    updatedSenderWebauthnCreds = enrolled.map((cred) =>
+      cred.credentialId === bioCheck.matchedCredentialId
+        ? stripUndefined({
+            ...cred,
+            signCount:
+              typeof bioCheck.nextSignCount === 'number' && bioCheck.nextSignCount > 0
+                ? bioCheck.nextSignCount
+                : cred.signCount,
+            lastUsedAt: usedAt,
+          })
+        : stripUndefined(cred)
     );
+  } else {
+    const pinCheck = await verifySecretAgainstStored(
+      params.pin || '',
+      senderLocal.pinHash,
+      hashPin
+    );
+    if (!pinCheck.valid) {
+      const res = recordFailedSecurityAttempt(
+        'tx_pin',
+        params.senderId,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'brute_force_lockout',
+          severity: 'critical',
+          title: `Transaction PIN Lockout · ${params.senderId}`,
+          details: `${res.attempts} invalid Transaction PIN attempts triggered lockout on ${params.type} (৳${amount}).`,
+          targetIdentifier: params.senderId,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+        throw new Error(
+          `Transaction PIN Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
+      throw new Error(
+        `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+      );
+    }
+    clearSecurityAttempts('tx_pin', params.senderId);
   }
-  clearSecurityAttempts('tx_pin', params.senderId);
 
   // Anti-Spam Transaction Flood & Idempotency Shield (after PIN verified so wrong PIN doesn't consume quota)
   if (secPolicy.strictAntiSpamMode) {
@@ -3686,6 +3753,7 @@ export async function executeFinancialTransaction(params: {
     ...(params.billMonth ? { billMonth: params.billMonth } : {}),
     ...(sanitizedNote ? { note: sanitizedNote } : {}),
     ...(sanitizedGiftCard ? { giftCard: stripUndefined(sanitizedGiftCard) } : {}),
+    authMethod: usedBiometricAuth ? 'biometric' : 'pin',
     createdAt: now,
   };
 
@@ -3766,6 +3834,9 @@ export async function executeFinancialTransaction(params: {
         ...authSender,
         balance: nextSenderBalance,
         commissionBalance: nextSenderComm,
+        ...(updatedSenderWebauthnCreds
+          ? { webauthnCredentials: updatedSenderWebauthnCreds }
+          : {}),
         lastActiveAt: now,
       });
 
@@ -3810,6 +3881,9 @@ export async function executeFinancialTransaction(params: {
       transaction.update(senderRef, {
         balance: committedSender.balance,
         commissionBalance: committedSender.commissionBalance,
+        ...(updatedSenderWebauthnCreds
+          ? { webauthnCredentials: updatedSenderWebauthnCreds }
+          : {}),
         lastActiveAt: now,
       });
 
@@ -3837,6 +3911,7 @@ export async function executeFinancialTransaction(params: {
       msg.includes('Insufficient balance') ||
       msg.includes('disabled') ||
       msg.includes('Incorrect Security PIN') ||
+      msg.includes('Biometric') ||
       msg.includes('not found');
     if (isValidationErr) {
       throw err;
@@ -5985,6 +6060,152 @@ export async function changeUserSecurityPin(
   }
   clearSecurityAttempts('tx_pin', accountId);
   await updateUserPin(accountId, newPin.trim());
+}
+
+export async function verifyUserSecurityPin(accountId: string, pin: string): Promise<void> {
+  if (!/^\d{4,5}$/.test(pin.trim())) {
+    throw new Error('Enter your 4 or 5-digit Security PIN.');
+  }
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lock = checkAttemptLockout('tx_pin', accountId);
+  if (!lock.allowed) {
+    throw new Error(
+      `Security PIN Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
+    );
+  }
+  const store = readLocalStore();
+  let user = store.users[accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+      store.users[accountId] = user;
+    }
+  } catch {
+    // use cached record
+  }
+  if (!user) throw new Error('Account not found.');
+  const check = await verifySecretAgainstStored(pin.trim(), user.pinHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'tx_pin',
+      accountId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Biometric Setup PIN Lockout · ${accountId}`,
+        details: `${res.attempts} invalid PIN attempts while authorizing biometric passkey enrollment.`,
+        targetIdentifier: accountId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+    }
+    throw new Error(
+      `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+    );
+  }
+  clearSecurityAttempts('tx_pin', accountId);
+}
+
+export async function enrollUserWebAuthnPasskey(params: {
+  accountId: string;
+  credential: WebAuthnCredentialRecord;
+}): Promise<AcashUser> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[params.accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const existing = (user.webauthnCredentials || []).filter(
+    (c) => c.credentialId !== params.credential.credentialId
+  );
+  const nextCreds = [stripUndefined(params.credential), ...existing].slice(0, 5);
+
+  const updated: AcashUser = stripUndefined({
+    ...user,
+    webauthnCredentials: nextCreds,
+    lastActiveAt: now,
+  });
+
+  store.users[params.accountId] = updated;
+  writeLocalStore(store, true);
+
+  try {
+    await setDoc(doc(db, USERS_COL, params.accountId), updated, { merge: true });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    firestoreBackendMode = 'local_sync';
+    console.warn('Could not sync biometric passkey to Firestore:', err);
+  }
+
+  await persistAccountNotifications([
+    buildAccountNotification({
+      recipientId: params.accountId,
+      recipientRole: user.role,
+      title: 'Device Biometrics Enrolled (WebAuthn)',
+      message: `${params.credential.deviceLabel} is now enabled for biometric transaction confirmations.`,
+      category: 'security',
+      severity: 'success',
+      createdBy: params.accountId,
+      createdAt: now,
+    }),
+  ]);
+
+  return updated;
+}
+
+export async function removeUserWebAuthnPasskey(
+  accountId: string,
+  credentialId: string
+): Promise<AcashUser | null> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const nextCreds = (user.webauthnCredentials || []).filter(
+    (c) => c.credentialId !== credentialId
+  );
+  const updated: AcashUser = stripUndefined({
+    ...user,
+    webauthnCredentials: nextCreds,
+    lastActiveAt: now,
+  });
+
+  store.users[accountId] = updated;
+  writeLocalStore(store, true);
+
+  try {
+    await updateDoc(doc(db, USERS_COL, accountId), {
+      webauthnCredentials: nextCreds,
+      lastActiveAt: now,
+    });
+    firestoreBackendMode = 'firestore';
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return updated;
 }
 
 export async function verifyMerchantOwnerPin(accountId: string, pin: string): Promise<boolean> {

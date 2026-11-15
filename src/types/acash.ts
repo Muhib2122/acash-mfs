@@ -106,6 +106,33 @@ export interface UserMapLocation {
   updatedAt: number;
 }
 
+export interface WebAuthnCredentialRecord {
+  credentialId: string;
+  publicKeySpki: string;
+  algorithm: number;
+  deviceLabel: string;
+  transports?: string[];
+  signCount: number;
+  createdAt: number;
+  lastUsedAt?: number;
+}
+
+export interface BiometricTxAuthorizationProof {
+  credentialId: string;
+  challengeBase64Url: string;
+  authenticatorDataBase64Url: string;
+  clientDataJsonBase64Url: string;
+  signatureBase64Url: string;
+  rpId: string;
+  verifiedAt: number;
+  txBindingContext: {
+    accountId: string;
+    txType: TransactionType;
+    amount: number;
+    target: string;
+  };
+}
+
 export interface AcashUser {
   accountId: string; // e.g. U-847291, A-392014, M-501928
   firebaseUid?: string; // Firebase Auth UID when authenticated via Google Sign-In
@@ -118,6 +145,7 @@ export interface AcashUser {
   email: string;
   pinHash: string;
   staffPinHash?: string; // for Merchant Cashier Mode
+  webauthnCredentials?: WebAuthnCredentialRecord[];
   profilePhotoUrl?: string;
   kyc?: KycInfo;
   mapLocation?: UserMapLocation;
@@ -349,6 +377,7 @@ export interface AcashTransaction {
   billMonth?: string;
   note?: string;
   giftCard?: GiftCardPayload;
+  authMethod?: 'pin' | 'biometric';
   createdAt: number;
   approvedBy?: string;
   approvedAt?: number;
@@ -465,6 +494,7 @@ export type SecurityEventType =
   | 'brute_force_lockout'
   | 'admin_login_lockout'
   | 'admin_2fa_failed'
+  | 'biometric_verification_failed'
   | 'spam_flood_blocked'
   | 'spam_tx_blocked'
   | 'registration_spam_blocked'
