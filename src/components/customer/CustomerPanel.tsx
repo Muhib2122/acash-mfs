@@ -143,7 +143,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [error, setError] = useState('');
   const [completedTx, setCompletedTx] = useState<AcashTransaction | null>(null);
   const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
-  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'tap_hold'>('tap_hold');
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
 
   // Modals & Ledger filters
   const [qrMode, setQrMode] = useState<'show' | 'scan' | null>(null);
@@ -346,7 +346,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       }
     }
 
-    setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
+    setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
     setStep('confirm');
   };
 
@@ -377,7 +377,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const handleBiometricConfirmTransaction = async (optionalAugmentPin?: string) => {
     setError('');
     if (!biometricsReady) {
-      setConfirmAuthMode('tap_hold');
+      setConfirmAuthMode('pin');
       return;
     }
 
@@ -432,7 +432,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     }
   };
 
-  const handleTapAndHoldConfirmed = async () => {
+  const handlePinConfirmTransaction = async (pin: string) => {
     setError('');
     setSubmitting(true);
     try {
@@ -441,7 +441,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         senderId: user.accountId,
         receiverIdentifier: recipient,
         amount: numericAmount,
-        authorizeViaSession: true,
+        pin,
         feeConfig,
         operator: activeService === 'mobile_recharge' ? selectedOperator : undefined,
         rechargeNumber: activeService === 'mobile_recharge' ? rechargePhone : undefined,
@@ -463,7 +463,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       }
     } catch (err) {
       triggerHapticGesture('warning');
-      setError(err instanceof Error ? err.message : 'Transaction failed.');
+      setError(err instanceof Error ? err.message : 'PIN verification failed.');
     } finally {
       setSubmitting(false);
     }
@@ -1128,6 +1128,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   lang={lang}
                   senderKycName={user.name}
                   currentUserAccountId={user.accountId}
+                  currentUser={user}
                   draft={giftDraft}
                   customCards={customGiftCards}
                   giftCardPolicy={giftCardPolicy}
@@ -1297,9 +1298,9 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 error={error}
                 onClearError={() => setError('')}
                 onConfirmBiometric={handleBiometricConfirmTransaction}
-                onConfirmTapHold={handleTapAndHoldConfirmed}
+                onConfirmPin={handlePinConfirmTransaction}
                 onOpenBiometricSettings={onOpenBiometricSettings}
-                tapHoldButtonLabel={`${t('totalDeduction', lang)}: ${formatBdt(totalDebit, lang)}`}
+                pinButtonLabel={`${lang === 'bn' ? 'পিন দিয়ে নিশ্চিত করুন' : 'Confirm with PIN'} · ${formatBdt(totalDebit, lang)}`}
               />
 
               <button

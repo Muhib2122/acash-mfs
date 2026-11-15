@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import {
   AcashTransaction,
+  AcashUser,
   CustomGiftCardRecord,
   GiftCardCatalogPolicy,
   GiftCardPayload,
@@ -37,6 +38,7 @@ import {
 } from '../../lib/giftCards';
 import { userSubmitCustomGiftCard } from '../../lib/acashService';
 import { formatBdt } from '../../lib/i18n';
+import { useActionAuthModal } from './ActionAuthModal';
 
 /* -------------------------------------------------------------------------- */
 /*  Dynamic Festival Particle Backdrop (Compositor-Only Transforms & Opacity) */
@@ -221,6 +223,7 @@ interface GiftCardSelectorStripProps {
   lang: Language;
   senderKycName: string;
   currentUserAccountId?: string;
+  currentUser?: AcashUser;
   draft: GiftCardDraftState;
   customCards?: CustomGiftCardRecord[];
   giftCardPolicy?: GiftCardCatalogPolicy;
@@ -231,11 +234,13 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
   lang,
   senderKycName,
   currentUserAccountId,
+  currentUser,
   draft,
   customCards,
   giftCardPolicy,
   onChange,
 }) => {
+  const { requestActionAuth, authModalElement } = useActionAuthModal(lang);
   const [viewAllOpen, setViewAllOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [addOwnOpen, setAddOwnOpen] = useState(false);
@@ -297,7 +302,8 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
 
   const handleSubmitOwnCard = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentUserAccountId) return;
+    const subjectId = currentUser?.accountId || currentUserAccountId;
+    if (!subjectId) return;
     setOwnError('');
     if (!ownTitleBn.trim()) {
       setOwnError(lang === 'bn' ? 'কার্ডের নাম লিখুন।' : 'Enter a title for your card.');
@@ -309,22 +315,36 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
     }
     setOwnSaving(true);
     try {
-      const created = await userSubmitCustomGiftCard({
-        accountId: currentUserAccountId,
-        accountName: senderKycName,
-        titleBn: ownTitleBn.trim(),
-        titleEn: ownTitleEn.trim() || ownTitleBn.trim(),
-        imageUrl: ownImageUrl.trim(),
-        defaultMessageBn: ownDefaultMsg.trim() || undefined,
-        defaultMessageEn: ownDefaultMsg.trim() || undefined,
+      await requestActionAuth({
+        title: lang === 'bn' ? 'কাস্টম গিফট কার্ড অনুমোদন' : 'Authorize Custom Gift Card',
+        subtitle:
+          lang === 'bn'
+            ? 'নতুন ২৪ ঘণ্টার গিফট কার্ড তৈরি করতে আপনার পিন বা বায়োমেট্রিক দিন।'
+            : 'Verify with Biometrics or Security PIN to publish your 24h custom gift card.',
+        actionName: 'user_submit_custom_gift_card',
+        subjectId,
+        credentials: currentUser?.webauthnCredentials || [],
+        run: async (auth) => {
+          const created = await userSubmitCustomGiftCard({
+            accountId: subjectId,
+            accountName: senderKycName,
+            titleBn: ownTitleBn.trim(),
+            titleEn: ownTitleEn.trim() || ownTitleBn.trim(),
+            imageUrl: ownImageUrl.trim(),
+            defaultMessageBn: ownDefaultMsg.trim() || undefined,
+            defaultMessageEn: ownDefaultMsg.trim() || undefined,
+            auth,
+          });
+          selectCard(created.cardId);
+          setOwnTitleBn('');
+          setOwnTitleEn('');
+          setOwnDefaultMsg('');
+          setOwnImageUrl('');
+          setAddOwnOpen(false);
+        },
       });
-      selectCard(created.cardId);
-      setOwnTitleBn('');
-      setOwnTitleEn('');
-      setOwnDefaultMsg('');
-      setOwnImageUrl('');
-      setAddOwnOpen(false);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setOwnError(err instanceof Error ? err.message : 'Failed to create 24h card.');
     } finally {
       setOwnSaving(false);
@@ -790,6 +810,8 @@ export const GiftCardSelectorStrip: React.FC<GiftCardSelectorStripProps> = ({
           </div>
         </div>
       )}
+
+      {authModalElement}
     </div>
   );
 };

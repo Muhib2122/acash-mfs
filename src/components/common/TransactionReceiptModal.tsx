@@ -3,6 +3,7 @@ import { CheckCircle2, Clock, Copy, Check, Gift, XCircle, X } from 'lucide-react
 import { AcashTransaction, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
 import { formatGiftSignature } from '../../lib/giftCards';
+import { sanitizeBiometricDeviceLabelForDisplay } from '../../lib/webauthn';
 import { ACASH_MAIN_LOGO_SRC } from './BrandLogo';
 import { OperatorLogo } from './OperatorLogo';
 
@@ -169,7 +170,7 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 <span className="text-slate-900 dark:text-white font-medium text-right">
                   {tx.authMethod === 'biometric'
                     ? tx.biometricDeviceLabel
-                      ? `${tx.biometricDeviceLabel} · WebAuthn`
+                      ? `${sanitizeBiometricDeviceLabelForDisplay(tx.biometricDeviceLabel)} · WebAuthn`
                       : lang === 'bn'
                         ? 'ফেস / ফিঙ্গারপ্রিন্ট (WebAuthn)'
                         : 'Face ID / Fingerprint (WebAuthn)'

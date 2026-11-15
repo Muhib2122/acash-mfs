@@ -27,7 +27,7 @@ import {
   X,
   ZoomIn,
 } from 'lucide-react';
-import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
+import { AcashTransaction, AcashUser, ActionAuthInput, FeeConfig, Language } from '../../types/acash';
 import { formatBdt } from '../../lib/i18n';
 import {
   UNVERIFIED_GRACE_DAYS,
@@ -49,6 +49,12 @@ interface AdminAccountViewModalProps {
   lang: Language;
   adminEmail: string;
   actionBusy?: boolean;
+  requestAdminAuth: (opts: {
+    title: string;
+    subtitle?: string;
+    actionName: string;
+    run: (auth: ActionAuthInput) => Promise<void>;
+  }) => Promise<void>;
   onClose: () => void;
   onCreditAccount: (accountId: string) => void;
   onToggleStatus: (user: AcashUser) => void;
@@ -61,6 +67,7 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
   lang,
   adminEmail,
   actionBusy = false,
+  requestAdminAuth,
   onClose,
   onCreditAccount,
   onToggleStatus,
@@ -99,10 +106,18 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
     setGraceBusy(true);
     setGraceMsg('');
     try {
-      await adminExtendUserUnverifiedGrace({
-        accountId: user.accountId,
-        adminEmail,
-        days: UNVERIFIED_GRACE_DAYS,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অস্থায়ী সীমা বৃদ্ধির অনুমোদন' : 'Authorize +7 Day Grace Extension',
+        subtitle: `${user.businessName || user.name} (${user.accountId})`,
+        actionName: 'extend_unverified_grace',
+        run: async (auth) => {
+          await adminExtendUserUnverifiedGrace({
+            accountId: user.accountId,
+            adminEmail,
+            days: UNVERIFIED_GRACE_DAYS,
+            auth,
+          });
+        },
       });
       setGraceMsg(
         lang === 'bn'
@@ -110,6 +125,7 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
           : `Extended unverified operational access for ${user.accountId} by +${UNVERIFIED_GRACE_DAYS} days.`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setGraceMsg(err instanceof Error ? err.message : 'Failed to extend grace period.');
     } finally {
       setGraceBusy(false);
@@ -173,12 +189,20 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
     setAlertSending(true);
     setAlertStatusMsg('');
     try {
-      await adminSendAccountNotification({
-        recipientIdentifier: user.accountId,
-        title: alertTitle,
-        message: alertMessage,
-        severity: alertSeverity,
-        adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাকাউন্টে লাইভ অ্যালার্ট অনুমোদন' : 'Authorize Live Account Alert',
+        subtitle: `Recipient: ${user.accountId} · "${alertTitle.trim()}"`,
+        actionName: 'send_account_alert',
+        run: async (auth) => {
+          await adminSendAccountNotification({
+            recipientIdentifier: user.accountId,
+            title: alertTitle,
+            message: alertMessage,
+            severity: alertSeverity,
+            adminEmail,
+            auth,
+          });
+        },
       });
       setAlertStatusMsg(
         lang === 'bn'
@@ -189,6 +213,7 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
       setAlertMessage('');
       setAlertOpen(false);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setAlertStatusMsg(err instanceof Error ? err.message : 'Failed to push alert.');
     } finally {
       setAlertSending(false);

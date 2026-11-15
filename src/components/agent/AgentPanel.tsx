@@ -95,7 +95,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   const [selectedReceipt, setSelectedReceipt] = useState<AcashTransaction | null>(null);
   const [searchTx, setSearchTx] = useState('');
   const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
-  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'tap_hold'>('tap_hold');
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
   const [voiceMuted, setVoiceMutedState] = useState<boolean>(getVoiceMuted);
   const [voiceBanner, setVoiceBanner] = useState<{
     amount: number;
@@ -256,16 +256,16 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
       setError(`Insufficient Agent float. Available: ${formatBdt(user.balance)}`);
       return;
     }
-    setConfirmAuthMode(biometricsReady && counterTab !== 'cash_out' ? 'biometric' : 'tap_hold');
+    setConfirmAuthMode(biometricsReady && counterTab !== 'cash_out' ? 'biometric' : 'pin');
     setStep('confirm');
   };
 
-  const executeAgentOperation = async (useBiometric: boolean, optionalAugmentPin?: string) => {
+  const executeAgentOperation = async (mode: 'biometric' | 'pin', secretOrPin?: string) => {
     setError('');
     setSubmitting(true);
     try {
       let biometricProof = undefined;
-      if (useBiometric && biometricsReady && counterTab !== 'cash_out') {
+      if (mode === 'biometric' && biometricsReady && counterTab !== 'cash_out') {
         biometricProof = await authorizeTransactionWithBiometrics({
           accountId: user.accountId,
           txType: counterTab,
@@ -275,15 +275,21 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
         });
       }
 
+      if (mode === 'pin' && (!secretOrPin || !/^\d{4,5}$/.test(secretOrPin.trim()))) {
+        throw new Error('Enter a valid 4 or 5-digit Security PIN.');
+      }
+
+      const authPayload = biometricProof
+        ? { biometricProof, ...(secretOrPin ? { pin: secretOrPin.trim() } : {}) }
+        : { pin: secretOrPin!.trim() };
+
       if (counterTab === 'cash_in') {
         const tx = await executeFinancialTransaction({
           type: 'cash_in',
           senderId: user.accountId,
           receiverIdentifier: customerIdentifier,
           amount: numericAmount,
-          ...(biometricProof
-            ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-            : { authorizeViaSession: true }),
+          ...authPayload,
           feeConfig,
           note: note || 'Agent Counter Cash-In',
         });
@@ -294,9 +300,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           senderId: user.accountId,
           receiverIdentifier: customerIdentifier,
           amount: numericAmount,
-          ...(biometricProof
-            ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-            : { authorizeViaSession: true }),
+          ...authPayload,
           feeConfig,
           note: note || 'Agent Send Money to User',
         });
@@ -307,9 +311,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           senderId: user.accountId,
           receiverIdentifier: 'ADMIN-TREASURY',
           amount: numericAmount,
-          ...(biometricProof
-            ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-            : { authorizeViaSession: true }),
+          ...authPayload,
           feeConfig,
           note: note || `Agent Cash-Out to Admin Treasury (${user.accountId})`,
         });
@@ -324,7 +326,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           senderId: customer.accountId,
           receiverIdentifier: user.accountId,
           amount: numericAmount,
-          authorizeViaSession: true,
+          pin: secretOrPin!.trim(),
           feeConfig,
           note: note || `Counter Cash-Out via ${user.accountId}`,
         });
@@ -856,11 +858,31 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 submitting={submitting}
                 error={error}
                 onClearError={() => setError('')}
-                onConfirmBiometric={(pin) => executeAgentOperation(true, pin)}
-                onConfirmTapHold={() => executeAgentOperation(false)}
+                onConfirmBiometric={(pin) => executeAgentOperation('biometric', pin)}
+                onConfirmPin={(pin) => executeAgentOperation('pin', pin)}
                 onOpenBiometricSettings={onOpenBiometricSettings}
-                tapHoldButtonLabel={`${agentTabs.find((tItem) => tItem.id === counterTab)?.label} · ${formatBdt(numericAmount, lang)}`}
-                biometricDisabledReason={counterTab === 'cash_out' ? 'Customer counter cash-out uses Tap & Hold.' : undefined}
+                pinButtonLabel={`${agentTabs.find((tItem) => tItem.id === counterTab)?.label} · ${formatBdt(numericAmount, lang)}`}
+                pinLabel={
+                  counterTab === 'cash_out'
+                    ? lang === 'bn'
+                      ? 'গ্রাহকের সিকিউরিটি পিন'
+                      : 'Customer Security PIN'
+                    : undefined
+                }
+                pinHint={
+                  counterTab === 'cash_out'
+                    ? lang === 'bn'
+                      ? 'কাউন্টার ক্যাশ-আউট নিশ্চিত করতে গ্রাহককে তাঁর ৪–৫ সংখ্যার সিকিউরিটি পিন দিতে বলুন।'
+                      : "Ask the customer to enter their 4–5 digit Security PIN to authorize this counter cash-out."
+                    : undefined
+                }
+                biometricDisabledReason={
+                  counterTab === 'cash_out'
+                    ? lang === 'bn'
+                      ? 'কাউন্টার ক্যাশ-আউট অনুমোদনের জন্য গ্রাহকের সিকিউরিটি পিন বাধ্যতামূলক।'
+                      : "Customer verification required: enter Customer's Security PIN."
+                    : undefined
+                }
               />
 
               <button

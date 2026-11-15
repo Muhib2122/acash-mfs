@@ -133,6 +133,31 @@ export interface BiometricTxAuthorizationProof {
   };
 }
 
+export interface BiometricActionAuthorizationProof {
+  credentialId: string;
+  subjectId: string;
+  actionName: string;
+  signedAt: number;
+  challengeBase64Url: string;
+  authenticatorDataBase64Url: string;
+  clientDataJsonBase64Url: string;
+  signatureBase64Url: string;
+  rpId: string;
+}
+
+export interface ActionAuthInput {
+  pin?: string;
+  biometricProof?: BiometricActionAuthorizationProof;
+}
+
+export interface AdminActionSecurityInfo {
+  adminId: string;
+  adminRole: 'main_admin' | 'second_admin';
+  adminEmail: string;
+  hasActionPin: boolean;
+  webauthnCredentials: WebAuthnCredentialRecord[];
+}
+
 export type BiometricHighValueMode = 'replace' | 'augment';
 
 export interface BiometricPreferences {
@@ -472,6 +497,8 @@ export interface SecondAdminProfile {
   email: string;
   phone: string;
   passwordHash?: string;
+  actionPinHash?: string;
+  webauthnCredentials?: WebAuthnCredentialRecord[];
   createdBy?: string;
   profilePhotoUrl?: string;
   mapLocation?: UserMapLocation;
@@ -483,6 +510,8 @@ export interface SecondAdminProfile {
 export interface MainAdminCredentialConfig {
   email: string;
   passwordHash: string;
+  actionPinHash?: string;
+  webauthnCredentials?: WebAuthnCredentialRecord[];
   updatedAt: number;
   updatedBy: string;
 }

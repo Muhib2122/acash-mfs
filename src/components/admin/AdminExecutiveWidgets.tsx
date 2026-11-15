@@ -27,6 +27,7 @@ import {
 import {
   AcashTransaction,
   AcashUser,
+  ActionAuthInput,
   Language,
   ThemeMode,
 } from '../../types/acash';
@@ -475,9 +476,15 @@ export const AdminKycReviewQueuePanel: React.FC<{
   users: AcashUser[];
   adminEmail: string;
   lang: Language;
+  requestAdminAuth: (opts: {
+    title: string;
+    subtitle?: string;
+    actionName: string;
+    run: (auth: ActionAuthInput) => Promise<void>;
+  }) => Promise<void>;
   onInspectAccount: (accountId: string) => void;
   onFeedback: (msg: string) => void;
-}> = ({ users, adminEmail, lang, onInspectAccount, onFeedback }) => {
+}> = ({ users, adminEmail, lang, requestAdminAuth, onInspectAccount, onFeedback }) => {
   const [statusFilter, setStatusFilter] = useState<'submitted' | 'unverified' | 'verified' | 'ALL'>('submitted');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rejectReasonMap, setRejectReasonMap] = useState<Record<string, string>>({});
@@ -509,11 +516,26 @@ export const AdminKycReviewQueuePanel: React.FC<{
   const handleDecision = async (u: AcashUser, decision: 'verified' | 'unverified') => {
     setBusyId(u.accountId);
     try {
-      await adminReviewKycSubmission({
-        accountId: u.accountId,
-        decision,
-        reason: rejectReasonMap[u.accountId],
-        adminEmail,
+      await requestAdminAuth({
+        title:
+          decision === 'verified'
+            ? lang === 'bn'
+              ? 'KYC অনুমোদন নিশ্চিত করুন'
+              : 'Authorize KYC Approval'
+            : lang === 'bn'
+              ? 'KYC সংশোধনের অনুরোধ অনুমোদন'
+              : 'Authorize KYC Resubmission Request',
+        subtitle: `${u.businessName || u.name} (${u.accountId})`,
+        actionName: `kyc_${decision}`,
+        run: async (auth) => {
+          await adminReviewKycSubmission({
+            accountId: u.accountId,
+            decision,
+            reason: rejectReasonMap[u.accountId],
+            adminEmail,
+            auth,
+          });
+        },
       });
       onFeedback(
         decision === 'verified'
@@ -521,6 +543,7 @@ export const AdminKycReviewQueuePanel: React.FC<{
           : `KYC resubmission requested for ${u.businessName || u.name} (${u.accountId}).`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       onFeedback(err instanceof Error ? err.message : 'KYC decision update failed.');
     } finally {
       setBusyId(null);

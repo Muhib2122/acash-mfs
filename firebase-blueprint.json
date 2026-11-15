@@ -534,6 +534,16 @@
           "type": "string",
           "maxLength": 128
         },
+        "actionPinHash": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "webauthnCredentials": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
         "createdBy": {
           "type": "string",
           "maxLength": 160

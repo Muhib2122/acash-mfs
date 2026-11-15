@@ -4,6 +4,7 @@ import {
   Bell,
   CheckCircle2,
   Copy,
+  Fingerprint,
   KeyRound,
   Lock,
   Mail,
@@ -18,6 +19,8 @@ import {
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
+  ActionAuthInput,
+  AdminActionSecurityInfo,
   AdminTwoFactorMethod,
   Language,
   SecurityEventRecord,
@@ -27,7 +30,10 @@ import {
   adminResolveAndUnlockSecurityTarget,
   adminSaveTotpEnrollment,
   adminUpdateSecurityPolicy,
+  enrollAdminWebAuthnPasskey,
   getAdminTotpSecretForEmail,
+  removeAdminWebAuthnPasskey,
+  setAdminActionPin,
 } from '../../lib/acashService';
 import {
   formatDurationRemaining,
@@ -40,6 +46,12 @@ import {
   verifyTotpCode,
 } from '../../lib/totp';
 import {
+  detectWebAuthnCapability,
+  registerCustomerBiometricPasskey,
+  sanitizeBiometricDeviceLabelForDisplay,
+  WebAuthnCapability,
+} from '../../lib/webauthn';
+import {
   DeviceAlertStatus,
   getDeviceAlertStatus,
   requestNativeAlertGestureAccess,
@@ -51,6 +63,13 @@ interface AdminSecurityFortressPanelProps {
   adminEmail: string;
   securityEvents: SecurityEventRecord[];
   securityPolicy: SecurityPolicyConfig;
+  adminSecurityInfo: AdminActionSecurityInfo | null;
+  requestAdminAuth: (opts: {
+    title: string;
+    subtitle?: string;
+    actionName: string;
+    run: (auth: ActionAuthInput) => Promise<void>;
+  }) => Promise<void>;
   onFeedback: (msg: string) => void;
 }
 
@@ -59,6 +78,8 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
   adminEmail,
   securityEvents,
   securityPolicy,
+  adminSecurityInfo,
+  requestAdminAuth,
   onFeedback,
 }) => {
   const [draftPolicy, setDraftPolicy] = useState<SecurityPolicyConfig>(securityPolicy);
@@ -75,7 +96,17 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
     getDeviceAlertStatus()
   );
 
+  const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
+  const [bioDeviceLabel, setBioDeviceLabel] = useState('');
+  const [bioBusy, setBioBusy] = useState(false);
+  const [bioError, setBioError] = useState('');
+  const [newActionPinInput, setNewActionPinInput] = useState('');
+  const [confirmActionPinInput, setConfirmActionPinInput] = useState('');
+  const [actionPinBusy, setActionPinBusy] = useState(false);
+  const [actionPinError, setActionPinError] = useState('');
+
   const enrolledTotpSecret = getAdminTotpSecretForEmail(adminEmail, securityPolicy);
+  const adminPasskeys = adminSecurityInfo?.webauthnCredentials || [];
 
   useEffect(() => {
     setDraftPolicy(securityPolicy);
@@ -87,23 +118,161 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
   };
 
   useEffect(() => {
+    detectWebAuthnCapability()
+      .then((cap) => {
+        setWebauthnCap(cap);
+        if (cap.defaultDeviceLabel) {
+          setBioDeviceLabel((prev) => prev || cap.defaultDeviceLabel);
+        }
+      })
+      .catch(() => setWebauthnCap(null));
+  }, []);
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       setActiveLockouts(getActiveLockouts());
     }, 5000);
     return () => window.clearInterval(id);
   }, []);
 
+  const handleEnrollAdminBiometric = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBioError('');
+    const rawLabel = bioDeviceLabel.trim();
+    if (rawLabel && /^\d{3,8}$/.test(rawLabel)) {
+      setBioError(
+        lang === 'bn'
+          ? 'ডিভাইসের নামে সংখ্যার পিন দেবেন না (যেমন: "Admin Phone" বা "Office Laptop" লিখুন)।'
+          : 'Do not enter a numeric PIN as device label. Enter a friendly device name like "Admin Phone" or "Work Laptop".'
+      );
+      return;
+    }
+    setBioBusy(true);
+    try {
+      const credential = await registerCustomerBiometricPasskey({
+        accountId: adminSecurityInfo?.adminId || 'ADM-MAIN',
+        userEmailOrPhone: adminEmail,
+        displayName: adminSecurityInfo?.adminRole === 'second_admin' ? '2nd Admin' : 'Main Admin',
+        deviceLabel: sanitizeBiometricDeviceLabelForDisplay(
+          rawLabel || webauthnCap?.defaultDeviceLabel || 'Admin Device'
+        ),
+        existingCredentialIds: adminPasskeys.map((c) => c.credentialId),
+      });
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাডমিন বায়োমেট্রিক পাসকি সংরক্ষণ' : 'Authorize Admin Biometric Passkey',
+        subtitle: `Bind ${sanitizeBiometricDeviceLabelForDisplay(credential.deviceLabel)} to ${adminEmail}`,
+        actionName: 'enroll_admin_webauthn',
+        run: async (auth) => {
+          await enrollAdminWebAuthnPasskey({
+            actorEmail: adminEmail,
+            credential,
+            auth,
+          });
+        },
+      });
+      onFeedback(
+        lang === 'bn'
+          ? `অ্যাডমিন বায়োমেট্রিক পাসকি (${sanitizeBiometricDeviceLabelForDisplay(credential.deviceLabel)}) যুক্ত হয়েছে।`
+          : `Admin biometric passkey enrolled (${sanitizeBiometricDeviceLabelForDisplay(credential.deviceLabel)}).`
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setBioError(err instanceof Error ? err.message : 'Failed to enroll biometric passkey.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleRemoveAdminPasskey = async (credentialId: string, label: string) => {
+    setBioError('');
+    setBioBusy(true);
+    try {
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাডমিন পাসকি ডিলিট অনুমোদন' : 'Authorize Remove Biometric Passkey',
+        subtitle: `${sanitizeBiometricDeviceLabelForDisplay(label)} · ${adminEmail}`,
+        actionName: 'remove_admin_webauthn',
+        run: async (auth) => {
+          await removeAdminWebAuthnPasskey({
+            actorEmail: adminEmail,
+            credentialId,
+            auth,
+          });
+        },
+      });
+      onFeedback(`Removed biometric passkey "${sanitizeBiometricDeviceLabelForDisplay(label)}".`);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setBioError(err instanceof Error ? err.message : 'Failed to remove passkey.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleSaveAdminActionPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setActionPinError('');
+    if (!/^\d{4,6}$/.test(newActionPinInput.trim())) {
+      setActionPinError(
+        lang === 'bn'
+          ? 'অ্যাডমিন অ্যাকশন পিন ৪ থেকে ৬ সংখ্যার হতে হবে।'
+          : 'Admin Action PIN must be 4 to 6 numeric digits.'
+      );
+      return;
+    }
+    if (newActionPinInput.trim() !== confirmActionPinInput.trim()) {
+      setActionPinError(
+        lang === 'bn' ? 'দুইবারের পিন মেলেনি।' : 'Action PIN entries do not match.'
+      );
+      return;
+    }
+    setActionPinBusy(true);
+    try {
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাডমিন অ্যাকশন পিন পরিবর্তন অনুমোদন' : 'Authorize Admin Action PIN Update',
+        subtitle: `${adminEmail}`,
+        actionName: 'set_admin_action_pin',
+        run: async (auth) => {
+          await setAdminActionPin({
+            actorEmail: adminEmail,
+            newActionPin: newActionPinInput.trim(),
+            auth,
+          });
+        },
+      });
+      setNewActionPinInput('');
+      setConfirmActionPinInput('');
+      onFeedback(
+        lang === 'bn'
+          ? 'অ্যাডমিন অ্যাকশন পিন সফলভাবে সেট/আপডেট করা হয়েছে।'
+          : 'Admin Quick Action PIN saved securely. You can now use it or Biometrics to authorize Admin actions.'
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setActionPinError(err instanceof Error ? err.message : 'Failed to set Admin Action PIN.');
+    } finally {
+      setActionPinBusy(false);
+    }
+  };
+
   const handleSavePolicy = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingPolicy(true);
     try {
-      await adminUpdateSecurityPolicy(draftPolicy, adminEmail);
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'সিকিউরিটি পলিসি পরিবর্তন অনুমোদন' : 'Authorize Security Policy Update',
+        subtitle: `Max ${draftPolicy.maxTxPerMinute}/min · Lockout ${draftPolicy.lockoutMinutes}m`,
+        actionName: 'update_security_policy',
+        run: async (auth) => {
+          await adminUpdateSecurityPolicy(draftPolicy, adminEmail, auth);
+        },
+      });
       onFeedback(
         lang === 'bn'
           ? '১০x সিকিউরিটি ও অ্যান্টি-স্প্যাম নীতি আপডেট করা হয়েছে।'
           : '10x Security & Anti-Spam Policy updated and synced live.'
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       onFeedback(err instanceof Error ? err.message : 'Failed to save security policy.');
     } finally {
       setSavingPolicy(false);
@@ -118,11 +287,19 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
     const key = `${params.scope || 'ev'}:${params.targetIdentifier}`;
     setUnlockingKey(key);
     try {
-      await adminResolveAndUnlockSecurityTarget({
-        eventId: params.eventId,
-        scope: params.scope,
-        targetIdentifier: params.targetIdentifier,
-        adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'টার্গেট আনব্লক অনুমোদন' : 'Authorize Security Unlock',
+        subtitle: `Target: ${params.targetIdentifier}`,
+        actionName: 'resolve_unlock_security_target',
+        run: async (auth) => {
+          await adminResolveAndUnlockSecurityTarget({
+            eventId: params.eventId,
+            scope: params.scope,
+            targetIdentifier: params.targetIdentifier,
+            adminEmail,
+            auth,
+          });
+        },
       });
       refreshLocalState();
       onFeedback(
@@ -130,6 +307,9 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
           ? `${params.targetIdentifier} এর লকআউট আনব্লক করা হয়েছে।`
           : `Cleared active lockouts and resolved security alert for ${params.targetIdentifier}.`
       );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      onFeedback(err instanceof Error ? err.message : 'Failed to unlock target.');
     } finally {
       setUnlockingKey(null);
     }
@@ -138,13 +318,22 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
   const handleToggleAdmin2fa = async (nextEnabled: boolean) => {
     setToggling2fa(true);
     try {
-      const updated = await adminUpdateSecurityPolicy(
-        {
-          ...draftPolicy,
-          admin2faEnabled: nextEnabled,
+      let updated = draftPolicy;
+      await requestAdminAuth({
+        title: nextEnabled ? 'Authorize Enable Admin 2FA' : 'Authorize Disable Admin 2FA',
+        subtitle: `${adminEmail}`,
+        actionName: 'toggle_admin_2fa',
+        run: async (auth) => {
+          updated = await adminUpdateSecurityPolicy(
+            {
+              ...draftPolicy,
+              admin2faEnabled: nextEnabled,
+            },
+            adminEmail,
+            auth
+          );
         },
-        adminEmail
-      );
+      });
       setDraftPolicy(updated);
       onFeedback(
         nextEnabled
@@ -156,6 +345,7 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
             : 'Admin Login 2FA disabled.'
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       onFeedback(err instanceof Error ? err.message : 'Failed to toggle Admin 2FA.');
     } finally {
       setToggling2fa(false);
@@ -165,13 +355,22 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
   const handleChange2faMethod = async (nextMethod: AdminTwoFactorMethod) => {
     setToggling2fa(true);
     try {
-      const updated = await adminUpdateSecurityPolicy(
-        {
-          ...draftPolicy,
-          admin2faMethod: nextMethod,
+      let updated = draftPolicy;
+      await requestAdminAuth({
+        title: 'Authorize Change Admin 2FA Method',
+        subtitle: `Method: ${nextMethod.replace(/_/g, ' ')}`,
+        actionName: 'change_admin_2fa_method',
+        run: async (auth) => {
+          updated = await adminUpdateSecurityPolicy(
+            {
+              ...draftPolicy,
+              admin2faMethod: nextMethod,
+            },
+            adminEmail,
+            auth
+          );
         },
-        adminEmail
-      );
+      });
       setDraftPolicy(updated);
       onFeedback(
         nextMethod === 'email_otp'
@@ -183,6 +382,7 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
             : 'Admin 2FA set to Both (sends EmailJS code and also accepts Authenticator App 6-digit TOTP).'
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       onFeedback(err instanceof Error ? err.message : 'Failed to update 2FA mode.');
     } finally {
       setToggling2fa(false);
@@ -204,10 +404,18 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
         );
         return;
       }
-      await adminSaveTotpEnrollment({
-        targetAdminEmail: adminEmail,
-        secretBase32: pendingTotpSecret,
-        actorEmail: adminEmail,
+      await requestAdminAuth({
+        title: 'Authorize Authenticator TOTP Binding',
+        subtitle: `${adminEmail}`,
+        actionName: 'enroll_admin_totp',
+        run: async (auth) => {
+          await adminSaveTotpEnrollment({
+            targetAdminEmail: adminEmail,
+            secretBase32: pendingTotpSecret,
+            actorEmail: adminEmail,
+            auth,
+          });
+        },
       });
       setPendingTotpSecret(null);
       setTotpVerifyInput('');
@@ -217,6 +425,7 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
           : `Authenticator App verified and bound to ${adminEmail}.`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setTotpSetupError(err instanceof Error ? err.message : 'Failed to verify TOTP code.');
     } finally {
       setTotpSetupBusy(false);
@@ -226,12 +435,23 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
   const handleRevokeTotp = async () => {
     setTotpSetupBusy(true);
     try {
-      await adminSaveTotpEnrollment({
-        targetAdminEmail: adminEmail,
-        secretBase32: null,
-        actorEmail: adminEmail,
+      await requestAdminAuth({
+        title: 'Authorize Revoke Authenticator Key',
+        subtitle: `${adminEmail}`,
+        actionName: 'revoke_admin_totp',
+        run: async (auth) => {
+          await adminSaveTotpEnrollment({
+            targetAdminEmail: adminEmail,
+            secretBase32: null,
+            actorEmail: adminEmail,
+            auth,
+          });
+        },
       });
       onFeedback(`Authenticator App key revoked for ${adminEmail}. EmailJS 2FA remains available.`);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      onFeedback(err instanceof Error ? err.message : 'Failed to revoke Authenticator key.');
     } finally {
       setTotpSetupBusy(false);
     }
@@ -665,6 +885,218 @@ export const AdminSecurityFortressPanel: React.FC<AdminSecurityFortressPanelProp
               </div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Admin Biometric Passkeys & Quick Action PIN Management */}
+      <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 shadow-sm space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 dark:text-emerald-400">
+              <Fingerprint className="w-4 h-4 shrink-0" />
+              <span>
+                {lang === 'bn'
+                  ? 'অ্যাডমিন অ্যাকশন অথেন্টিকেশন (বায়োমেট্রিক ও অ্যাকশন পিন)'
+                  : 'Admin Action Authorization (Biometric Passkey & Action PIN)'}
+              </span>
+            </div>
+            <h3 className="font-display text-lg font-bold text-slate-900 dark:text-white">
+              {lang === 'bn'
+                ? 'কনসোল পরিবর্তনের জন্য ফেস/ফিঙ্গারপ্রিন্ট ও অ্যাকশন পিন'
+                : 'Require Biometrics or PIN / Password for Every Admin Mutation'}
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-2xl">
+              {lang === 'bn'
+                ? 'ট্রেজারি, ফি ইঞ্জিন, KYC অনুমোদন, অ্যাকাউন্ট ফ্রিজ বা পলিসি পরিবর্তনের মতো প্রতিটি অ্যাকশনে বায়োমেট্রিক পাসকি বা অ্যাকশন পিন/পাসওয়ার্ড দিয়ে অনুমোদন বাধ্যতামূলক।'
+                : 'Every treasury mint, fee edit, KYC decision, freeze/delete, or security update requires cryptographic WebAuthn biometrics, your Admin Quick Action PIN, or your Admin Login Password.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs shrink-0">
+            <span
+              className={`px-3 py-1.5 rounded-xl border font-semibold ${
+                adminPasskeys.length > 0
+                  ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              {adminPasskeys.length} Passkey{adminPasskeys.length === 1 ? '' : 's'}
+            </span>
+            <span
+              className={`px-3 py-1.5 rounded-xl border font-semibold ${
+                adminSecurityInfo?.hasActionPin
+                  ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-200 dark:border-indigo-500/30 text-indigo-700 dark:text-indigo-300'
+                  : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              {adminSecurityInfo?.hasActionPin ? 'Action PIN Active' : 'No Action PIN Yet'}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Left: WebAuthn Biometric Passkeys */}
+          <div className="lg:col-span-7 p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Fingerprint className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>{lang === 'bn' ? 'অ্যাডমিন বায়োমেট্রিক পাসকি' : 'Admin WebAuthn Biometric Passkeys'}</span>
+              </div>
+              <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                {webauthnCap?.supported ? 'Device WebAuthn Ready' : 'Browser Check Required'}
+              </span>
+            </div>
+
+            {adminPasskeys.length > 0 ? (
+              <div className="space-y-2">
+                {adminPasskeys.map((cred) => {
+                  const safeLabel = sanitizeBiometricDeviceLabelForDisplay(cred.deviceLabel);
+                  return (
+                    <div
+                      key={cred.credentialId}
+                      className="p-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                          {safeLabel}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                          Added {new Date(cred.createdAt).toLocaleDateString()}
+                          {cred.lastUsedAt
+                            ? ` · Last used ${new Date(cred.lastUsedAt).toLocaleDateString()}`
+                            : ''}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={bioBusy}
+                        onClick={() => void handleRemoveAdminPasskey(cred.credentialId, safeLabel)}
+                        className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>Remove</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-3.5 rounded-xl bg-white dark:bg-[#121622] border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                No Admin biometric passkey enrolled yet. Register your phone fingerprint, Face ID, or laptop Touch ID below for one-tap verification.
+              </div>
+            )}
+
+            <form onSubmit={handleEnrollAdminBiometric} className="space-y-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+              <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                Device Name (e.g. Admin Phone / Work Laptop — never enter a numeric PIN)
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  maxLength={40}
+                  value={bioDeviceLabel}
+                  onChange={(e) => {
+                    setBioDeviceLabel(e.target.value);
+                    if (bioError) setBioError('');
+                  }}
+                  placeholder={webauthnCap?.defaultDeviceLabel || 'Admin Workstation'}
+                  className="flex-1 min-h-[42px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="submit"
+                  disabled={bioBusy || !webauthnCap?.supported || adminPasskeys.length >= 5}
+                  className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 transition-colors"
+                >
+                  <Fingerprint className="w-4 h-4 shrink-0" />
+                  <span>{bioBusy ? 'Registering...' : 'Enroll Device Biometrics'}</span>
+                </button>
+              </div>
+              {bioError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] text-rose-700 dark:text-rose-300">
+                  {bioError}
+                </div>
+              )}
+            </form>
+          </div>
+
+          {/* Right: 4-6 Digit Admin Quick Action PIN */}
+          <form
+            onSubmit={handleSaveAdminActionPin}
+            className="lg:col-span-5 p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-3.5"
+          >
+            <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span>
+                {adminSecurityInfo?.hasActionPin
+                  ? lang === 'bn'
+                    ? 'অ্যাডমিন অ্যাকশন পিন আপডেট করুন'
+                    : 'Update Admin Quick Action PIN'
+                  : lang === 'bn'
+                    ? 'অ্যাডমিন অ্যাকশন পিন সেট করুন (৪–৬ সংখ্যা)'
+                    : 'Set Admin Quick Action PIN (4–6 Digits)'}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+              {lang === 'bn'
+                ? 'বড় পাসওয়ার্ডের বদলে দ্রুত অ্যাকশন যাচাইয়ের জন্য একটি আলাদা ৪–৬ সংখ্যার অ্যাকশন পিন ব্যবহার করতে পারেন।'
+                : 'Set a dedicated 4–6 digit Action PIN stored as a salted SHA-256 hash so you can approve Admin operations quickly alongside biometrics or your login password.'}
+            </p>
+            <div className="space-y-2.5">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  New 4–6 Digit Action PIN
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={6}
+                  required
+                  value={newActionPinInput}
+                  onChange={(e) => {
+                    setNewActionPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                    if (actionPinError) setActionPinError('');
+                  }}
+                  placeholder="••••••"
+                  className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular tracking-[0.25em] text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Confirm Action PIN
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={6}
+                  required
+                  value={confirmActionPinInput}
+                  onChange={(e) => {
+                    setConfirmActionPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                    if (actionPinError) setActionPinError('');
+                  }}
+                  placeholder="••••••"
+                  className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular tracking-[0.25em] text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            {actionPinError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[11px] text-rose-700 dark:text-rose-300">
+                {actionPinError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={actionPinBusy || newActionPinInput.length < 4 || confirmActionPinInput.length < 4}
+              className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white disabled:opacity-50 transition-colors"
+            >
+              {actionPinBusy
+                ? 'Saving Action PIN...'
+                : adminSecurityInfo?.hasActionPin
+                  ? 'Update Admin Action PIN'
+                  : 'Save Admin Action PIN'}
+            </button>
+          </form>
         </div>
       </div>
 

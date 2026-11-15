@@ -1,5 +1,6 @@
 import {
   AcashUser,
+  BiometricActionAuthorizationProof,
   BiometricHighValueMode,
   BiometricPreferences,
   BiometricTxAuthorizationProof,
@@ -55,6 +56,14 @@ export function detectDefaultBiometricDeviceLabel(): string {
   if (/Windows/i.test(ua)) return 'Windows Hello Biometrics';
   if (/CrOS/i.test(ua)) return 'Chromebook Screen Lock / Biometrics';
   return 'Device Biometric Passkey';
+}
+
+export function sanitizeBiometricDeviceLabelForDisplay(label?: string | null): string {
+  const cleaned = (label || '').trim();
+  if (!cleaned || /^\d{3,6}$/.test(cleaned)) {
+    return 'Device Biometric Passkey';
+  }
+  return cleaned.slice(0, 64);
 }
 
 export async function detectWebAuthnCapability(): Promise<WebAuthnCapability> {
@@ -378,7 +387,7 @@ function mapWebAuthnError(err: unknown): Error {
     const msg = err.message || '';
     if (/permissions policy|publickey-credentials|not enabled in this document/i.test(msg)) {
       return new Error(
-        'Device biometrics prompt is blocked inside this embedded preview frame. Open the portal directly in your browser tab or switch to Tap & Hold confirmation.'
+        'Device biometrics prompt is blocked inside this embedded preview frame. Open the portal directly in your browser tab or use Security PIN confirmation.'
       );
     }
     if (name === 'NotAllowedError') {
@@ -507,7 +516,7 @@ export async function registerCustomerBiometricPasskey(params: {
       credentialId,
       publicKeySpki,
       algorithm,
-      deviceLabel: (params.deviceLabel || cap.defaultDeviceLabel).trim().slice(0, 64),
+      deviceLabel: sanitizeBiometricDeviceLabelForDisplay(params.deviceLabel || cap.defaultDeviceLabel),
       transports,
       signCount,
       createdAt: Date.now(),
@@ -705,6 +714,241 @@ export async function verifyBiometricTransactionProof(params: {
   }
 
   // 3. Verify cryptographic signature over authenticatorData || SHA-256(clientDataJSON)
+  if (!globalThis.crypto?.subtle) {
+    return { valid: false, reason: 'Web Crypto SubtleCrypto is unavailable.' };
+  }
+
+  try {
+    const clientDataHash = await sha256(clientDataBytes);
+    const signedPayload = new Uint8Array(authDataBytes.length + clientDataHash.length);
+    signedPayload.set(authDataBytes, 0);
+    signedPayload.set(clientDataHash, authDataBytes.length);
+
+    const spkiBytes = base64UrlToBytes(cred.publicKeySpki);
+    const sigBytes = base64UrlToBytes(proof.signatureBase64Url);
+
+    if (cred.algorithm === -7) {
+      const cryptoKey = await globalThis.crypto.subtle.importKey(
+        'spki',
+        toExactArrayBuffer(spkiBytes),
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify']
+      );
+      const rawSig = derEcdsaSignatureToRawP1363(sigBytes, 32);
+      const ok = await globalThis.crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        cryptoKey,
+        toExactArrayBuffer(rawSig),
+        toExactArrayBuffer(signedPayload)
+      );
+      if (!ok) {
+        return { valid: false, reason: 'Invalid ECDSA biometric signature.' };
+      }
+    } else if (cred.algorithm === -257) {
+      const cryptoKey = await globalThis.crypto.subtle.importKey(
+        'spki',
+        toExactArrayBuffer(spkiBytes),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['verify']
+      );
+      const ok = await globalThis.crypto.subtle.verify(
+        { name: 'RSASSA-PKCS1-v1_5' },
+        cryptoKey,
+        toExactArrayBuffer(sigBytes),
+        toExactArrayBuffer(signedPayload)
+      );
+      if (!ok) {
+        return { valid: false, reason: 'Invalid RSA biometric signature.' };
+      }
+    } else {
+      return { valid: false, reason: `Unsupported credential algorithm: ${cred.algorithm}` };
+    }
+  } catch (err) {
+    return {
+      valid: false,
+      reason: err instanceof Error ? err.message : 'Biometric signature verification threw error.',
+    };
+  }
+
+  return {
+    valid: true,
+    matchedCredentialId: cred.credentialId,
+    nextSignCount: newSignCount,
+  };
+}
+
+/**
+ * Triggers native OS biometrics to authorize any sensitive setting change or admin operation,
+ * bound cryptographically to subjectId + actionName + random nonce.
+ */
+export async function authorizeSensitiveActionWithBiometrics(params: {
+  subjectId: string;
+  actionName: string;
+  credentials: WebAuthnCredentialRecord[];
+}): Promise<BiometricActionAuthorizationProof> {
+  const cap = await detectWebAuthnCapability();
+  if (!cap.supported) {
+    throw new Error('WebAuthn biometrics is not supported on this browser.');
+  }
+  if (!params.credentials || params.credentials.length === 0) {
+    throw new Error('No biometric passkey enrolled.');
+  }
+
+  const nonceBytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(nonceBytes);
+  const nonceHex = Array.from(nonceBytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  const cleanAction = (params.actionName || 'sensitive_action').trim();
+  const bindingRaw = `acash-webauthn-action-v1|${params.subjectId}|${cleanAction}|${nonceHex}`;
+  const challengeBytes = await sha256(new TextEncoder().encode(bindingRaw));
+  const challengeBase64Url = bytesToBase64Url(challengeBytes);
+  const rpId = getEffectiveRpId() || window.location.hostname || 'localhost';
+
+  const allowCredentials: PublicKeyCredentialDescriptor[] = params.credentials.map((c) => ({
+    type: 'public-key',
+    id: toExactArrayBuffer(base64UrlToBytes(c.credentialId)),
+    ...(c.transports && c.transports.length > 0
+      ? { transports: c.transports as AuthenticatorTransport[] }
+      : {}),
+  }));
+
+  try {
+    const assertion = (await navigator.credentials.get({
+      publicKey: {
+        challenge: toExactArrayBuffer(challengeBytes),
+        rpId,
+        allowCredentials,
+        userVerification: 'required',
+        timeout: 60_000,
+      },
+    })) as PublicKeyCredential | null;
+
+    if (!assertion) {
+      throw new Error('Biometric verification did not return a signed assertion.');
+    }
+
+    const resp = assertion.response as AuthenticatorAssertionResponse;
+    const proof: BiometricActionAuthorizationProof = {
+      credentialId: bytesToBase64Url(new Uint8Array(assertion.rawId)),
+      subjectId: params.subjectId,
+      actionName: cleanAction,
+      signedAt: Date.now(),
+      challengeBase64Url,
+      authenticatorDataBase64Url: bytesToBase64Url(new Uint8Array(resp.authenticatorData)),
+      clientDataJsonBase64Url: bytesToBase64Url(new Uint8Array(resp.clientDataJSON)),
+      signatureBase64Url: bytesToBase64Url(new Uint8Array(resp.signature)),
+      rpId,
+    };
+
+    const verifyRes = await verifyBiometricActionProof({
+      proof,
+      enrolledCredentials: params.credentials,
+      expectedSubjectId: params.subjectId,
+      expectedActionName: cleanAction,
+      expectedOrigin: window.location.origin,
+    });
+
+    if (!verifyRes.valid) {
+      throw new Error(verifyRes.reason || 'Cryptographic biometric signature verification failed.');
+    }
+
+    return proof;
+  } catch (err) {
+    throw mapWebAuthnError(err);
+  }
+}
+
+export async function verifyBiometricActionProof(params: {
+  proof: BiometricActionAuthorizationProof;
+  enrolledCredentials: WebAuthnCredentialRecord[];
+  expectedSubjectId: string;
+  expectedActionName: string;
+  expectedOrigin?: string;
+  maxAgeMs?: number;
+}): Promise<{
+  valid: boolean;
+  reason?: string;
+  matchedCredentialId?: string;
+  nextSignCount?: number;
+}> {
+  const { proof } = params;
+  const maxAgeMs = params.maxAgeMs ?? 90_000;
+
+  if (!proof || !proof.credentialId || !proof.signatureBase64Url) {
+    return { valid: false, reason: 'Missing WebAuthn biometric assertion payload.' };
+  }
+
+  if (Date.now() - proof.signedAt > maxAgeMs || proof.signedAt - Date.now() > 15_000) {
+    return { valid: false, reason: 'Biometric authorization expired. Please scan again.' };
+  }
+
+  if (
+    proof.subjectId !== params.expectedSubjectId ||
+    proof.actionName !== params.expectedActionName
+  ) {
+    return {
+      valid: false,
+      reason: 'Biometric assertion does not match this action context.',
+    };
+  }
+
+  const cred = params.enrolledCredentials.find((c) => c.credentialId === proof.credentialId);
+  if (!cred) {
+    return { valid: false, reason: 'Biometric credential is not registered on this account.' };
+  }
+
+  let clientData: { type?: string; challenge?: string; origin?: string };
+  const clientDataBytes = base64UrlToBytes(proof.clientDataJsonBase64Url);
+  try {
+    clientData = JSON.parse(new TextDecoder().decode(clientDataBytes));
+  } catch {
+    return { valid: false, reason: 'Malformed WebAuthn clientDataJSON.' };
+  }
+
+  if (clientData.type !== 'webauthn.get') {
+    return { valid: false, reason: 'Invalid WebAuthn ceremony type.' };
+  }
+  if (clientData.challenge !== proof.challengeBase64Url) {
+    return { valid: false, reason: 'WebAuthn challenge mismatch.' };
+  }
+  if (params.expectedOrigin && clientData.origin !== params.expectedOrigin) {
+    return { valid: false, reason: 'WebAuthn origin verification failed.' };
+  }
+
+  const authDataBytes = base64UrlToBytes(proof.authenticatorDataBase64Url);
+  if (authDataBytes.length < 37) {
+    return { valid: false, reason: 'Malformed authenticatorData.' };
+  }
+
+  const expectedRpIdHash = await sha256(new TextEncoder().encode(proof.rpId));
+  for (let i = 0; i < 32; i++) {
+    if (authDataBytes[i] !== expectedRpIdHash[i]) {
+      return { valid: false, reason: 'WebAuthn RP ID hash verification failed.' };
+    }
+  }
+
+  const flags = authDataBytes[32];
+  const userPresent = (flags & 0x01) !== 0;
+  const userVerified = (flags & 0x04) !== 0;
+  if (!userPresent || !userVerified) {
+    return {
+      valid: false,
+      reason: 'Biometric user verification (UV flag) was not satisfied by device.',
+    };
+  }
+
+  const newSignCount = readSignCountFromAuthData(authDataBytes);
+  if (cred.signCount > 0 && newSignCount > 0 && newSignCount <= cred.signCount) {
+    return {
+      valid: false,
+      reason: 'Authenticator signature counter anomaly detected.',
+    };
+  }
+
   if (!globalThis.crypto?.subtle) {
     return { valid: false, reason: 'Web Crypto SubtleCrypto is unavailable.' };
   }
@@ -1118,7 +1362,9 @@ export function syncBiometricQuickHint(user: Pick<AcashUser, 'accountId' | 'name
         accountId: user.accountId,
         name: user.businessName || user.name,
         role: user.role,
-        deviceLabel: creds[0]?.deviceLabel || detectDefaultBiometricDeviceLabel(),
+        deviceLabel: sanitizeBiometricDeviceLabelForDisplay(
+          creds[0]?.deviceLabel || detectDefaultBiometricDeviceLabel()
+        ),
         updatedAt: Date.now(),
       });
     }

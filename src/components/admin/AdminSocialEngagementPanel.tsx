@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import {
   AcashTransaction,
+  ActionAuthInput,
   CustomGiftCardRecord,
   GiftCardCatalogPolicy,
   GiftCardParticleType,
@@ -60,6 +61,12 @@ interface AdminSocialEngagementPanelProps {
   customGiftCards: CustomGiftCardRecord[];
   giftCardPolicy: GiftCardCatalogPolicy;
   portalTheme: PortalThemeConfig;
+  requestAdminAuth: (opts: {
+    title: string;
+    subtitle?: string;
+    actionName: string;
+    run: (auth: ActionAuthInput) => Promise<void>;
+  }) => Promise<void>;
   onInspectAccount: (accountId: string) => void;
   onFeedback: (msg: string) => void;
 }
@@ -213,6 +220,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
   customGiftCards,
   giftCardPolicy,
   portalTheme,
+  requestAdminAuth,
   onInspectAccount,
   onFeedback,
 }) => {
@@ -491,11 +499,19 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
   ) => {
     setGovBusyId(card.id);
     try {
-      await adminGovernAnyGiftCard({
-        cardId: card.id,
-        cardTitleHint: card.titleBn,
-        action,
-        adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'গিফট কার্ড পরিবর্তন অনুমোদন' : 'Authorize Gift Card Governance',
+        subtitle: `${action.replace(/_/g, ' ').toUpperCase()} · ${card.titleEn}`,
+        actionName: `gift_card_${action}`,
+        run: async (auth) => {
+          await adminGovernAnyGiftCard({
+            cardId: card.id,
+            cardTitleHint: card.titleBn,
+            action,
+            adminEmail,
+            auth,
+          });
+        },
       });
       const feedbackMap: Record<typeof action, string> = {
         freeze: `"${card.titleEn}" is now frozen (hidden from Customer Send Money).`,
@@ -508,6 +524,7 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
       };
       onFeedback(feedbackMap[action]);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       onFeedback(err instanceof Error ? err.message : 'Governance update failed.');
     } finally {
       setGovBusyId(null);
@@ -535,31 +552,42 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
     }
     setCardSaving(true);
     try {
-      const saved = await adminSaveCustomGiftCard({
-        cardId: editingCardId || undefined,
-        titleBn,
-        titleEn,
-        subtitleBn,
-        subtitleEn,
-        themeCategory,
-        imageUrl,
-        gradientBg: selectedGradient.gradientBg,
-        accentHex: selectedGradient.accentHex,
-        particleType,
-        defaultMessageBn,
-        defaultMessageEn,
-        featured: cardFeatured,
-        featuredFirst: cardFeaturedFirst,
-        active: cardActive,
-        adminEmail,
+      let savedTitle = titleEn.trim();
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'কাস্টম গিফট কার্ড পাবলিশ অনুমোদন' : 'Authorize Custom Gift Card Publish',
+        subtitle: `${titleEn.trim()} · ${titleBn.trim()}`,
+        actionName: 'save_custom_gift_card',
+        run: async (auth) => {
+          const saved = await adminSaveCustomGiftCard({
+            cardId: editingCardId || undefined,
+            titleBn,
+            titleEn,
+            subtitleBn,
+            subtitleEn,
+            themeCategory,
+            imageUrl,
+            gradientBg: selectedGradient.gradientBg,
+            accentHex: selectedGradient.accentHex,
+            particleType,
+            defaultMessageBn,
+            defaultMessageEn,
+            featured: cardFeatured,
+            featuredFirst: cardFeaturedFirst,
+            active: cardActive,
+            adminEmail,
+            auth,
+          });
+          savedTitle = lang === 'bn' ? saved.titleBn : saved.titleEn;
+        },
       });
       onFeedback(
         lang === 'bn'
-          ? `কার্ড "${saved.titleBn}" সফলভাবে সকল অ্যাকাউন্টে লাইভ করা হয়েছে!`
-          : `Cultural card "${saved.titleEn}" is now live across ALL Customer accounts!`
+          ? `কার্ড "${savedTitle}" সফলভাবে সকল অ্যাকাউন্টে লাইভ করা হয়েছে!`
+          : `Cultural card "${savedTitle}" is now live across ALL Customer accounts!`
       );
       resetCardForm();
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setCardError(err instanceof Error ? err.message : 'Failed to save custom gift card.');
     } finally {
       setCardSaving(false);
@@ -571,21 +599,31 @@ export const AdminSocialEngagementPanel: React.FC<AdminSocialEngagementPanelProp
     setThemeError('');
     setThemeSaving(true);
     try {
-      const saved = await adminUpdatePortalThemeConfig({
-        presetId: draftPresetId,
-        bannerEnabled: draftBannerEnabled,
-        customBannerBn: draftBannerBn,
-        customBannerEn: draftBannerEn,
-        surfacePreference: draftSurface,
-        adminEmail,
+      let publishedDef = getPortalThemeDefinition(draftPresetId);
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'পোর্টাল থিম পরিবর্তন অনুমোদন' : 'Authorize Account Portal Theme Change',
+        subtitle: `${publishedDef.nameEn} (${draftSurface})`,
+        actionName: 'update_portal_theme',
+        run: async (auth) => {
+          const saved = await adminUpdatePortalThemeConfig({
+            presetId: draftPresetId,
+            bannerEnabled: draftBannerEnabled,
+            customBannerBn: draftBannerBn,
+            customBannerEn: draftBannerEn,
+            surfacePreference: draftSurface,
+            adminEmail,
+            auth,
+          });
+          publishedDef = getPortalThemeDefinition(saved.presetId);
+        },
       });
-      const def = getPortalThemeDefinition(saved.presetId);
       onFeedback(
         lang === 'bn'
-          ? `অ্যাকাউন্ট পোর্টাল থিম "${def.nameBn}" লাইভ আপডেট হয়েছে!`
-          : `Account Portal theme "${def.nameEn}" is now live across Customer, Agent & Merchant portals!`
+          ? `অ্যাকাউন্ট পোর্টাল থিম "${publishedDef.nameBn}" লাইভ আপডেট হয়েছে!`
+          : `Account Portal theme "${publishedDef.nameEn}" is now live across Customer, Agent & Merchant portals!`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setThemeError(err instanceof Error ? err.message : 'Failed to update portal theme.');
     } finally {
       setThemeSaving(false);

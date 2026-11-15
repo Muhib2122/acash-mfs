@@ -35,7 +35,10 @@ import {
 import { verifyTotpCode } from './totp';
 import {
   normalizeBiometricPrefs,
+  resolveBiometricPolicyForAmount,
+  sanitizeBiometricDeviceLabelForDisplay,
   syncBiometricQuickHint,
+  verifyBiometricActionProof,
   verifyBiometricTransactionProof,
 } from './webauthn';
 import {
@@ -48,6 +51,8 @@ import {
   AccountNotification,
   AccountNotificationCategory,
   AccountStatus,
+  ActionAuthInput,
+  AdminActionSecurityInfo,
   AdminActivityLog,
   AdminActivityType,
   AdminNotification,
@@ -1084,7 +1089,16 @@ export function getAdminAlertEmail(): string {
   return readLocalStore().adminAlertEmail || DEFAULT_ADMIN_ALERT_EMAIL;
 }
 
-export async function setAdminAlertEmail(email: string, actorEmail?: string): Promise<void> {
+export async function setAdminAlertEmail(
+  email: string,
+  actorEmail: string,
+  auth: ActionAuthInput
+): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail,
+    auth,
+    actionName: 'admin_set_alert_email',
+  });
   const clean = email.trim().toLowerCase();
   if (!clean || !clean.includes('@')) {
     throw new Error('Enter a valid Admin alert email address.');
@@ -3277,7 +3291,13 @@ export async function adminSendAccountNotification(params: {
   message: string;
   severity?: 'info' | 'success' | 'warning' | 'critical';
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<AccountNotification> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_send_account_notification',
+  });
   if (
     containsDangerousMarkup(params.title) ||
     containsDangerousMarkup(params.message)
@@ -3522,7 +3542,6 @@ export async function executeFinancialTransaction(params: {
   receiverIdentifier: string;
   amount: number;
   pin?: string;
-  authorizeViaSession?: boolean;
   biometricProof?: BiometricTxAuthorizationProof;
   feeConfig: FeeConfig;
   operator?: OperatorId;
@@ -3643,8 +3662,13 @@ export async function executeFinancialTransaction(params: {
     }
   }
 
+  const effectiveFeeConfigPreview = normalizeFeeConfig(
+    store.feeConfig && store.feeConfig.updatedAt >= (params.feeConfig?.updatedAt || 0)
+      ? store.feeConfig
+      : params.feeConfig
+  );
+
   let usedBiometricAuth = false;
-  let usedTapHoldAuth = false;
   let usedBiometricDeviceLabel: string | undefined;
   let updatedSenderWebauthnCreds: WebAuthnCredentialRecord[] | undefined;
   let updatedSenderBiometricPrefs: BiometricPreferences | undefined;
@@ -3688,6 +3712,19 @@ export async function executeFinancialTransaction(params: {
       );
     }
 
+    const bioPolicy = resolveBiometricPolicyForAmount({
+      user: senderLocal,
+      amount,
+      platformHighValueThreshold: effectiveFeeConfigPreview.highValueThreshold,
+      biometricsReady: enrolled.length > 0,
+    });
+
+    if (bioPolicy.requireAugmentStep && !params.pin?.trim()) {
+      throw new Error(
+        'High-value Dual-Lock policy requires your 4–5 digit Security PIN alongside device biometrics.'
+      );
+    }
+
     // If Dual-Lock High-Value Augment mode also supplied a PIN, verify the PIN too
     if (params.pin) {
       const pinCheck = await verifySecretAgainstStored(
@@ -3714,7 +3751,7 @@ export async function executeFinancialTransaction(params: {
     usedBiometricAuth = true;
     const usedAt = Date.now();
     const matchedCred = enrolled.find((c) => c.credentialId === bioCheck.matchedCredentialId);
-    usedBiometricDeviceLabel = matchedCred?.deviceLabel;
+    usedBiometricDeviceLabel = sanitizeBiometricDeviceLabelForDisplay(matchedCred?.deviceLabel);
     updatedSenderWebauthnCreds = enrolled.map((cred) =>
       cred.credentialId === bioCheck.matchedCredentialId
         ? stripUndefined({
@@ -3733,12 +3770,9 @@ export async function executeFinancialTransaction(params: {
       lastVerifiedAt: usedAt,
       biometricTxCount: (basePrefs.biometricTxCount || 0) + 1,
     };
-  } else if (params.authorizeViaSession) {
-    clearSecurityAttempts('tx_pin', params.senderId);
-    usedTapHoldAuth = true;
-  } else if (params.pin) {
+  } else if (params.pin && /^\d{4,5}$/.test(params.pin.trim())) {
     const pinCheck = await verifySecretAgainstStored(
-      params.pin,
+      params.pin.trim(),
       senderLocal.pinHash,
       hashPin
     );
@@ -3754,7 +3788,7 @@ export async function executeFinancialTransaction(params: {
           eventType: 'brute_force_lockout',
           severity: 'critical',
           title: `Transaction Lockout · ${params.senderId}`,
-          details: `${res.attempts} invalid confirmation attempts triggered lockout on ${params.type} (৳${amount}).`,
+          details: `${res.attempts} invalid PIN confirmation attempts triggered lockout on ${params.type} (৳${amount}).`,
           targetIdentifier: params.senderId,
           attempts: res.attempts,
           blockedUntil: res.lockedUntil,
@@ -3764,12 +3798,12 @@ export async function executeFinancialTransaction(params: {
         );
       }
       throw new Error(
-        `Invalid confirmation credential. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+        `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
       );
     }
     clearSecurityAttempts('tx_pin', params.senderId);
   } else {
-    throw new Error('Please confirm the transaction using Biometrics or Tap & Hold.');
+    throw new Error('Transaction authorization requires your Device Biometrics or 4–5 digit Security PIN.');
   }
 
   // Anti-Spam Transaction Flood & Idempotency Shield
@@ -3944,7 +3978,7 @@ export async function executeFinancialTransaction(params: {
     ...(params.billMonth ? { billMonth: params.billMonth } : {}),
     ...(sanitizedNote ? { note: sanitizedNote } : {}),
     ...(sanitizedGiftCard ? { giftCard: stripUndefined(sanitizedGiftCard) } : {}),
-    authMethod: usedBiometricAuth ? 'biometric' : usedTapHoldAuth ? 'tap_hold' : 'pin',
+    authMethod: usedBiometricAuth ? 'biometric' : 'pin',
     ...(usedBiometricDeviceLabel
       ? { biometricDeviceLabel: usedBiometricDeviceLabel.slice(0, 80) }
       : {}),
@@ -4218,7 +4252,6 @@ export async function executeMerchantRefund(params: {
   txHashInput: string;
   refundAmount: number;
   pin?: string;
-  authorizeViaSession?: boolean;
   biometricProof?: BiometricTxAuthorizationProof;
   note?: string;
 }): Promise<AcashTransaction> {
@@ -4273,7 +4306,7 @@ export async function executeMerchantRefund(params: {
   if (merchant.status !== 'active') throw new Error('Merchant account is disabled.');
 
   const secPolicy = getEffectiveSecurityPolicy();
-  let refundAuthMethod: 'pin' | 'biometric' | 'tap_hold' = 'tap_hold';
+  let refundAuthMethod: 'pin' | 'biometric' = 'pin';
   let refundBioDeviceLabel: string | undefined;
   let updatedMerchantCreds: WebAuthnCredentialRecord[] | undefined;
   let updatedMerchantBioPrefs: BiometricPreferences | undefined;
@@ -4291,6 +4324,16 @@ export async function executeMerchantRefund(params: {
     if (!bioCheck.valid) {
       throw new Error(`Biometric verification failed: ${bioCheck.reason || 'Invalid proof.'}`);
     }
+    const feeCfg = normalizeFeeConfig(store.feeConfig);
+    const bioPolicy = resolveBiometricPolicyForAmount({
+      user: merchant,
+      amount: refundAmt,
+      platformHighValueThreshold: feeCfg.highValueThreshold,
+      biometricsReady: enrolled.length > 0,
+    });
+    if (bioPolicy.requireAugmentStep && !params.pin?.trim()) {
+      throw new Error('High-value Dual-Lock policy requires Security PIN alongside biometrics.');
+    }
     if (params.pin) {
       const pinRes = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
       if (!pinRes.valid) {
@@ -4301,7 +4344,7 @@ export async function executeMerchantRefund(params: {
     refundAuthMethod = 'biometric';
     const usedAt = Date.now();
     const matchedCred = enrolled.find((c) => c.credentialId === bioCheck.matchedCredentialId);
-    refundBioDeviceLabel = matchedCred?.deviceLabel;
+    refundBioDeviceLabel = sanitizeBiometricDeviceLabelForDisplay(matchedCred?.deviceLabel);
     updatedMerchantCreds = enrolled.map((cred) =>
       cred.credentialId === bioCheck.matchedCredentialId
         ? stripUndefined({
@@ -4320,11 +4363,12 @@ export async function executeMerchantRefund(params: {
       lastVerifiedAt: usedAt,
       biometricTxCount: (basePrefs.biometricTxCount || 0) + 1,
     };
-  } else if (params.authorizeViaSession) {
-    clearSecurityAttempts('tx_pin', params.merchantId);
-    refundAuthMethod = 'tap_hold';
-  } else if (params.pin) {
-    const refundPinCheck = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
+  } else if (params.pin && /^\d{4,5}$/.test(params.pin.trim())) {
+    const refundPinCheck = await verifySecretAgainstStored(
+      params.pin.trim(),
+      merchant.pinHash,
+      hashPin
+    );
     if (!refundPinCheck.valid) {
       const res = recordFailedSecurityAttempt(
         'tx_pin',
@@ -4337,18 +4381,23 @@ export async function executeMerchantRefund(params: {
           eventType: 'brute_force_lockout',
           severity: 'critical',
           title: `Merchant Refund Lockout · ${params.merchantId}`,
-          details: `${res.attempts} invalid attempts on refund request.`,
+          details: `${res.attempts} invalid PIN attempts on refund request.`,
           targetIdentifier: params.merchantId,
           attempts: res.attempts,
           blockedUntil: res.lockedUntil,
         });
+        throw new Error(
+          `Refund Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
       }
-      throw new Error('Verification failed.');
+      throw new Error(
+        `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+      );
     }
     clearSecurityAttempts('tx_pin', params.merchantId);
     refundAuthMethod = 'pin';
   } else {
-    throw new Error('Please confirm refund using Biometrics or Tap & Hold.');
+    throw new Error('Refund authorization requires Device Biometrics or your 4–5 digit Security PIN.');
   }
 
   if (merchant.balance < refundAmt) {
@@ -4508,14 +4557,592 @@ export async function executeMerchantRefund(params: {
 
 // ---------- Admin Actions ----------
 
+// ============================================================
+// ADMIN ACTION GUARD (WEBAUTHN BIOMETRICS OR ACTION PIN / PWD)
+// ============================================================
+
+export function getAdminActionSecurityInfo(actorEmail: string): AdminActionSecurityInfo {
+  const cleanEmail = (actorEmail || '').trim().toLowerCase();
+  const store = readLocalStore();
+  if (isMainAdminEmail(cleanEmail)) {
+    const creds = store.mainAdminCredentials;
+    return {
+      adminId: 'ADM-MAIN',
+      adminRole: 'main_admin',
+      adminEmail: MAIN_ADMIN_EMAIL,
+      hasActionPin: Boolean(creds?.actionPinHash),
+      webauthnCredentials: creds?.webauthnCredentials || [],
+    };
+  }
+  const sa = Object.values(store.secondAdmins || {}).find(
+    (s) => s.email.toLowerCase() === cleanEmail
+  );
+  return {
+    adminId: sa?.adminId || 'ADM-2ND',
+    adminRole: 'second_admin',
+    adminEmail: sa?.email || cleanEmail,
+    hasActionPin: Boolean(sa?.actionPinHash),
+    webauthnCredentials: sa?.webauthnCredentials || [],
+  };
+}
+
+export function subscribeToAdminSecurityInfo(
+  actorEmail: string,
+  callback: (info: AdminActionSecurityInfo) => void
+): Unsubscribe {
+  const emitLocal = () => callback(getAdminActionSecurityInfo(actorEmail));
+  emitLocal();
+  const unsubLocal = subscribeLocalStore(emitLocal);
+  const cleanEmail = (actorEmail || '').trim().toLowerCase();
+  let unsubFs: Unsubscribe = () => {};
+
+  try {
+    if (isMainAdminEmail(cleanEmail)) {
+      unsubFs = onSnapshot(
+        doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID),
+        (snap) => {
+          if (snap.exists()) {
+            const fsCreds = snap.data() as MainAdminCredentialConfig;
+            const store = readLocalStore();
+            store.mainAdminCredentials = fsCreds;
+            writeLocalStore(store, false);
+            emitLocal();
+          }
+        },
+        () => emitLocal()
+      );
+    } else {
+      unsubFs = onSnapshot(
+        query(collection(db, SECOND_ADMINS_COL), where('email', '==', cleanEmail), limit(1)),
+        (snap) => {
+          if (!snap.empty) {
+            const sa = snap.docs[0].data() as SecondAdminProfile;
+            const store = readLocalStore();
+            store.secondAdmins[sa.adminId] = sa;
+            writeLocalStore(store, false);
+            emitLocal();
+          }
+        },
+        () => emitLocal()
+      );
+    }
+  } catch {
+    // ignore
+  }
+
+  return () => {
+    unsubLocal();
+    unsubFs();
+  };
+}
+
+export async function assertAdminActionAuthorized(params: {
+  actorEmail: string;
+  auth: ActionAuthInput | undefined;
+  actionName: string;
+}): Promise<{
+  adminId: string;
+  adminRole: 'main_admin' | 'second_admin';
+  verifiedVia: 'biometric' | 'action_pin' | 'password';
+}> {
+  const cleanEmail = (params.actorEmail || '').trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    throw new Error('Missing Admin identity for security authorization.');
+  }
+
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lock = checkAttemptLockout('admin_action', cleanEmail);
+  if (!lock.allowed) {
+    throw new Error(
+      `Admin Action Verification Locked: Retry in ${formatDurationRemaining(lock.remainingMs)}.`
+    );
+  }
+
+  if (!params.auth || (!params.auth.biometricProof && !params.auth.pin?.trim())) {
+    throw new Error(
+      'Admin verification required: authorize this change with Biometrics, Action PIN, or Admin Password.'
+    );
+  }
+
+  const store = readLocalStore();
+  const expectedOrigin = typeof window !== 'undefined' ? window.location.origin : undefined;
+
+  if (isMainAdminEmail(cleanEmail)) {
+    let creds = store.mainAdminCredentials;
+    if (auth.currentUser && isMainAdminEmail(auth.currentUser.email)) {
+      try {
+        const snap = await getDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID));
+        if (snap.exists()) {
+          const fsCreds = snap.data() as MainAdminCredentialConfig;
+          if (fsCreds?.passwordHash) {
+            creds = fsCreds;
+            store.mainAdminCredentials = fsCreds;
+            writeLocalStore(store, false);
+          }
+        }
+      } catch {
+        // use local
+      }
+    }
+
+    if (params.auth.biometricProof) {
+      const enrolled = creds.webauthnCredentials || [];
+      const bioRes = await verifyBiometricActionProof({
+        proof: params.auth.biometricProof,
+        enrolledCredentials: enrolled,
+        expectedSubjectId: 'ADM-MAIN',
+        expectedActionName: params.actionName,
+        expectedOrigin,
+      });
+      if (!bioRes.valid) {
+        const res = recordFailedSecurityAttempt(
+          'admin_action',
+          cleanEmail,
+          secPolicy.maxLoginFailures,
+          secPolicy.lockoutMinutes
+        );
+        if (res.locked) {
+          void logSecurityEvent({
+            eventType: 'biometric_verification_failed',
+            severity: 'critical',
+            title: `Main Admin Biometric Action Lockout`,
+            details: `${res.attempts} failed biometric verification attempts on ${params.actionName}.`,
+            targetIdentifier: cleanEmail,
+            attempts: res.attempts,
+            blockedUntil: res.lockedUntil,
+          });
+        }
+        throw new Error(bioRes.reason || 'Admin biometric signature verification failed.');
+      }
+      clearSecurityAttempts('admin_action', cleanEmail);
+      const now = Date.now();
+      const nextCreds = enrolled.map((c) =>
+        c.credentialId === bioRes.matchedCredentialId
+          ? stripUndefined({
+              ...c,
+              signCount:
+                typeof bioRes.nextSignCount === 'number' && bioRes.nextSignCount > 0
+                  ? bioRes.nextSignCount
+                  : c.signCount,
+              lastUsedAt: now,
+            })
+          : stripUndefined(c)
+      );
+      const updatedConfig: MainAdminCredentialConfig = stripUndefined({
+        ...creds,
+        webauthnCredentials: nextCreds,
+        updatedAt: now,
+        updatedBy: cleanEmail,
+      });
+      store.mainAdminCredentials = updatedConfig;
+      writeLocalStore(store, true);
+      void setDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID), updatedConfig, { merge: true }).catch(
+        () => {}
+      );
+      return { adminId: 'ADM-MAIN', adminRole: 'main_admin', verifiedVia: 'biometric' };
+    }
+
+    const secret = params.auth.pin!.trim();
+    let matchedVia: 'action_pin' | 'password' | null = null;
+    if (creds.actionPinHash && /^\d{4,6}$/.test(secret)) {
+      const pinRes = await verifySecretAgainstStored(secret, creds.actionPinHash, hashPin);
+      if (pinRes.valid) matchedVia = 'action_pin';
+    }
+    if (!matchedVia) {
+      const pwdRes = await verifySecretAgainstStored(secret, creds.passwordHash, hashPin);
+      if (pwdRes.valid) matchedVia = 'password';
+    }
+
+    if (!matchedVia) {
+      const res = recordFailedSecurityAttempt(
+        'admin_action',
+        cleanEmail,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'admin_login_lockout',
+          severity: 'critical',
+          title: `Main Admin Action Guard Lockout`,
+          details: `${res.attempts} invalid PIN/Password attempts on ${params.actionName}.`,
+          targetIdentifier: cleanEmail,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+        throw new Error(
+          `Admin Action Locked (${res.attempts} failed attempts). Retry in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
+      throw new Error(
+        `Incorrect Admin PIN or Password. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left)`
+      );
+    }
+
+    clearSecurityAttempts('admin_action', cleanEmail);
+    return { adminId: 'ADM-MAIN', adminRole: 'main_admin', verifiedVia: matchedVia };
+  }
+
+  // 2nd Admin resolution
+  let matched = Object.values(store.secondAdmins || {}).find(
+    (sa) => sa.email.toLowerCase() === cleanEmail
+  );
+  if (!matched) {
+    try {
+      const qSa = query(collection(db, SECOND_ADMINS_COL), where('email', '==', cleanEmail), limit(1));
+      const snap = await getDocs(qSa);
+      if (!snap.empty) {
+        matched = snap.docs[0].data() as SecondAdminProfile;
+        store.secondAdmins[matched.adminId] = matched;
+        writeLocalStore(store, false);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!matched) {
+    throw new Error('2nd Admin authorization record not found.');
+  }
+  if (matched.status !== 'active') {
+    throw new Error('This 2nd Admin account is disabled.');
+  }
+
+  if (params.auth.biometricProof) {
+    const enrolled = matched.webauthnCredentials || [];
+    const bioRes = await verifyBiometricActionProof({
+      proof: params.auth.biometricProof,
+      enrolledCredentials: enrolled,
+      expectedSubjectId: matched.adminId,
+      expectedActionName: params.actionName,
+      expectedOrigin,
+    });
+    if (!bioRes.valid) {
+      const res = recordFailedSecurityAttempt(
+        'admin_action',
+        cleanEmail,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'biometric_verification_failed',
+          severity: 'critical',
+          title: `2nd Admin Biometric Action Lockout · ${matched.adminId}`,
+          details: `${res.attempts} failed biometric verification attempts on ${params.actionName}.`,
+          targetIdentifier: cleanEmail,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+      }
+      throw new Error(bioRes.reason || '2nd Admin biometric verification failed.');
+    }
+    clearSecurityAttempts('admin_action', cleanEmail);
+    const now = Date.now();
+    const nextCreds = enrolled.map((c) =>
+      c.credentialId === bioRes.matchedCredentialId
+        ? stripUndefined({
+            ...c,
+            signCount:
+              typeof bioRes.nextSignCount === 'number' && bioRes.nextSignCount > 0
+                ? bioRes.nextSignCount
+                : c.signCount,
+            lastUsedAt: now,
+          })
+        : stripUndefined(c)
+    );
+    const updatedSa: SecondAdminProfile = stripUndefined({
+      ...matched,
+      webauthnCredentials: nextCreds,
+      updatedAt: now,
+    });
+    store.secondAdmins[matched.adminId] = updatedSa;
+    writeLocalStore(store, true);
+    void setDoc(doc(db, SECOND_ADMINS_COL, matched.adminId), updatedSa, { merge: true }).catch(
+      () => {}
+    );
+    return { adminId: matched.adminId, adminRole: 'second_admin', verifiedVia: 'biometric' };
+  }
+
+  const secret = params.auth.pin!.trim();
+  let matchedVia: 'action_pin' | 'password' | null = null;
+  if (matched.actionPinHash && /^\d{4,6}$/.test(secret)) {
+    const pinRes = await verifySecretAgainstStored(secret, matched.actionPinHash, hashPin);
+    if (pinRes.valid) matchedVia = 'action_pin';
+  }
+  if (!matchedVia) {
+    const expectedHash = matched.passwordHash || hashPin('Acash2nd@2026');
+    const pwdRes = await verifySecretAgainstStored(secret, expectedHash, hashPin);
+    if (pwdRes.valid) matchedVia = 'password';
+  }
+
+  if (!matchedVia) {
+    const res = recordFailedSecurityAttempt(
+      'admin_action',
+      cleanEmail,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'admin_login_lockout',
+        severity: 'critical',
+        title: `2nd Admin Action Guard Lockout · ${matched.adminId}`,
+        details: `${res.attempts} invalid PIN/Password attempts on ${params.actionName}.`,
+        targetIdentifier: cleanEmail,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Admin Action Locked (${res.attempts} failed attempts). Retry in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    throw new Error(
+      `Incorrect Admin PIN or Password. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left)`
+    );
+  }
+
+  clearSecurityAttempts('admin_action', cleanEmail);
+  return { adminId: matched.adminId, adminRole: 'second_admin', verifiedVia: matchedVia };
+}
+
+export async function enrollAdminWebAuthnPasskey(params: {
+  actorEmail: string;
+  credential: WebAuthnCredentialRecord;
+  auth: ActionAuthInput;
+}): Promise<AdminActionSecurityInfo> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_enroll_biometric_passkey',
+  });
+  const now = Date.now();
+  const cleanEmail = params.actorEmail.trim().toLowerCase();
+  const sanitizedCred: WebAuthnCredentialRecord = stripUndefined({
+    ...params.credential,
+    deviceLabel: sanitizeBiometricDeviceLabelForDisplay(params.credential.deviceLabel),
+  });
+  const store = readLocalStore();
+
+  if (isMainAdminEmail(cleanEmail)) {
+    const creds = store.mainAdminCredentials;
+    const existing = (creds.webauthnCredentials || []).filter(
+      (c) => c.credentialId !== sanitizedCred.credentialId
+    );
+    const nextCreds = [sanitizedCred, ...existing].slice(0, 5);
+    const updated: MainAdminCredentialConfig = stripUndefined({
+      ...creds,
+      webauthnCredentials: nextCreds,
+      updatedAt: now,
+      updatedBy: cleanEmail,
+    });
+    store.mainAdminCredentials = updated;
+    const act = makeActivityEntry({
+      idPrefix: 'ACT-ADMBIO',
+      actionType: 'security_update',
+      title: `Main Admin Biometric Passkey Enrolled`,
+      details: `Added WebAuthn passkey (${sanitizedCred.deviceLabel}) for ${MAIN_ADMIN_EMAIL}.`,
+      actorEmail: cleanEmail,
+      timestamp: now,
+    });
+    store.activityLogs[act.id] = act;
+    writeLocalStore(store, true);
+    try {
+      await Promise.all([
+        setDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID), updated, { merge: true }),
+        setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+      ]);
+    } catch {
+      firestoreBackendMode = 'local_sync';
+    }
+    return getAdminActionSecurityInfo(cleanEmail);
+  }
+
+  const sa = Object.values(store.secondAdmins || {}).find(
+    (s) => s.email.toLowerCase() === cleanEmail
+  );
+  if (!sa) throw new Error('2nd Admin account not found.');
+  const existing = (sa.webauthnCredentials || []).filter(
+    (c) => c.credentialId !== sanitizedCred.credentialId
+  );
+  const nextCreds = [sanitizedCred, ...existing].slice(0, 5);
+  const updatedSa: SecondAdminProfile = stripUndefined({
+    ...sa,
+    webauthnCredentials: nextCreds,
+    updatedAt: now,
+  });
+  store.secondAdmins[sa.adminId] = updatedSa;
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-ADMBIO',
+    actionType: 'security_update',
+    title: `2nd Admin Biometric Passkey Enrolled (${sa.adminId})`,
+    details: `Added WebAuthn passkey (${sanitizedCred.deviceLabel}) for ${sa.email}.`,
+    actorEmail: cleanEmail,
+    targetIds: [sa.adminId],
+    timestamp: now,
+  });
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+  try {
+    await Promise.all([
+      setDoc(doc(db, SECOND_ADMINS_COL, sa.adminId), updatedSa, { merge: true }),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+    ]);
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+  return getAdminActionSecurityInfo(cleanEmail);
+}
+
+export async function removeAdminWebAuthnPasskey(params: {
+  actorEmail: string;
+  credentialId: string;
+  auth: ActionAuthInput;
+}): Promise<AdminActionSecurityInfo> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_remove_biometric_passkey',
+  });
+  const now = Date.now();
+  const cleanEmail = params.actorEmail.trim().toLowerCase();
+  const store = readLocalStore();
+
+  if (isMainAdminEmail(cleanEmail)) {
+    const creds = store.mainAdminCredentials;
+    const nextCreds = (creds.webauthnCredentials || []).filter(
+      (c) => c.credentialId !== params.credentialId
+    );
+    const updated: MainAdminCredentialConfig = stripUndefined({
+      ...creds,
+      webauthnCredentials: nextCreds,
+      updatedAt: now,
+      updatedBy: cleanEmail,
+    });
+    store.mainAdminCredentials = updated;
+    writeLocalStore(store, true);
+    try {
+      await setDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID), updated, { merge: true });
+    } catch {
+      firestoreBackendMode = 'local_sync';
+    }
+    return getAdminActionSecurityInfo(cleanEmail);
+  }
+
+  const sa = Object.values(store.secondAdmins || {}).find(
+    (s) => s.email.toLowerCase() === cleanEmail
+  );
+  if (!sa) throw new Error('2nd Admin account not found.');
+  const nextCreds = (sa.webauthnCredentials || []).filter(
+    (c) => c.credentialId !== params.credentialId
+  );
+  const updatedSa: SecondAdminProfile = stripUndefined({
+    ...sa,
+    webauthnCredentials: nextCreds,
+    updatedAt: now,
+  });
+  store.secondAdmins[sa.adminId] = updatedSa;
+  writeLocalStore(store, true);
+  try {
+    await setDoc(doc(db, SECOND_ADMINS_COL, sa.adminId), updatedSa, { merge: true });
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+  return getAdminActionSecurityInfo(cleanEmail);
+}
+
+export async function setAdminActionPin(params: {
+  actorEmail: string;
+  newActionPin: string;
+  auth: ActionAuthInput;
+}): Promise<AdminActionSecurityInfo> {
+  if (!/^\d{4,6}$/.test(params.newActionPin.trim())) {
+    throw new Error('Admin Quick Action PIN must be 4 to 6 digits.');
+  }
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_set_action_pin',
+  });
+  const now = Date.now();
+  const cleanEmail = params.actorEmail.trim().toLowerCase();
+  const pinHash = await hashSecretStrong(params.newActionPin.trim());
+  const store = readLocalStore();
+
+  if (isMainAdminEmail(cleanEmail)) {
+    const updated: MainAdminCredentialConfig = stripUndefined({
+      ...store.mainAdminCredentials,
+      actionPinHash: pinHash,
+      updatedAt: now,
+      updatedBy: cleanEmail,
+    });
+    store.mainAdminCredentials = updated;
+    const act = makeActivityEntry({
+      idPrefix: 'ACT-ADMPIN',
+      actionType: 'security_update',
+      title: 'Main Admin Quick Action PIN Updated',
+      details: `Main Admin configured/rotated 4–6 digit Admin Action PIN.`,
+      actorEmail: cleanEmail,
+      timestamp: now,
+    });
+    store.activityLogs[act.id] = act;
+    writeLocalStore(store, true);
+    try {
+      await Promise.all([
+        setDoc(doc(db, SETTINGS_COL, MAIN_ADMIN_CREDS_DOC_ID), updated, { merge: true }),
+        setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+      ]);
+    } catch {
+      firestoreBackendMode = 'local_sync';
+    }
+    return getAdminActionSecurityInfo(cleanEmail);
+  }
+
+  const sa = Object.values(store.secondAdmins || {}).find(
+    (s) => s.email.toLowerCase() === cleanEmail
+  );
+  if (!sa) throw new Error('2nd Admin account not found.');
+  const updatedSa: SecondAdminProfile = stripUndefined({
+    ...sa,
+    actionPinHash: pinHash,
+    updatedAt: now,
+  });
+  store.secondAdmins[sa.adminId] = updatedSa;
+  const act = makeActivityEntry({
+    idPrefix: 'ACT-ADMPIN',
+    actionType: 'security_update',
+    title: `2nd Admin Quick Action PIN Updated (${sa.adminId})`,
+    details: `Configured 4–6 digit Admin Action PIN for ${sa.email}.`,
+    actorEmail: cleanEmail,
+    targetIds: [sa.adminId],
+    timestamp: now,
+  });
+  store.activityLogs[act.id] = act;
+  writeLocalStore(store, true);
+  try {
+    await Promise.all([
+      setDoc(doc(db, SECOND_ADMINS_COL, sa.adminId), updatedSa, { merge: true }),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, act.id), act),
+    ]);
+  } catch {
+    firestoreBackendMode = 'local_sync';
+  }
+  return getAdminActionSecurityInfo(cleanEmail);
+}
+
 export async function mainAdminMintTreasuryCredit(params: {
   amount: number;
   reason?: string;
   actorEmail: string;
+  auth: ActionAuthInput;
 }): Promise<{ vault: MainTreasuryVault; tx: AcashTransaction }> {
   if (!isMainAdminEmail(params.actorEmail)) {
     throw new Error(`Only Main Admin (${MAIN_ADMIN_EMAIL}) can mint unlimited initial treasury credit.`);
   }
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_mint_treasury_credit',
+  });
   const amt = Number(params.amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     throw new Error('Enter a valid credit amount greater than 0 BDT.');
@@ -4643,10 +5270,16 @@ export async function mainAdminRefreshTreasuryBalance(params: {
   newBalance: number;
   reason?: string;
   actorEmail: string;
+  auth: ActionAuthInput;
 }): Promise<MainTreasuryVault> {
   if (!isMainAdminEmail(params.actorEmail)) {
     throw new Error(`Only Main Admin (${MAIN_ADMIN_EMAIL}) can refresh the Treasury Mint Balance.`);
   }
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_refresh_treasury_balance',
+  });
   const nextBal = Number(params.newBalance);
   if (!Number.isFinite(nextBal) || nextBal < 0) {
     throw new Error('Refreshed Mint Balance must be 0 or greater.');
@@ -4745,7 +5378,13 @@ export async function adminCreditAccount(params: {
   amount: number;
   reason?: string;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<AcashTransaction> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_credit_account',
+  });
   const amt = Number(params.amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     throw new Error('Enter a valid credit amount greater than 0 BDT.');
@@ -4906,7 +5545,13 @@ export async function adminTransferBetweenAccounts(params: {
   amount: number;
   reason?: string;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<AcashTransaction> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_transfer_between_accounts',
+  });
   const amt = Number(params.amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     throw new Error('Enter a valid transfer amount greater than 0 BDT.');
@@ -5130,7 +5775,16 @@ export async function adminTransferBetweenAccounts(params: {
   return committedTx;
 }
 
-export async function adminApproveTransaction(txId: string, adminEmail: string): Promise<void> {
+export async function adminApproveTransaction(
+  txId: string,
+  adminEmail: string,
+  authInput: ActionAuthInput
+): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_approve_transaction',
+  });
   const now = Date.now();
   const store = readLocalStore();
   let tx = store.transactions[txId];
@@ -5349,8 +6003,14 @@ export async function adminApproveTransaction(txId: string, adminEmail: string):
 export async function adminRejectTransaction(
   txId: string,
   adminEmail: string,
-  reason?: string
+  reason: string | undefined,
+  authInput: ActionAuthInput
 ): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_reject_transaction',
+  });
   const now = Date.now();
   const store = readLocalStore();
   let tx = store.transactions[txId];
@@ -5502,8 +6162,14 @@ export async function adminRejectTransaction(
 export async function adminMarkTransactionPending(
   txId: string,
   adminEmail: string,
-  reason?: string
+  reason: string | undefined,
+  authInput: ActionAuthInput
 ): Promise<AcashTransaction> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_mark_tx_pending',
+  });
   const now = Date.now();
   const store = readLocalStore();
   let tx = store.transactions[txId];
@@ -5590,8 +6256,14 @@ export async function adminMarkTransactionPending(
 export async function adminDeleteTransaction(
   txId: string,
   adminEmail: string,
-  reason?: string
+  reason: string | undefined,
+  authInput: ActionAuthInput
 ): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_delete_transaction',
+  });
   const now = Date.now();
   const store = readLocalStore();
   let tx: AcashTransaction | undefined = store.transactions[txId];
@@ -5638,9 +6310,15 @@ export async function adminDeleteTransaction(
 export async function adminToggleUserStatus(
   accountId: string,
   newStatus: AccountStatus,
-  reason?: string,
-  adminEmail?: string
+  reason: string | undefined,
+  adminEmail: string,
+  authInput: ActionAuthInput
 ): Promise<AcashUser | null> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_toggle_user_status',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existingUser = store.users[accountId];
@@ -5737,7 +6415,7 @@ export async function adminToggleUserStatus(
   return updatedUser;
 }
 
-export async function adminBulkUpdateUserStatus(params: {
+async function _commitBulkUpdateUserStatus(params: {
   accountIds: string[];
   newStatus: AccountStatus;
   reason?: string;
@@ -5852,16 +6530,37 @@ export async function adminBulkUpdateUserStatus(params: {
   return updatedUsers;
 }
 
+export async function adminBulkUpdateUserStatus(params: {
+  accountIds: string[];
+  newStatus: AccountStatus;
+  reason?: string;
+  adminEmail: string;
+  auth: ActionAuthInput;
+}): Promise<AcashUser[]> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_bulk_update_user_status',
+  });
+  return _commitBulkUpdateUserStatus(params);
+}
+
 export async function adminFreezeAllUsers(params: {
   adminEmail: string;
   reason?: string;
+  auth: ActionAuthInput;
 }): Promise<AcashUser[]> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_freeze_all_users',
+  });
   const store = readLocalStore();
   const activeIds = Object.values(store.users)
     .filter((u) => u.status === 'active')
     .map((u) => u.accountId);
   if (activeIds.length === 0) return [];
-  return adminBulkUpdateUserStatus({
+  return _commitBulkUpdateUserStatus({
     accountIds: activeIds,
     newStatus: 'disabled',
     reason: params.reason?.trim() || 'Emergency System-Wide Freeze by Platform Admin',
@@ -5869,7 +6568,7 @@ export async function adminFreezeAllUsers(params: {
   });
 }
 
-export async function adminBulkDeleteUsers(params: {
+async function _commitBulkDeleteUsers(params: {
   accountIds: string[];
   adminEmail: string;
   reason?: string;
@@ -5951,12 +6650,32 @@ export async function adminBulkDeleteUsers(params: {
   return deletedIds;
 }
 
+export async function adminBulkDeleteUsers(params: {
+  accountIds: string[];
+  adminEmail: string;
+  reason?: string;
+  auth: ActionAuthInput;
+}): Promise<string[]> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_bulk_delete_users',
+  });
+  return _commitBulkDeleteUsers(params);
+}
+
 export async function adminDeleteUser(
   accountId: string,
   adminEmail: string,
-  reason?: string
+  reason: string | undefined,
+  authInput: ActionAuthInput
 ): Promise<void> {
-  await adminBulkDeleteUsers({
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_delete_user',
+  });
+  await _commitBulkDeleteUsers({
     accountIds: [accountId],
     adminEmail,
     reason,
@@ -6011,7 +6730,13 @@ export async function adminReviewKycSubmission(params: {
   decision: 'verified' | 'unverified';
   reason?: string;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_review_kyc_submission',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const localUser = store.users[params.accountId];
@@ -6120,7 +6845,13 @@ export async function adminReviewKycSubmission(params: {
 export async function adminResetAllAccountsAndTransactions(params: {
   adminEmail: string;
   reason?: string;
+  auth: ActionAuthInput;
 }): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_factory_reset',
+  });
   const now = Date.now();
   try {
     localStorage.setItem('acash_factory_reset_ts', String(now));
@@ -6207,7 +6938,15 @@ export async function adminResetAllAccountsAndTransactions(params: {
   }
 }
 
-export async function adminUpdateFeeConfig(config: Omit<FeeConfig, 'updatedAt'>): Promise<void> {
+export async function adminUpdateFeeConfig(
+  config: Omit<FeeConfig, 'updatedAt'>,
+  authInput: ActionAuthInput
+): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: config.updatedBy,
+    auth: authInput,
+    actionName: 'admin_update_fee_config',
+  });
   const now = Date.now();
   const full: FeeConfig = normalizeFeeConfig({ ...config, updatedAt: now });
   full.updatedAt = now;
@@ -6282,119 +7021,183 @@ export async function updateUserPin(accountId: string, newPin: string): Promise<
   }
 }
 
-export async function changeUserSecurityPin(
-  accountId: string,
-  currentPin: string,
-  newPin: string
-): Promise<void> {
-  if (!/^\d{4,5}$/.test(newPin.trim())) {
-    throw new Error('New Security PIN must be 4 or 5 digits.');
-  }
-  const secPolicy = getEffectiveSecurityPolicy();
-  const lock = checkAttemptLockout('tx_pin', accountId);
-  if (!lock.allowed) {
-    throw new Error(
-      `Security PIN Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
-    );
-  }
-  const store = readLocalStore();
-  const user = store.users[accountId];
-  if (!user) throw new Error('Account not found.');
-  const check = await verifySecretAgainstStored(currentPin, user.pinHash, hashPin);
-  if (!check.valid) {
-    const res = recordFailedSecurityAttempt(
-      'tx_pin',
-      accountId,
-      secPolicy.maxLoginFailures,
-      secPolicy.lockoutMinutes
-    );
-    if (res.locked) {
-      void logSecurityEvent({
-        eventType: 'brute_force_lockout',
-        severity: 'critical',
-        title: `PIN Change Lockout · ${accountId}`,
-        details: `${res.attempts} invalid current PIN attempts during PIN reset.`,
-        targetIdentifier: accountId,
-        attempts: res.attempts,
-        blockedUntil: res.lockedUntil,
-      });
-    }
-    throw new Error('Current Security PIN is incorrect.');
-  }
-  clearSecurityAttempts('tx_pin', accountId);
-  await updateUserPin(accountId, newPin.trim());
-}
-
-export async function verifyUserSecurityPin(accountId: string, pin: string): Promise<void> {
-  if (!/^\d{4,5}$/.test(pin.trim())) {
-    throw new Error('Enter your 4 or 5-digit Security PIN.');
-  }
-  const secPolicy = getEffectiveSecurityPolicy();
-  const lock = checkAttemptLockout('tx_pin', accountId);
-  if (!lock.allowed) {
-    throw new Error(
-      `Security PIN Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
-    );
-  }
-  const store = readLocalStore();
-  let user = store.users[accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-      store.users[accountId] = user;
-    }
-  } catch {
-    // use cached record
-  }
-  if (!user) throw new Error('Account not found.');
-  const check = await verifySecretAgainstStored(pin.trim(), user.pinHash, hashPin);
-  if (!check.valid) {
-    const res = recordFailedSecurityAttempt(
-      'tx_pin',
-      accountId,
-      secPolicy.maxLoginFailures,
-      secPolicy.lockoutMinutes
-    );
-    if (res.locked) {
-      void logSecurityEvent({
-        eventType: 'brute_force_lockout',
-        severity: 'critical',
-        title: `Biometric Setup PIN Lockout · ${accountId}`,
-        details: `${res.attempts} invalid PIN attempts while authorizing biometric passkey enrollment.`,
-        targetIdentifier: accountId,
-        attempts: res.attempts,
-        blockedUntil: res.lockedUntil,
-      });
-    }
-    throw new Error(
-      `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
-    );
-  }
-  clearSecurityAttempts('tx_pin', accountId);
-}
-
-export async function enrollUserWebAuthnPasskey(params: {
+export async function assertUserActionAuthorized(params: {
   accountId: string;
-  credential: WebAuthnCredentialRecord;
+  auth: ActionAuthInput | undefined;
+  actionName: string;
 }): Promise<AcashUser> {
-  const now = Date.now();
+  const secPolicy = getEffectiveSecurityPolicy();
+  const lock = checkAttemptLockout('tx_pin', params.accountId);
+  if (!lock.allowed) {
+    throw new Error(
+      `Security Verification Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
+    );
+  }
+
+  if (!params.auth || (!params.auth.biometricProof && !params.auth.pin?.trim())) {
+    throw new Error(
+      'Authorization required: verify with Device Biometrics or your 4–5 digit Security PIN.'
+    );
+  }
+
   const store = readLocalStore();
   let user = store.users[params.accountId];
   try {
     const snap = await getDoc(doc(db, USERS_COL, params.accountId));
     if (snap.exists()) {
       user = snap.data() as AcashUser;
+      store.users[params.accountId] = user;
     }
   } catch {
     // fallback to local
   }
   if (!user) throw new Error('Account not found.');
 
+  if (params.auth.biometricProof) {
+    const enrolled = user.webauthnCredentials || [];
+    const expectedOrigin = typeof window !== 'undefined' ? window.location.origin : undefined;
+    const bioRes = await verifyBiometricActionProof({
+      proof: params.auth.biometricProof,
+      enrolledCredentials: enrolled,
+      expectedSubjectId: params.accountId,
+      expectedActionName: params.actionName,
+      expectedOrigin,
+    });
+    if (!bioRes.valid) {
+      const res = recordFailedSecurityAttempt(
+        'tx_pin',
+        params.accountId,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'biometric_verification_failed',
+          severity: 'critical',
+          title: `Account Biometric Verification Lockout · ${params.accountId}`,
+          details: `${res.attempts} failed biometric verification attempts on ${params.actionName}.`,
+          targetIdentifier: params.accountId,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+        throw new Error(
+          `Verification Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
+      throw new Error(bioRes.reason || 'Biometric verification failed.');
+    }
+
+    clearSecurityAttempts('tx_pin', params.accountId);
+    const now = Date.now();
+    const nextCreds = enrolled.map((cred) =>
+      cred.credentialId === bioRes.matchedCredentialId
+        ? stripUndefined({
+            ...cred,
+            signCount:
+              typeof bioRes.nextSignCount === 'number' && bioRes.nextSignCount > 0
+                ? bioRes.nextSignCount
+                : cred.signCount,
+            lastUsedAt: now,
+          })
+        : stripUndefined(cred)
+    );
+    const updatedUser: AcashUser = stripUndefined({
+      ...user,
+      webauthnCredentials: nextCreds,
+      lastActiveAt: now,
+    });
+    store.users[params.accountId] = updatedUser;
+    writeLocalStore(store, false);
+    void updateDoc(doc(db, USERS_COL, params.accountId), {
+      webauthnCredentials: nextCreds,
+      lastActiveAt: now,
+    }).catch(() => {});
+    return updatedUser;
+  }
+
+  const rawPin = params.auth.pin!.trim();
+  if (!/^\d{4,5}$/.test(rawPin)) {
+    throw new Error('Enter a valid 4 or 5-digit Security PIN.');
+  }
+  const check = await verifySecretAgainstStored(rawPin, user.pinHash, hashPin);
+  if (!check.valid) {
+    const res = recordFailedSecurityAttempt(
+      'tx_pin',
+      params.accountId,
+      secPolicy.maxLoginFailures,
+      secPolicy.lockoutMinutes
+    );
+    if (res.locked) {
+      void logSecurityEvent({
+        eventType: 'brute_force_lockout',
+        severity: 'critical',
+        title: `Account Settings PIN Lockout · ${params.accountId}`,
+        details: `${res.attempts} invalid PIN attempts while authorizing ${params.actionName}.`,
+        targetIdentifier: params.accountId,
+        attempts: res.attempts,
+        blockedUntil: res.lockedUntil,
+      });
+      throw new Error(
+        `Security PIN Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+      );
+    }
+    throw new Error(
+      `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+    );
+  }
+
+  clearSecurityAttempts('tx_pin', params.accountId);
+  return user;
+}
+
+export async function changeUserSecurityPin(
+  accountId: string,
+  currentPin: string,
+  newPin: string,
+  authInput?: ActionAuthInput
+): Promise<void> {
+  if (!/^\d{4,5}$/.test(newPin.trim())) {
+    throw new Error('New Security PIN must be 4 or 5 digits.');
+  }
+  const effectiveAuth: ActionAuthInput =
+    authInput?.biometricProof || authInput?.pin ? authInput : { pin: currentPin };
+  await assertUserActionAuthorized({
+    accountId,
+    auth: effectiveAuth,
+    actionName: 'user_change_security_pin',
+  });
+  await updateUserPin(accountId, newPin.trim());
+}
+
+export async function verifyUserSecurityPin(accountId: string, pin: string): Promise<void> {
+  await assertUserActionAuthorized({
+    accountId,
+    auth: { pin },
+    actionName: 'user_verify_security_pin',
+  });
+}
+
+export async function enrollUserWebAuthnPasskey(params: {
+  accountId: string;
+  credential: WebAuthnCredentialRecord;
+  auth: ActionAuthInput;
+}): Promise<AcashUser> {
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_enroll_biometric_passkey',
+  });
+  const now = Date.now();
+  const store = readLocalStore();
+  const cleanCredential = stripUndefined({
+    ...params.credential,
+    deviceLabel: sanitizeBiometricDeviceLabelForDisplay(params.credential.deviceLabel),
+  });
+
   const existing = (user.webauthnCredentials || []).filter(
-    (c) => c.credentialId !== params.credential.credentialId
+    (c) => c.credentialId !== cleanCredential.credentialId
   );
-  const nextCreds = [stripUndefined(params.credential), ...existing].slice(0, 5);
+  const nextCreds = [cleanCredential, ...existing].slice(0, 5);
   const nextPrefs = normalizeBiometricPrefs({
     ...(user.biometricPrefs || {}),
     enabled: true,
@@ -6425,7 +7228,7 @@ export async function enrollUserWebAuthnPasskey(params: {
       recipientId: params.accountId,
       recipientRole: user.role,
       title: 'Device Biometrics Enrolled (WebAuthn)',
-      message: `${params.credential.deviceLabel} is now enabled for biometric transaction confirmations.`,
+      message: `${cleanCredential.deviceLabel} is now enabled for biometric confirmations.`,
       category: 'security',
       severity: 'success',
       createdBy: params.accountId,
@@ -6438,20 +7241,16 @@ export async function enrollUserWebAuthnPasskey(params: {
 
 export async function removeUserWebAuthnPasskey(
   accountId: string,
-  credentialId: string
+  credentialId: string,
+  authInput: ActionAuthInput
 ): Promise<AcashUser | null> {
+  const user = await assertUserActionAuthorized({
+    accountId,
+    auth: authInput,
+    actionName: 'user_remove_biometric_passkey',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-    }
-  } catch {
-    // fallback to local
-  }
-  if (!user) throw new Error('Account not found.');
 
   const nextCreds = (user.webauthnCredentials || []).filter(
     (c) => c.credentialId !== credentialId
@@ -6483,21 +7282,20 @@ export async function renameUserWebAuthnPasskey(params: {
   accountId: string;
   credentialId: string;
   newLabel: string;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
-  const cleanLabel = sanitizePlainText(params.newLabel, 64);
-  if (!cleanLabel) throw new Error('Enter a valid device label.');
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_rename_biometric_passkey',
+  });
+  const sanitized = sanitizePlainText(params.newLabel, 64);
+  if (!sanitized || /^\d{3,6}$/.test(sanitized)) {
+    throw new Error('Enter a descriptive device name (numeric PIN-style labels are blocked).');
+  }
+  const cleanLabel = sanitizeBiometricDeviceLabelForDisplay(sanitized);
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[params.accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-    }
-  } catch {
-    // fallback to local
-  }
-  if (!user) throw new Error('Account not found.');
 
   const nextCreds = (user.webauthnCredentials || []).map((c) =>
     c.credentialId === params.credentialId
@@ -6534,19 +7332,15 @@ export async function renameUserWebAuthnPasskey(params: {
 export async function updateUserBiometricPreferences(params: {
   accountId: string;
   prefs: Partial<BiometricPreferences>;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_update_biometric_preferences',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[params.accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-    }
-  } catch {
-    // fallback to local
-  }
-  if (!user) throw new Error('Account not found.');
 
   const nextPrefs = normalizeBiometricPrefs({
     ...(user.biometricPrefs || {}),
@@ -6600,23 +7394,19 @@ export async function prepareBiometricQuickLogin(accountId: string): Promise<Aca
 export async function enrollUserTotpSecret(params: {
   accountId: string;
   secretBase32: string;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_enroll_totp_secret',
+  });
   const cleanSecret = params.secretBase32.toUpperCase().replace(/[^A-Z2-7]/g, '');
   if (cleanSecret.length < 16 || cleanSecret.length > 64) {
     throw new Error('Invalid Authenticator TOTP secret key.');
   }
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[params.accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-    }
-  } catch {
-    // fallback to local
-  }
-  if (!user) throw new Error('Account not found.');
 
   const updated: AcashUser = stripUndefined({
     ...user,
@@ -6653,19 +7443,17 @@ export async function enrollUserTotpSecret(params: {
   return updated;
 }
 
-export async function removeUserTotpSecret(accountId: string): Promise<AcashUser | null> {
+export async function removeUserTotpSecret(
+  accountId: string,
+  authInput: ActionAuthInput
+): Promise<AcashUser | null> {
+  const user = await assertUserActionAuthorized({
+    accountId,
+    auth: authInput,
+    actionName: 'user_remove_totp_secret',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[accountId];
-  try {
-    const snap = await getDoc(doc(db, USERS_COL, accountId));
-    if (snap.exists()) {
-      user = snap.data() as AcashUser;
-    }
-  } catch {
-    // fallback to local
-  }
-  if (!user) throw new Error('Account not found.');
 
   const updatedCopy = { ...user, lastActiveAt: now };
   delete updatedCopy.totpSecret;
@@ -6702,28 +7490,72 @@ export async function removeUserTotpSecret(accountId: string): Promise<AcashUser
   return updated;
 }
 
-export async function verifyMerchantOwnerPin(accountId: string, pin: string): Promise<boolean> {
+export async function authorizeMerchantOwnerUnlock(params: {
+  accountId: string;
+  auth: ActionAuthInput;
+}): Promise<{ authorized: boolean; verifiedVia: 'biometric' | 'pin' }> {
   const secPolicy = getEffectiveSecurityPolicy();
-  const lock = checkAttemptLockout('merchant_unlock', accountId);
+  const lock = checkAttemptLockout('merchant_unlock', params.accountId);
   if (!lock.allowed) {
     throw new Error(
       `Owner Unlock Locked: Try again in ${formatDurationRemaining(lock.remainingMs)}.`
     );
   }
 
+  if (!params.auth || (!params.auth.biometricProof && !params.auth.pin?.trim())) {
+    throw new Error('Authorize with Owner Biometrics or Owner Security PIN.');
+  }
+
   const store = readLocalStore();
-  let user = store.users[accountId];
+  let user = store.users[params.accountId];
   if (!user) {
-    const fetched = await findUserByIdentifier(accountId);
+    const fetched = await findUserByIdentifier(params.accountId);
     if (fetched) user = fetched;
   }
   if (!user) throw new Error('Merchant account not found.');
 
-  const check = await verifySecretAgainstStored(pin, user.pinHash, hashPin);
+  if (params.auth.biometricProof) {
+    const enrolled = user.webauthnCredentials || [];
+    const expectedOrigin = typeof window !== 'undefined' ? window.location.origin : undefined;
+    const bioRes = await verifyBiometricActionProof({
+      proof: params.auth.biometricProof,
+      enrolledCredentials: enrolled,
+      expectedSubjectId: params.accountId,
+      expectedActionName: 'merchant_owner_unlock',
+      expectedOrigin,
+    });
+    if (!bioRes.valid) {
+      const res = recordFailedSecurityAttempt(
+        'merchant_unlock',
+        params.accountId,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'biometric_verification_failed',
+          severity: 'critical',
+          title: `Merchant Owner Unlock Biometric Lockout · ${params.accountId}`,
+          details: `${res.attempts} invalid biometric attempts from Cashier terminal.`,
+          targetIdentifier: params.accountId,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+        throw new Error(
+          `Owner Unlock Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+        );
+      }
+      throw new Error(bioRes.reason || 'Owner biometric verification failed.');
+    }
+    clearSecurityAttempts('merchant_unlock', params.accountId);
+    return { authorized: true, verifiedVia: 'biometric' };
+  }
+
+  const check = await verifySecretAgainstStored(params.auth.pin!.trim(), user.pinHash, hashPin);
   if (!check.valid) {
     const res = recordFailedSecurityAttempt(
       'merchant_unlock',
-      accountId,
+      params.accountId,
       secPolicy.maxLoginFailures,
       secPolicy.lockoutMinutes
     );
@@ -6731,9 +7563,9 @@ export async function verifyMerchantOwnerPin(accountId: string, pin: string): Pr
       void logSecurityEvent({
         eventType: 'brute_force_lockout',
         severity: 'critical',
-        title: `Merchant Owner Unlock Lockout · ${accountId}`,
+        title: `Merchant Owner Unlock Lockout · ${params.accountId}`,
         details: `${res.attempts} wrong owner PIN attempts from Cashier terminal.`,
-        targetIdentifier: accountId,
+        targetIdentifier: params.accountId,
         attempts: res.attempts,
         blockedUntil: res.lockedUntil,
       });
@@ -6741,25 +7573,43 @@ export async function verifyMerchantOwnerPin(accountId: string, pin: string): Pr
         `Owner Unlock Locked for ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
       );
     }
-    return false;
+    throw new Error(
+      `Invalid Owner Passcode. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+    );
   }
 
-  clearSecurityAttempts('merchant_unlock', accountId);
+  clearSecurityAttempts('merchant_unlock', params.accountId);
   if (check.needsUpgrade) {
-    void updateUserPin(accountId, pin);
+    void updateUserPin(params.accountId, params.auth.pin!.trim());
   }
-  return true;
+  return { authorized: true, verifiedVia: 'pin' };
+}
+
+export async function verifyMerchantOwnerPin(accountId: string, pin: string): Promise<boolean> {
+  try {
+    const res = await authorizeMerchantOwnerUnlock({ accountId, auth: { pin } });
+    return res.authorized;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Invalid Owner Passcode')) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 export async function updateUserProfilePhoto(
   accountId: string,
-  profilePhotoUrl: string
+  profilePhotoUrl: string,
+  authInput: ActionAuthInput
 ): Promise<AcashUser | null> {
+  const user = await assertUserActionAuthorized({
+    accountId,
+    auth: authInput,
+    actionName: 'user_update_profile_photo',
+  });
   const safePhotoUrl = assertSafeImageDataUrl(profilePhotoUrl, 360000);
   const now = Date.now();
   const store = readLocalStore();
-  const user = store.users[accountId];
-  if (!user) throw new Error('Account not found.');
 
   const updated: AcashUser = {
     ...user,
@@ -6806,12 +7656,16 @@ export async function updateUserProfilePhoto(
 
 export async function updateUserGender(
   accountId: string,
-  gender: UserGender
+  gender: UserGender,
+  authInput: ActionAuthInput
 ): Promise<AcashUser | null> {
+  const user = await assertUserActionAuthorized({
+    accountId,
+    auth: authInput,
+    actionName: 'user_update_gender',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  const user = store.users[accountId];
-  if (!user) throw new Error('Account not found.');
 
   const updated: AcashUser = {
     ...user,
@@ -6834,15 +7688,15 @@ export async function updateUserKyc(params: {
   name?: string;
   businessName?: string;
   kyc: Omit<KycInfo, 'updatedAt' | 'status'>;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_update_kyc',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  let user = store.users[params.accountId];
-  if (!user) {
-    const found = await findUserByIdentifier(params.accountId);
-    if (found) user = found;
-  }
-  if (!user) throw new Error('Account not found.');
 
   const cleanNid = params.kyc.nidNumber.trim();
   if (!cleanNid) throw new Error('NID / Passport number is required.');
@@ -7033,8 +7887,14 @@ export function subscribeToBooths(callback: (booths: AcashBooth[]) => void): Uns
 
 export async function adminSaveBooth(
   boothInput: Omit<AcashBooth, 'createdAt' | 'updatedAt' | 'boothId'> & { boothId?: string },
-  adminEmail: string
+  adminEmail: string,
+  authInput: ActionAuthInput
 ): Promise<AcashBooth> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_save_booth',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const boothId =
@@ -7099,8 +7959,14 @@ export async function adminSaveBooth(
 export async function adminToggleBoothStatus(
   boothId: string,
   status: BoothStatus,
-  adminEmail: string
+  adminEmail: string,
+  authInput: ActionAuthInput
 ): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_toggle_booth_status',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existing = store.booths[boothId];
@@ -7125,7 +7991,16 @@ export async function adminToggleBoothStatus(
   }
 }
 
-export async function adminDeleteBooth(boothId: string, adminEmail: string): Promise<void> {
+export async function adminDeleteBooth(
+  boothId: string,
+  adminEmail: string,
+  authInput: ActionAuthInput
+): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_delete_booth',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existing = store.booths[boothId];
@@ -7252,11 +8127,15 @@ export async function saveUserMapLocation(params: {
   area: string;
   city: string;
   isVisible: boolean;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
+  const user = await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_save_map_location',
+  });
   const now = Date.now();
   const store = readLocalStore();
-  const user = store.users[params.accountId];
-  if (!user) throw new Error('Account not found.');
   if (user.role !== 'A' && user.role !== 'M') {
     throw new Error('Only Agents, Merchants, and 2nd Admins can publish a profile map location.');
   }
@@ -7678,6 +8557,7 @@ export async function changeMainAdminPassword(params: {
   currentPassword: string;
   newPassword: string;
   actorEmail: string;
+  auth?: ActionAuthInput;
 }): Promise<void> {
   if (!isMainAdminEmail(params.actorEmail)) {
     throw new Error('Only the Main Admin can change the Main Admin password.');
@@ -7697,15 +8577,23 @@ export async function changeMainAdminPassword(params: {
   if (!check.valid) {
     throw new Error('Current Main Admin password is incorrect.');
   }
+  if (params.auth) {
+    await assertAdminActionAuthorized({
+      actorEmail: params.actorEmail,
+      auth: params.auth,
+      actionName: 'admin_change_main_password',
+    });
+  }
 
   const now = Date.now();
   const strongPasswordHash = await hashSecretStrong(cleanNew);
-  const updatedCreds: MainAdminCredentialConfig = {
+  const updatedCreds: MainAdminCredentialConfig = stripUndefined({
+    ...store.mainAdminCredentials,
     email: MAIN_ADMIN_EMAIL,
     passwordHash: strongPasswordHash,
     updatedAt: now,
     updatedBy: params.actorEmail,
-  };
+  });
   store.mainAdminCredentials = updatedCreds;
 
   const act = makeActivityEntry({
@@ -7735,10 +8623,16 @@ export async function adminCreateSecondAdmin(params: {
   phone: string;
   password: string;
   actorEmail: string;
+  auth: ActionAuthInput;
 }): Promise<SecondAdminProfile> {
   if (!isMainAdminEmail(params.actorEmail)) {
     throw new Error('Only the Main Admin can create 2nd Admin accounts.');
   }
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_create_second_admin',
+  });
   const cleanEmail = params.email.trim().toLowerCase();
   if (!cleanEmail.includes('@')) throw new Error('Valid email is required for 2nd Admin.');
   if (isMainAdminEmail(cleanEmail)) {
@@ -7805,11 +8699,17 @@ export async function adminCreateSecondAdmin(params: {
 export async function adminToggleSecondAdminStatus(
   adminId: string,
   newStatus: AccountStatus,
-  actorEmail: string
+  actorEmail: string,
+  authInput: ActionAuthInput
 ): Promise<SecondAdminProfile> {
   if (!isMainAdminEmail(actorEmail)) {
     throw new Error('Only the Main Admin can enable or disable 2nd Admin accounts.');
   }
+  await assertAdminActionAuthorized({
+    actorEmail,
+    auth: authInput,
+    actionName: 'admin_toggle_second_admin_status',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existing = store.secondAdmins[adminId];
@@ -7857,11 +8757,17 @@ export async function adminToggleSecondAdminStatus(
 export async function adminResetSecondAdminPassword(
   adminId: string,
   newPassword: string,
-  actorEmail: string
+  actorEmail: string,
+  authInput: ActionAuthInput
 ): Promise<void> {
   if (!isMainAdminEmail(actorEmail)) {
     throw new Error('Only the Main Admin can reset a 2nd Admin password.');
   }
+  await assertAdminActionAuthorized({
+    actorEmail,
+    auth: authInput,
+    actionName: 'admin_reset_second_admin_password',
+  });
   if (!newPassword || newPassword.trim().length < 6) {
     throw new Error('New password must be at least 6 characters.');
   }
@@ -7900,11 +8806,17 @@ export async function adminResetSecondAdminPassword(
 
 export async function adminDeleteSecondAdmin(
   adminId: string,
-  actorEmail: string
+  actorEmail: string,
+  authInput: ActionAuthInput
 ): Promise<void> {
   if (!isMainAdminEmail(actorEmail)) {
     throw new Error('Only the Main Admin can delete 2nd Admin accounts.');
   }
+  await assertAdminActionAuthorized({
+    actorEmail,
+    auth: authInput,
+    actionName: 'admin_delete_second_admin',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existing = store.secondAdmins[adminId];
@@ -7949,10 +8861,16 @@ export async function saveSecondAdminProfileAndLocation(params: {
     city: string;
     isVisible: boolean;
   };
+  auth: ActionAuthInput;
 }): Promise<SecondAdminProfile> {
   if (isMainAdminEmail(params.actorEmail)) {
     throw new Error('Main Admin cannot publish a personal map location.');
   }
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'second_admin_save_profile_location',
+  });
   const now = Date.now();
   const store = readLocalStore();
   const existing = store.secondAdmins[params.adminId];
@@ -8274,7 +9192,13 @@ export async function adminUpdatePortalThemeConfig(params: {
   customBannerEn?: string;
   surfacePreference: PortalThemeSurfacePreference;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<PortalThemeConfig> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_update_portal_theme',
+  });
   const now = Date.now();
   const cfg: PortalThemeConfig = normalizePortalThemeConfig({
     presetId: params.presetId,
@@ -8336,7 +9260,13 @@ export async function adminSaveCustomGiftCard(params: {
   featuredFirst?: boolean;
   active?: boolean;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<CustomGiftCardRecord> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_save_custom_gift_card',
+  });
   const now = Date.now();
   const titleBn = sanitizePlainText(params.titleBn, 120);
   const titleEn = sanitizePlainText(params.titleEn, 120);
@@ -8428,7 +9358,13 @@ export async function userSubmitCustomGiftCard(params: {
   imageUrl: string;
   defaultMessageBn?: string;
   defaultMessageEn?: string;
+  auth: ActionAuthInput;
 }): Promise<CustomGiftCardRecord> {
+  await assertUserActionAuthorized({
+    accountId: params.accountId,
+    auth: params.auth,
+    actionName: 'user_submit_custom_gift_card',
+  });
   const now = Date.now();
   if (
     containsDangerousMarkup(params.titleBn) ||
@@ -8560,7 +9496,13 @@ export async function adminGovernAnyGiftCard(params: {
     | 'restore'
     | 'promote_global';
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_govern_gift_card',
+  });
   const now = Date.now();
   const store = readLocalStore();
   let customRec = store.customGiftCards?.[params.cardId];
@@ -8728,13 +9670,15 @@ export async function adminGovernAnyGiftCard(params: {
 export async function adminToggleCustomGiftCardStatus(
   cardId: string,
   updates: { active?: boolean; featured?: boolean },
-  adminEmail: string
+  adminEmail: string,
+  authInput: ActionAuthInput
 ): Promise<void> {
   if (typeof updates.active === 'boolean') {
     await adminGovernAnyGiftCard({
       cardId,
       action: updates.active ? 'unfreeze' : 'freeze',
       adminEmail,
+      auth: authInput,
     });
     return;
   }
@@ -8743,18 +9687,21 @@ export async function adminToggleCustomGiftCardStatus(
       cardId,
       action: updates.featured ? 'feature_first' : 'unfeature',
       adminEmail,
+      auth: authInput,
     });
   }
 }
 
 export async function adminDeleteCustomGiftCard(
   cardId: string,
-  adminEmail: string
+  adminEmail: string,
+  authInput: ActionAuthInput
 ): Promise<void> {
   await adminGovernAnyGiftCard({
     cardId,
     action: 'delete',
     adminEmail,
+    auth: authInput,
   });
 }
 
@@ -8800,7 +9747,7 @@ export function subscribeToSecurityPolicy(
   };
 }
 
-export async function adminUpdateSecurityPolicy(
+async function _commitSecurityPolicyUpdate(
   policyInput: Partial<SecurityPolicyConfig>,
   adminEmail: string
 ): Promise<SecurityPolicyConfig> {
@@ -8841,6 +9788,19 @@ export async function adminUpdateSecurityPolicy(
   }
 
   return cfg;
+}
+
+export async function adminUpdateSecurityPolicy(
+  policyInput: Partial<SecurityPolicyConfig>,
+  adminEmail: string,
+  authInput: ActionAuthInput
+): Promise<SecurityPolicyConfig> {
+  await assertAdminActionAuthorized({
+    actorEmail: adminEmail,
+    auth: authInput,
+    actionName: 'admin_update_security_policy',
+  });
+  return _commitSecurityPolicyUpdate(policyInput, adminEmail);
 }
 
 export async function logSecurityEvent(params: {
@@ -8965,7 +9925,13 @@ export async function adminResolveAndUnlockSecurityTarget(params: {
   scope?: string;
   targetIdentifier: string;
   adminEmail: string;
+  auth: ActionAuthInput;
 }): Promise<void> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_unlock_security_target',
+  });
   const now = Date.now();
   const cleanTarget = params.targetIdentifier.trim().toLowerCase();
 
@@ -8977,6 +9943,7 @@ export async function adminResolveAndUnlockSecurityTarget(params: {
     unlockRateLimitEntry('merchant_unlock', cleanTarget);
     unlockRateLimitEntry('admin_login', cleanTarget);
     unlockRateLimitEntry('admin_2fa', cleanTarget);
+    unlockRateLimitEntry('admin_action', cleanTarget);
   }
 
   const store = readLocalStore();
@@ -9062,7 +10029,13 @@ export async function adminSaveTotpEnrollment(params: {
   targetAdminEmail: string;
   secretBase32: string | null;
   actorEmail: string;
+  auth: ActionAuthInput;
 }): Promise<SecurityPolicyConfig> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.actorEmail,
+    auth: params.auth,
+    actionName: 'admin_save_totp_enrollment',
+  });
   const current = getEffectiveSecurityPolicy();
   const key = toSafeAdminTotpKey(params.targetAdminEmail);
   const nextSecrets = { ...(current.adminTotpSecrets || {}) };
@@ -9077,7 +10050,7 @@ export async function adminSaveTotpEnrollment(params: {
     delete nextSecrets[key];
   }
 
-  const updated = await adminUpdateSecurityPolicy(
+  const updated = await _commitSecurityPolicyUpdate(
     {
       adminTotpSecrets: nextSecrets,
     },
@@ -9302,7 +10275,13 @@ export async function adminExtendUserUnverifiedGrace(params: {
   accountId: string;
   adminEmail: string;
   days?: number;
+  auth: ActionAuthInput;
 }): Promise<AcashUser> {
+  await assertAdminActionAuthorized({
+    actorEmail: params.adminEmail,
+    auth: params.auth,
+    actionName: 'admin_extend_unverified_grace',
+  });
   const days = Math.max(1, Math.min(30, Number(params.days || 7)));
   const now = Date.now();
   const store = readLocalStore();

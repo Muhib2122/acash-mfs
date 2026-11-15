@@ -55,12 +55,14 @@ import {
   detectWebAuthnCapability,
   normalizeBiometricPrefs,
   registerCustomerBiometricPasskey,
+  sanitizeBiometricDeviceLabelForDisplay,
   WebAuthnCapability,
 } from '../../lib/webauthn';
 import {
   downloadAccountStatementPdf,
   downloadCreatorKycProfilePdf,
 } from '../../lib/pdfGenerator';
+import { useActionAuthModal } from './ActionAuthModal';
 import { RealLocationPickerMap, RealLocationValue } from './RealLocationPickerMap';
 
 export type ProfileTab = 'photo' | 'kyc' | 'pin' | 'location';
@@ -112,6 +114,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onLogout,
   onClose,
 }) => {
+  const { requestActionAuth, authModalElement } = useActionAuthModal(lang);
   const canSetMapLocation = user.role === 'A' || user.role === 'M';
   const [tab, setTab] = useState<ProfileTab>(
     initialTab === 'location' && !canSetMapLocation ? 'photo' : initialTab
@@ -179,13 +182,26 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setBusy(true);
     try {
       const dataUrl = await compressImageToDataUrl(file, 320, 0.84);
-      await updateUserProfilePhoto(user.accountId, dataUrl);
-      setStatusMsg(
-        lang === 'bn'
-          ? 'প্রোফাইল ছবি সফলভাবে আপলোড হয়েছে।'
-          : 'Profile photo uploaded and saved.'
-      );
+      await requestActionAuth({
+        title: lang === 'bn' ? 'প্রোফাইল ছবি আপডেট অনুমোদন' : 'Authorize Profile Photo Update',
+        subtitle:
+          lang === 'bn'
+            ? 'নতুন ছবি সংরক্ষণ করতে বায়োমেট্রিক বা সিকিউরিটি পিন দিন।'
+            : 'Verify with Device Biometrics or Security PIN to update your profile photo.',
+        actionName: 'user_update_profile_photo',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await updateUserProfilePhoto(user.accountId, dataUrl, auth);
+          setStatusMsg(
+            lang === 'bn'
+              ? 'প্রোফাইল ছবি সফলভাবে আপলোড হয়েছে।'
+              : 'Profile photo uploaded and saved.'
+          );
+        },
+      });
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Photo upload failed.');
     } finally {
       setBusy(false);
@@ -228,32 +244,46 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setBusy(true);
     try {
-      await updateUserKyc({
-        accountId: user.accountId,
-        name,
-        businessName: user.role !== 'U' ? businessName : undefined,
-        kyc: {
-          nidNumber,
-          dateOfBirth,
-          address,
-          occupation,
-          nomineeName,
-          nomineePhone,
-          nidPhotoUrl: nidPhotoUrl || undefined,
-          ...(user.role === 'M'
-            ? {
-                taxCertificateNumber: taxCertificateNumber.trim(),
-                taxCertificatePhotoUrl: taxCertificatePhotoUrl || undefined,
-              }
-            : {}),
+      await requestActionAuth({
+        title: lang === 'bn' ? 'কেওয়াইসি তথ্য সংরক্ষণ' : 'Authorize KYC Update',
+        subtitle:
+          lang === 'bn'
+            ? 'আপনার কেওয়াইসি ও ব্যক্তিগত তথ্য পরিবর্তন করতে বায়োমেট্রিক বা পিন দিন।'
+            : 'Verify with Device Biometrics or Security PIN to save KYC profile changes.',
+        actionName: 'user_update_kyc',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await updateUserKyc({
+            accountId: user.accountId,
+            name,
+            businessName: user.role !== 'U' ? businessName : undefined,
+            kyc: {
+              nidNumber,
+              dateOfBirth,
+              address,
+              occupation,
+              nomineeName,
+              nomineePhone,
+              nidPhotoUrl: nidPhotoUrl || undefined,
+              ...(user.role === 'M'
+                ? {
+                    taxCertificateNumber: taxCertificateNumber.trim(),
+                    taxCertificatePhotoUrl: taxCertificatePhotoUrl || undefined,
+                  }
+                : {}),
+            },
+            auth,
+          });
+          setStatusMsg(
+            lang === 'bn'
+              ? 'কেওয়াইসি তথ্য সফলভাবে আপডেট করা হয়েছে!'
+              : 'KYC profile updated and verified successfully!'
+          );
         },
       });
-      setStatusMsg(
-        lang === 'bn'
-          ? 'কেওয়াইসি তথ্য সফলভাবে আপডেট করা হয়েছে!'
-          : 'KYC profile updated and verified successfully!'
-      );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'KYC update failed.');
     } finally {
       setBusy(false);
@@ -272,16 +302,41 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
     setBusy(true);
     try {
-      await changeUserSecurityPin(user.accountId, currentPin, newPin);
-      setCurrentPin('');
-      setNewPin('');
-      setConfirmPin('');
-      setStatusMsg(
-        lang === 'bn'
-          ? 'সিকিউরিটি পিন সফলভাবে পরিবর্তন হয়েছে।'
-          : 'Security PIN changed successfully.'
-      );
+      if (currentPin.trim().length >= 4) {
+        await changeUserSecurityPin(user.accountId, currentPin, newPin, { pin: currentPin });
+        setCurrentPin('');
+        setNewPin('');
+        setConfirmPin('');
+        setStatusMsg(
+          lang === 'bn'
+            ? 'সিকিউরিটি পিন সফলভাবে পরিবর্তন হয়েছে।'
+            : 'Security PIN changed successfully.'
+        );
+      } else {
+        await requestActionAuth({
+          title: lang === 'bn' ? 'সিকিউরিটি পিন পরিবর্তন অনুমোদন' : 'Authorize Security PIN Change',
+          subtitle:
+            lang === 'bn'
+              ? 'নতুন পিন সেট করতে আপনার বর্তমান পিন বা বায়োমেট্রিক যাচাই করুন।'
+              : 'Verify with Device Biometrics or current Security PIN to update your PIN.',
+          actionName: 'user_change_security_pin',
+          subjectId: user.accountId,
+          credentials: user.webauthnCredentials || [],
+          run: async (auth) => {
+            await changeUserSecurityPin(user.accountId, currentPin, newPin, auth);
+            setCurrentPin('');
+            setNewPin('');
+            setConfirmPin('');
+            setStatusMsg(
+              lang === 'bn'
+                ? 'সিকিউরিটি পিন সফলভাবে পরিবর্তন হয়েছে।'
+                : 'Security PIN changed successfully.'
+            );
+          },
+        });
+      }
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'PIN change failed.');
     } finally {
       setBusy(false);
@@ -295,16 +350,20 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setBioBusy(true);
     try {
       await verifyUserSecurityPin(user.accountId, bioPinConfirm);
+      const safeLabel = sanitizeBiometricDeviceLabelForDisplay(
+        bioDeviceLabel.trim() || webauthnCap?.defaultDeviceLabel
+      );
       const cred = await registerCustomerBiometricPasskey({
         accountId: user.accountId,
         userEmailOrPhone: user.email || user.phone || user.accountId,
         displayName: user.name,
-        deviceLabel: bioDeviceLabel.trim() || webauthnCap?.defaultDeviceLabel,
+        deviceLabel: safeLabel,
         existingCredentialIds: (user.webauthnCredentials || []).map((c) => c.credentialId),
       });
       await enrollUserWebAuthnPasskey({
         accountId: user.accountId,
         credential: cred,
+        auth: { pin: bioPinConfirm },
       });
       setBioPinConfirm('');
       setStatusMsg(
@@ -350,13 +409,26 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setBioBusy(true);
     try {
-      await removeUserWebAuthnPasskey(user.accountId, credentialId);
-      setStatusMsg(
-        lang === 'bn'
-          ? 'বায়োমেট্রিক পাসকি সফলভাবে মুছে ফেলা হয়েছে।'
-          : 'Biometric passkey removed from this account.'
-      );
+      await requestActionAuth({
+        title: lang === 'bn' ? 'পাসকি মুছে ফেলা অনুমোদন' : 'Authorize Passkey Removal',
+        subtitle:
+          lang === 'bn'
+            ? 'বায়োমেট্রিক ডিভাইস মুছতে আপনার সিকিউরিটি পিন বা বায়োমেট্রিক দিন।'
+            : 'Verify with Biometrics or Security PIN before removing this biometric passkey.',
+        actionName: 'user_remove_biometric_passkey',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await removeUserWebAuthnPasskey(user.accountId, credentialId, auth);
+          setStatusMsg(
+            lang === 'bn'
+              ? 'বায়োমেট্রিক পাসকি সফলভাবে মুছে ফেলা হয়েছে।'
+              : 'Biometric passkey removed from this account.'
+          );
+        },
+      });
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Could not remove biometric passkey.');
     } finally {
       setBioBusy(false);
@@ -365,24 +437,45 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
   const handleRenameBiometricPasskey = async (credentialId: string) => {
     const trimmed = editingCredLabel.trim();
-    if (!trimmed) return;
+    if (!trimmed || /^\d{3,6}$/.test(trimmed)) {
+      setErrorMsg(
+        lang === 'bn'
+          ? 'ডিভাইসের জন্য একটি অর্থবহ নাম লিখুন (শুধু সংখ্যার পিন-সদৃশ নাম দেবেন না)।'
+          : 'Enter a descriptive device name (numeric PIN-style labels are not allowed).'
+      );
+      return;
+    }
     setErrorMsg('');
     setStatusMsg('');
     setBioBusy(true);
     try {
-      await renameUserWebAuthnPasskey({
-        accountId: user.accountId,
-        credentialId,
-        newLabel: trimmed,
+      await requestActionAuth({
+        title: lang === 'bn' ? 'ডিভাইসের নাম পরিবর্তন অনুমোদন' : 'Authorize Passkey Rename',
+        subtitle:
+          lang === 'bn'
+            ? 'নাম পরিবর্তন সংরক্ষণ করতে বায়োমেট্রিক বা পিন দিন।'
+            : 'Verify with Biometrics or Security PIN to rename this device.',
+        actionName: 'user_rename_biometric_passkey',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await renameUserWebAuthnPasskey({
+            accountId: user.accountId,
+            credentialId,
+            newLabel: trimmed,
+            auth,
+          });
+          setEditingCredId(null);
+          setEditingCredLabel('');
+          setStatusMsg(
+            lang === 'bn'
+              ? 'ডিভাইসের নাম আপডেট হয়েছে।'
+              : 'Biometric device label updated.'
+          );
+        },
       });
-      setEditingCredId(null);
-      setEditingCredLabel('');
-      setStatusMsg(
-        lang === 'bn'
-          ? 'ডিভাইসের নাম আপডেট হয়েছে।'
-          : 'Biometric device label updated.'
-      );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Could not rename device.');
     } finally {
       setBioBusy(false);
@@ -401,16 +494,30 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setBioBusy(true);
     try {
-      await updateUserBiometricPreferences({
-        accountId: user.accountId,
-        prefs: patch,
+      await requestActionAuth({
+        title: lang === 'bn' ? 'বায়োমেট্রিক সেটিংস পরিবর্তন' : 'Authorize Biometric Settings Change',
+        subtitle:
+          lang === 'bn'
+            ? 'বায়োমেট্রিক সুরক্ষা নীতি পরিবর্তন করতে আপনার পিন বা বায়োমেট্রিক দিন।'
+            : 'Verify with Biometrics or Security PIN to update biometric protection settings.',
+        actionName: 'user_update_biometric_preferences',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await updateUserBiometricPreferences({
+            accountId: user.accountId,
+            prefs: patch,
+            auth,
+          });
+          setStatusMsg(
+            lang === 'bn'
+              ? 'বায়োমেট্রিক সুরক্ষা সেটিংস সংরক্ষণ হয়েছে।'
+              : 'Biometric protection preferences saved.'
+          );
+        },
       });
-      setStatusMsg(
-        lang === 'bn'
-          ? 'বায়োমেট্রিক সুরক্ষা সেটিংস সংরক্ষণ হয়েছে।'
-          : 'Biometric protection preferences saved.'
-      );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Could not save biometric preferences.');
     } finally {
       setBioBusy(false);
@@ -424,7 +531,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setTotpBusy(true);
     try {
-      await verifyUserSecurityPin(user.accountId, totpPinConfirm);
       const valid = await verifyTotpCode(pendingTotpSecret, totpCodeInput, 1);
       if (!valid) {
         throw new Error(
@@ -436,6 +542,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       await enrollUserTotpSecret({
         accountId: user.accountId,
         secretBase32: pendingTotpSecret,
+        auth: { pin: totpPinConfirm },
       });
       setPendingTotpSecret(null);
       setTotpCodeInput('');
@@ -457,13 +564,26 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setTotpBusy(true);
     try {
-      await removeUserTotpSecret(user.accountId);
-      setStatusMsg(
-        lang === 'bn'
-          ? 'Authenticator অ্যাপের কী সরানো হয়েছে। নতুন লগইনে EmailJS কোড চালু থাকবে।'
-          : 'Authenticator App removed. EmailJS verification code remains mandatory for new logins.'
-      );
+      await requestActionAuth({
+        title: lang === 'bn' ? 'Authenticator অ্যাপ সরানো অনুমোদন' : 'Authorize Authenticator Removal',
+        subtitle:
+          lang === 'bn'
+            ? 'Google Authenticator সংযোগ সরাতে বায়োমেট্রিক বা পিন দিন।'
+            : 'Verify with Biometrics or Security PIN before removing Google Authenticator.',
+        actionName: 'user_remove_totp_secret',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await removeUserTotpSecret(user.accountId, auth);
+          setStatusMsg(
+            lang === 'bn'
+              ? 'Authenticator অ্যাপের কী সরানো হয়েছে। নতুন লগইনে EmailJS কোড চালু থাকবে।'
+              : 'Authenticator App removed. EmailJS verification code remains mandatory for new logins.'
+          );
+        },
+      });
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Could not remove Authenticator key.');
     } finally {
       setTotpBusy(false);
@@ -475,21 +595,35 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setBusy(true);
     try {
-      await saveUserMapLocation({
-        accountId: user.accountId,
-        lat: loc.lat,
-        lng: loc.lng,
-        address: loc.address,
-        area: loc.area,
-        city: loc.city,
-        isVisible: loc.isVisible,
+      await requestActionAuth({
+        title: lang === 'bn' ? 'ম্যাপ লোকেশন আপডেট অনুমোদন' : 'Authorize Map Location Update',
+        subtitle:
+          lang === 'bn'
+            ? 'লাইভ ম্যাপ পিন সংরক্ষণ করতে বায়োমেট্রিক বা সিকিউরিটি পিন দিন।'
+            : 'Verify with Biometrics or Security PIN to publish your map coordinates.',
+        actionName: 'user_save_map_location',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await saveUserMapLocation({
+            accountId: user.accountId,
+            lat: loc.lat,
+            lng: loc.lng,
+            address: loc.address,
+            area: loc.area,
+            city: loc.city,
+            isVisible: loc.isVisible,
+            auth,
+          });
+          setStatusMsg(
+            lang === 'bn'
+              ? 'আপনার রিয়েল লোকেশন লাইভ ম্যাপে সেভ হয়েছে — এখন সব ইউজার দেখতে পাবেন!'
+              : 'Your real location is live on the Acash Map with your Name, Photo & Creator Number!'
+          );
+        },
       });
-      setStatusMsg(
-        lang === 'bn'
-          ? 'আপনার রিয়েল লোকেশন লাইভ ম্যাপে সেভ হয়েছে — এখন সব ইউজার দেখতে পাবেন!'
-          : 'Your real location is live on the Acash Map with your Name, Photo & Creator Number!'
-      );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Failed to save map location.');
     } finally {
       setBusy(false);
@@ -501,13 +635,26 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setStatusMsg('');
     setBusy(true);
     try {
-      await updateUserGender(user.accountId, nextGender);
-      setStatusMsg(
-        lang === 'bn'
-          ? `লিঙ্গ (${nextGender === 'female' ? 'মহিলা' : 'পুরুষ'}) আপডেট হয়েছে — এখন ${nextGender === 'female' ? 'পুরুষ কণ্ঠে' : 'নারী কণ্ঠে'} ভয়েস নোটিফিকেশন পাবেন।`
-          : `Gender set to ${nextGender}. Transaction voice alerts will now play in a ${nextGender === 'female' ? 'Male' : 'Female'} voice.`
-      );
+      await requestActionAuth({
+        title: lang === 'bn' ? 'প্রোফাইল ভয়েস সেটিং পরিবর্তন' : 'Authorize Voice Profile Change',
+        subtitle:
+          lang === 'bn'
+            ? 'প্রোফাইলের লিঙ্গ ও ভয়েস অ্যালার্ট পরিবর্তন করতে বায়োমেট্রিক বা পিন দিন।'
+            : 'Verify with Biometrics or Security PIN to update your voice alert profile.',
+        actionName: 'user_update_gender',
+        subjectId: user.accountId,
+        credentials: user.webauthnCredentials || [],
+        run: async (auth) => {
+          await updateUserGender(user.accountId, nextGender, auth);
+          setStatusMsg(
+            lang === 'bn'
+              ? `লিঙ্গ (${nextGender === 'female' ? 'মহিলা' : 'পুরুষ'}) আপডেট হয়েছে — এখন ${nextGender === 'female' ? 'পুরুষ কণ্ঠে' : 'নারী কণ্ঠে'} ভয়েস নোটিফিকেশন পাবেন।`
+              : `Gender set to ${nextGender}. Transaction voice alerts will now play in a ${nextGender === 'female' ? 'Male' : 'Female'} voice.`
+          );
+        },
+      });
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setErrorMsg(err instanceof Error ? err.message : 'Could not update gender.');
     } finally {
       setBusy(false);
@@ -1119,8 +1266,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         </div>
                         <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                           {lang === 'bn'
-                            ? 'বন্ধ করলে সব লেনদেন শুধু ট্যাপ ও হোল্ড দিয়ে নিশ্চিত হবে'
-                            : 'Toggle off anytime to revert strictly to Tap & Hold'}
+                            ? 'বন্ধ করলে সব লেনদেন শুধু সিকিউরিটি পিন দিয়ে নিশ্চিত হবে'
+                            : 'Toggle off anytime to revert strictly to Security PIN'}
                         </div>
                       </div>
                       <button
@@ -1324,7 +1471,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                                 ) : (
                                   <>
                                     <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                                      {cred.deviceLabel}
+                                      {sanitizeBiometricDeviceLabelForDisplay(cred.deviceLabel)}
                                     </div>
                                     <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
                                       {cred.credentialId.slice(0, 12)}… ·{' '}
@@ -1344,7 +1491,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                                   disabled={bioBusy}
                                   onClick={() => {
                                     setEditingCredId(cred.credentialId);
-                                    setEditingCredLabel(cred.deviceLabel);
+                                    setEditingCredLabel(
+                                      sanitizeBiometricDeviceLabelForDisplay(cred.deviceLabel)
+                                    );
                                   }}
                                   className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1 cursor-pointer"
                                 >
@@ -1644,11 +1793,17 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                    {lang === 'bn' ? 'বর্তমান পিন' : 'Current Security PIN'}
+                    {(user.webauthnCredentials?.length || 0) > 0
+                      ? lang === 'bn'
+                        ? 'বর্তমান পিন (অথবা বায়োমেট্রিক দিয়ে যাচাই করতে খালি রাখুন)'
+                        : 'Current Security PIN (or leave blank to verify with Biometrics)'
+                      : lang === 'bn'
+                        ? 'বর্তমান পিন'
+                        : 'Current Security PIN'}
                   </label>
                   <input
                     type="password"
-                    required
+                    required={(user.webauthnCredentials?.length || 0) === 0}
                     maxLength={5}
                     inputMode="numeric"
                     value={currentPin}
@@ -1693,7 +1848,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
                 <button
                   type="submit"
-                  disabled={busy || currentPin.length < 4 || newPin.length < 4}
+                  disabled={
+                    busy ||
+                    newPin.length < 4 ||
+                    confirmPin.length < 4 ||
+                    ((user.webauthnCredentials?.length || 0) === 0 && currentPin.length < 4)
+                  }
                   className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors disabled:opacity-50"
                 >
                   {busy
@@ -1758,6 +1918,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           </div>
         )}
       </div>
+      {authModalElement}
     </div>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldCheck,
   Users,
@@ -55,6 +55,8 @@ import {
   AcashMapLocation,
   AcashTransaction,
   AcashUser,
+  ActionAuthInput,
+  AdminActionSecurityInfo,
   AdminActivityLog,
   AdminActivityType,
   AdminNotification,
@@ -134,6 +136,7 @@ import {
   sendAdmin2faChallengeEmail,
   setAdminAlertEmail,
   subscribeToAdminAlertEmail,
+  subscribeToAdminSecurityInfo,
   syncAutoIpMapLocation,
   verifyAdmin2faChallengeCode,
   verifyAdminPasswordLogin,
@@ -146,6 +149,7 @@ import {
   downloadUsersDirectoryPdf,
 } from '../../lib/pdfGenerator';
 import { BrandLogo } from '../common/BrandLogo';
+import { useActionAuthModal } from '../common/ActionAuthModal';
 import { TransactionVolumeChart } from './TransactionVolumeChart';
 import { BoothLocatorMap } from '../common/BoothLocatorMap';
 import { RealLocationPickerMap, RealLocationValue } from '../common/RealLocationPickerMap';
@@ -344,6 +348,48 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   const seenAdminNotifIdsRef = useRef<Set<string> | null>(null);
   const adminIpSyncedRef = useRef<string | null>(null);
   const [syncingAdminIp, setSyncingAdminIp] = useState(false);
+  const [adminSecurityInfo, setAdminSecurityInfo] = useState<AdminActionSecurityInfo | null>(null);
+  const { requestActionAuth, authModalElement } = useActionAuthModal(lang);
+
+  useEffect(() => {
+    if (!adminSession?.adminEmail) {
+      setAdminSecurityInfo(null);
+      return;
+    }
+    const unsub = subscribeToAdminSecurityInfo(adminSession.adminEmail, setAdminSecurityInfo);
+    return () => unsub();
+  }, [adminSession?.adminEmail]);
+
+  const requestAdminAuth = useCallback(
+    (opts: {
+      title: string;
+      subtitle?: string;
+      actionName: string;
+      run: (auth: ActionAuthInput) => Promise<void>;
+    }) => {
+      const subjectId =
+        adminSecurityInfo?.adminId ||
+        (adminSession?.adminRole === 'main_admin' ? 'ADM-MAIN' : adminSession?.adminId || 'ADM-2ND');
+      return requestActionAuth({
+        title: opts.title,
+        subtitle: opts.subtitle,
+        actionName: opts.actionName,
+        subjectId,
+        credentials: adminSecurityInfo?.webauthnCredentials || [],
+        isAdmin: true,
+        adminHasActionPin: Boolean(adminSecurityInfo?.hasActionPin),
+        run: opts.run,
+      });
+    },
+    [
+      adminSecurityInfo?.adminId,
+      adminSecurityInfo?.webauthnCredentials,
+      adminSecurityInfo?.hasActionPin,
+      adminSession?.adminRole,
+      adminSession?.adminId,
+      requestActionAuth,
+    ]
+  );
 
   useEffect(() => {
     const unsub = subscribeToAdminAlertEmail((email) => setAlertEmailInput(email));
@@ -1196,7 +1242,20 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setActionBusyId(user.accountId);
     setFeedbackMsg('');
     try {
-      await adminToggleUserStatus(user.accountId, 'active', 'Re-activated by Platform Admin', adminSession.adminEmail);
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাকাউন্ট সচল অনুমোদন' : 'Authorize Re-Enable Account',
+        subtitle: `${user.businessName || user.name} (${user.accountId})`,
+        actionName: 'enable_user_account',
+        run: async (auth) => {
+          await adminToggleUserStatus(
+            user.accountId,
+            'active',
+            'Re-activated by Platform Admin',
+            adminSession.adminEmail,
+            auth
+          );
+        },
+      });
       const emailRes = await sendAccountStatusEmail({
         toEmail: user.email,
         toName: user.businessName || user.name,
@@ -1209,6 +1268,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           ? `${user.accountId} re-enabled and notification emailed to ${user.email}.`
           : `${user.accountId} re-enabled (EmailJS notice: ${emailRes.error}).`
       );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setFeedbackMsg(err instanceof Error ? err.message : 'Failed to re-enable account.');
     } finally {
       setActionBusyId(null);
     }
@@ -1222,12 +1284,20 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setFeedbackMsg('');
     try {
       const cleanCause = disableCause.trim();
-      await adminToggleUserStatus(
-        disableTargetUser.accountId,
-        'disabled',
-        cleanCause,
-        adminSession.adminEmail
-      );
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাকাউন্ট বন্ধ অনুমোদন' : 'Authorize Disable Account',
+        subtitle: `${disableTargetUser.accountId} · "${cleanCause}"`,
+        actionName: 'disable_user_account',
+        run: async (auth) => {
+          await adminToggleUserStatus(
+            disableTargetUser.accountId,
+            'disabled',
+            cleanCause,
+            adminSession.adminEmail,
+            auth
+          );
+        },
+      });
 
       const emailRes = await sendAccountStatusEmail({
         toEmail: disableTargetUser.email,
@@ -1244,6 +1314,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       );
       setDisableTargetUser(null);
       setDisableCause('');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setFeedbackMsg(err instanceof Error ? err.message : 'Could not disable account.');
     } finally {
       setDisableSubmitting(false);
     }
@@ -1254,10 +1327,18 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setActionBusyId(targetUser.accountId);
     setFeedbackMsg('');
     try {
-      await adminExtendUserUnverifiedGrace({
-        accountId: targetUser.accountId,
-        adminEmail: adminSession.adminEmail,
-        days: 7,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অস্থায়ী সীমা বৃদ্ধির অনুমোদন' : 'Authorize +7 Day Grace Extension',
+        subtitle: `${targetUser.businessName || targetUser.name} (${targetUser.accountId})`,
+        actionName: 'extend_unverified_grace',
+        run: async (auth) => {
+          await adminExtendUserUnverifiedGrace({
+            accountId: targetUser.accountId,
+            adminEmail: adminSession.adminEmail,
+            days: 7,
+            auth,
+          });
+        },
       });
       setFeedbackMsg(
         lang === 'bn'
@@ -1265,6 +1346,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           : `Extended unverified operational access for ${targetUser.accountId} by +7 days.`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Failed to extend access.');
     } finally {
       setActionBusyId(null);
@@ -1276,11 +1358,20 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setBulkBusy(true);
     setFeedbackMsg('');
     try {
-      const updated = await adminBulkUpdateUserStatus({
-        accountIds: selectedDisabledUsers.map((u) => u.accountId),
-        newStatus: 'active',
-        reason: 'Bulk re-activated by Platform Admin',
-        adminEmail: adminSession.adminEmail,
+      let updated: AcashUser[] = [];
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'একসাথে অ্যাকাউন্ট সচল অনুমোদন' : 'Authorize Bulk Enable Accounts',
+        subtitle: `${selectedDisabledUsers.length} account(s)`,
+        actionName: 'bulk_enable_users',
+        run: async (auth) => {
+          updated = await adminBulkUpdateUserStatus({
+            accountIds: selectedDisabledUsers.map((u) => u.accountId),
+            newStatus: 'active',
+            reason: 'Bulk re-activated by Platform Admin',
+            adminEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
 
       let emailSentCount = 0;
@@ -1298,6 +1389,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         `Bulk enabled ${updated.length} account(s) & logged in Activity Log. Gmail notifications delivered: ${emailSentCount}/${updated.length}.`
       );
       setSelectedUserIds([]);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setFeedbackMsg(err instanceof Error ? err.message : 'Bulk enable failed.');
     } finally {
       setBulkBusy(false);
     }
@@ -1310,11 +1404,20 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setFeedbackMsg('');
     try {
       const cleanCause = bulkDisableCause.trim();
-      const updated = await adminBulkUpdateUserStatus({
-        accountIds: selectedActiveUsers.map((u) => u.accountId),
-        newStatus: 'disabled',
-        reason: cleanCause,
-        adminEmail: adminSession.adminEmail,
+      let updated: AcashUser[] = [];
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'একসাথে অ্যাকাউন্ট বন্ধ অনুমোদন' : 'Authorize Bulk Disable Accounts',
+        subtitle: `${selectedActiveUsers.length} account(s) · "${cleanCause}"`,
+        actionName: 'bulk_disable_users',
+        run: async (auth) => {
+          updated = await adminBulkUpdateUserStatus({
+            accountIds: selectedActiveUsers.map((u) => u.accountId),
+            newStatus: 'disabled',
+            reason: cleanCause,
+            adminEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
 
       let emailSentCount = 0;
@@ -1334,6 +1437,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setBulkDisableOpen(false);
       setBulkDisableCause('');
       setSelectedUserIds([]);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setFeedbackMsg(err instanceof Error ? err.message : 'Bulk disable failed.');
     } finally {
       setBulkBusy(false);
     }
@@ -1345,16 +1451,29 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setMintBusy(true);
     setFeedbackMsg('');
     try {
-      const { vault, tx } = await mainAdminMintTreasuryCredit({
-        amount: Number(mintAmount),
-        reason: mintReason,
-        actorEmail: adminSession.adminEmail,
+      let result: { vault: MainTreasuryVault; tx: AcashTransaction } | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'ট্রেজারি মিন্ট অনুমোদন' : 'Authorize Treasury Vault Mint',
+        subtitle: `Mint ${formatBdt(Number(mintAmount) || 0, lang)} into ADMIN-TREASURY`,
+        actionName: 'mint_treasury_credit',
+        run: async (auth) => {
+          result = await mainAdminMintTreasuryCredit({
+            amount: Number(mintAmount),
+            reason: mintReason,
+            actorEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
-      setFeedbackMsg(
-        `Main Admin minted ${formatBdt(tx.amount)} into ADMIN-TREASURY. New Vault Balance: ${formatBdt(vault.balance)}. Tx Hash: ${tx.txHash}`
-      );
+      if (result) {
+        const res = result as { vault: MainTreasuryVault; tx: AcashTransaction };
+        setFeedbackMsg(
+          `Main Admin minted ${formatBdt(res.tx.amount)} into ADMIN-TREASURY. New Vault Balance: ${formatBdt(res.vault.balance)}. Tx Hash: ${res.tx.txHash}`
+        );
+      }
       setMintAmount('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Treasury mint failed.');
     } finally {
       setMintBusy(false);
@@ -1367,17 +1486,30 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setCreditBusy(true);
     setFeedbackMsg('');
     try {
-      const tx = await adminCreditAccount({
-        targetIdentifier: creditTarget,
-        amount: Number(creditAmount),
-        reason: creditReason,
-        adminEmail: adminSession.adminEmail,
+      let tx: AcashTransaction | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাকাউন্ট ক্রেডিট অনুমোদন' : 'Authorize Admin Credit Add',
+        subtitle: `${formatBdt(Number(creditAmount) || 0, lang)} → ${creditTarget}`,
+        actionName: 'admin_credit_account',
+        run: async (auth) => {
+          tx = await adminCreditAccount({
+            targetIdentifier: creditTarget,
+            amount: Number(creditAmount),
+            reason: creditReason,
+            adminEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
-      setFeedbackMsg(
-        `Added ${formatBdt(tx.amount)} credit to ${tx.receiverName} (${tx.receiverId}). Tx Hash: ${tx.txHash}`
-      );
+      if (tx) {
+        const resTx = tx as AcashTransaction;
+        setFeedbackMsg(
+          `Added ${formatBdt(resTx.amount)} credit to ${resTx.receiverName} (${resTx.receiverId}). Tx Hash: ${resTx.txHash}`
+        );
+      }
       setCreditAmount('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Credit add failed.');
     } finally {
       setCreditBusy(false);
@@ -1390,18 +1522,31 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setTransferBusy(true);
     setFeedbackMsg('');
     try {
-      const tx = await adminTransferBetweenAccounts({
-        fromIdentifier: transferFrom,
-        toIdentifier: transferTo,
-        amount: Number(transferAmount),
-        reason: transferReason,
-        adminEmail: adminSession.adminEmail,
+      let tx: AcashTransaction | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'অ্যাকাউন্ট ট্রান্সফার অনুমোদন' : 'Authorize Admin Account Transfer',
+        subtitle: `${formatBdt(Number(transferAmount) || 0, lang)} · ${transferFrom} → ${transferTo}`,
+        actionName: 'admin_transfer_accounts',
+        run: async (auth) => {
+          tx = await adminTransferBetweenAccounts({
+            fromIdentifier: transferFrom,
+            toIdentifier: transferTo,
+            amount: Number(transferAmount),
+            reason: transferReason,
+            adminEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
-      setFeedbackMsg(
-        `Transferred ${formatBdt(tx.amount)} from ${tx.senderId} to ${tx.receiverId}. Tx Hash: ${tx.txHash}`
-      );
+      if (tx) {
+        const resTx = tx as AcashTransaction;
+        setFeedbackMsg(
+          `Transferred ${formatBdt(resTx.amount)} from ${resTx.senderId} to ${resTx.receiverId}. Tx Hash: ${resTx.txHash}`
+        );
+      }
       setTransferAmount('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Transfer failed.');
     } finally {
       setTransferBusy(false);
@@ -1413,11 +1558,19 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setActionBusyId(txId);
     setFeedbackMsg('');
     try {
-      await adminApproveTransaction(txId, adminSession.adminEmail);
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'হাই-ভ্যালু লেনদেন অনুমোদন' : 'Authorize High-Value Approval',
+        subtitle: `Approve & Settle ${txId}`,
+        actionName: 'approve_high_value_tx',
+        run: async (auth) => {
+          await adminApproveTransaction(txId, adminSession.adminEmail, auth);
+        },
+      });
       setFeedbackMsg(
         `High-value transaction ${txId} approved and settled. Approval emails dispatched to user & admin.`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Approval error.');
     } finally {
       setActionBusyId(null);
@@ -1429,11 +1582,19 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setActionBusyId(txId);
     setFeedbackMsg('');
     try {
-      await adminRejectTransaction(txId, adminSession.adminEmail);
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'লেনদেন বাতিল ও রিফান্ড অনুমোদন' : 'Authorize Reject & Refund Transaction',
+        subtitle: `Reject & Refund ${txId}`,
+        actionName: 'reject_high_value_tx',
+        run: async (auth) => {
+          await adminRejectTransaction(txId, adminSession.adminEmail, undefined, auth);
+        },
+      });
       setFeedbackMsg(
         `Transaction ${txId} rejected and refunded to sender. Rejection emails dispatched to user & admin.`
       );
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Rejection error.');
     } finally {
       setActionBusyId(null);
@@ -1453,15 +1614,32 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setActionBusyId(tx.txId);
     setFeedbackMsg('');
     try {
+      await requestAdminAuth({
+        title:
+          mode === 'pending'
+            ? lang === 'bn'
+              ? 'লেনদেন পেন্ডিং করার অনুমোদন'
+              : 'Authorize Mark Transaction Pending'
+            : lang === 'bn'
+              ? 'লেনদেন স্থায়ী ডিলিট অনুমোদন'
+              : 'Authorize Permanent Delete Transaction',
+        subtitle: `${tx.txHash} · ${formatBdt(tx.amount, lang)}`,
+        actionName: mode === 'pending' ? 'mark_tx_pending' : 'delete_tx',
+        run: async (auth) => {
+          if (mode === 'pending') {
+            await adminMarkTransactionPending(tx.txId, adminSession.adminEmail, txActionReason, auth);
+          } else {
+            await adminDeleteTransaction(tx.txId, adminSession.adminEmail, txActionReason, auth);
+          }
+        },
+      });
       if (mode === 'pending') {
-        await adminMarkTransactionPending(tx.txId, adminSession.adminEmail, txActionReason);
         setFeedbackMsg(
           lang === 'bn'
             ? `লেনদেন ${tx.txHash} পেন্ডিং (Pending Admin Approval) করা হয়েছে — কোনো অ্যাকাউন্টে নতুন করে টাকা ক্রেডিট হয়নি।`
             : `Transaction ${tx.txHash} marked as Pending Admin Approval. Zero new credit issued to any account.`
         );
       } else {
-        await adminDeleteTransaction(tx.txId, adminSession.adminEmail, txActionReason);
         setFeedbackMsg(
           lang === 'bn'
             ? `লেনদেন ${tx.txHash} অ্যাডমিন, ইউজার, এজেন্ট ও মার্চেন্টের সকল স্টেটমেন্ট থেকে স্থায়ীভাবে ডিলিট করা হয়েছে।`
@@ -1471,6 +1649,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setTxActionModal(null);
       setTxActionReason('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Transaction action failed.');
     } finally {
       setTxActionSubmitting(false);
@@ -1484,30 +1663,43 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setSavingFee(true);
     setFeedbackMsg('');
     try {
-      await adminUpdateFeeConfig({
-        feePer1000: computedTotalFeePer1000,
-        agentShare: Math.max(0, Number(editAgentShare) || 0),
-        govtShare: Math.max(0, Number(editGovtShare) || 0),
-        adminShare: Math.max(0, Number(editAdminShare) || 0),
-        merchantCashOutFeePer1000: computedMerchantCashOutPer1000,
-        merchantCashOutAgentShare: Math.max(0, Number(editMerchantAgentShare) || 0),
-        merchantCashOutGovtShare: Math.max(0, Number(editMerchantGovtShare) || 0),
-        merchantCashOutAdminShare: Math.max(0, Number(editMerchantAdminShare) || 0),
-        merchantCashOutToAdminFeePer1000: computedMerchantToAdminPer1000,
-        merchantCashOutToAdminGovtShare: Math.max(0, Number(editMerchantToAdminGovtShare) || 0),
-        merchantCashOutToAdminShare: Math.max(0, Number(editMerchantToAdminShare) || 0),
-        sendMoneyChargeMode: editSendMoneyMode,
-        sendMoneyFreeThreshold: Math.max(0, Number(editSendMoneyFreeThreshold) || 0),
-        sendMoneyFeeRate: computedSendMoneyRate,
-        sendMoneyGovtShare: Math.max(0, Number(editSendMoneyGovtShare) || 0),
-        sendMoneyAdminShare: Math.max(0, Number(editSendMoneyAdminShare) || 0),
-        cashInCommissionPer1000: Math.max(0, Number(editCashInComm) || 0),
-        highValueThreshold: Math.max(1000, Number(editHighThreshold) || 50000),
-        updatedBy: adminSession.adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'ফি ইঞ্জিন পরিবর্তন অনুমোদন' : 'Authorize Fee Structure Publish',
+        subtitle: `Cash-Out ৳${computedTotalFeePer1000}/1k · Send Money ৳${computedSendMoneyRate}`,
+        actionName: 'update_fee_config',
+        run: async (auth) => {
+          await adminUpdateFeeConfig(
+            {
+              feePer1000: computedTotalFeePer1000,
+              agentShare: Math.max(0, Number(editAgentShare) || 0),
+              govtShare: Math.max(0, Number(editGovtShare) || 0),
+              adminShare: Math.max(0, Number(editAdminShare) || 0),
+              merchantCashOutFeePer1000: computedMerchantCashOutPer1000,
+              merchantCashOutAgentShare: Math.max(0, Number(editMerchantAgentShare) || 0),
+              merchantCashOutGovtShare: Math.max(0, Number(editMerchantGovtShare) || 0),
+              merchantCashOutAdminShare: Math.max(0, Number(editMerchantAdminShare) || 0),
+              merchantCashOutToAdminFeePer1000: computedMerchantToAdminPer1000,
+              merchantCashOutToAdminGovtShare: Math.max(0, Number(editMerchantToAdminGovtShare) || 0),
+              merchantCashOutToAdminShare: Math.max(0, Number(editMerchantToAdminShare) || 0),
+              sendMoneyChargeMode: editSendMoneyMode,
+              sendMoneyFreeThreshold: Math.max(0, Number(editSendMoneyFreeThreshold) || 0),
+              sendMoneyFeeRate: computedSendMoneyRate,
+              sendMoneyGovtShare: Math.max(0, Number(editSendMoneyGovtShare) || 0),
+              sendMoneyAdminShare: Math.max(0, Number(editSendMoneyAdminShare) || 0),
+              cashInCommissionPer1000: Math.max(0, Number(editCashInComm) || 0),
+              highValueThreshold: Math.max(1000, Number(editHighThreshold) || 50000),
+              updatedBy: adminSession.adminEmail,
+            },
+            auth
+          );
+        },
       });
       setFeedbackMsg(
         `Fee structure published! User Cash-Out: ৳${computedTotalFeePer1000}/1k · Merchant Cash-Out: ৳${computedMerchantCashOutPer1000}/1k (Admin ৳${computedMerchantToAdminPer1000}/1k) · Send Money: ৳${computedSendMoneyRate}. All new transactions & statements will use these charges.`
       );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
+      setFeedbackMsg(err instanceof Error ? err.message : 'Fee engine update failed.');
     } finally {
       setSavingFee(false);
     }
@@ -1608,37 +1800,48 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setSavingSecondAdmin(true);
     setFeedbackMsg('');
     try {
-      const saved = await saveSecondAdminProfileAndLocation({
-        adminId: targetAdminId,
-        actorEmail: adminSession.adminEmail,
-        name: secondAdminNameInput || adminSession.adminName,
-        title: secondAdminTitleInput,
-        phone: secondAdminPhoneInput || '01799000101',
-        profilePhotoUrl: secondAdminPhotoInput || undefined,
-        mapLocation: {
-          lat: loc.lat,
-          lng: loc.lng,
-          address: loc.address,
-          area: loc.area,
-          city: loc.city,
-          isVisible: loc.isVisible,
+      let saved: SecondAdminProfile | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? '২য় এডমিন প্রোফাইল ও ম্যাপ সংরক্ষণ' : 'Authorize 2nd Admin Profile & Map Update',
+        subtitle: `${targetAdminId} · ${loc.area}, ${loc.city}`,
+        actionName: 'save_second_admin_location',
+        run: async (auth) => {
+          saved = await saveSecondAdminProfileAndLocation({
+            adminId: targetAdminId,
+            actorEmail: adminSession.adminEmail,
+            name: secondAdminNameInput || adminSession.adminName,
+            title: secondAdminTitleInput,
+            phone: secondAdminPhoneInput || '01799000101',
+            profilePhotoUrl: secondAdminPhotoInput || undefined,
+            mapLocation: {
+              lat: loc.lat,
+              lng: loc.lng,
+              address: loc.address,
+              area: loc.area,
+              city: loc.city,
+              isVisible: loc.isVisible,
+            },
+            auth,
+          });
         },
       });
-
-      onAdminLogin({
-        ...adminSession,
-        adminName: saved.name,
-        adminId: saved.adminId,
-        phone: saved.phone,
-        profilePhotoUrl: saved.profilePhotoUrl,
-      });
-
-      setFeedbackMsg(
-        lang === 'bn'
-          ? `২য় এডমিন (${saved.adminId}) প্রোফাইল ও রিয়েল লোকেশন লাইভ ম্যাপে সেভ হয়েছে!`
-          : `2nd Admin (${saved.adminId}) profile photo, number & live map location published!`
-      );
+      if (saved) {
+        const savedProfile = saved as SecondAdminProfile;
+        onAdminLogin({
+          ...adminSession,
+          adminName: savedProfile.name,
+          adminId: savedProfile.adminId,
+          phone: savedProfile.phone,
+          profilePhotoUrl: savedProfile.profilePhotoUrl,
+        });
+        setFeedbackMsg(
+          lang === 'bn'
+            ? `২য় এডমিন (${savedProfile.adminId}) প্রোফাইল ও রিয়েল লোকেশন লাইভ ম্যাপে সেভ হয়েছে!`
+            : `2nd Admin (${savedProfile.adminId}) profile photo, number & live map location published!`
+        );
+      }
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not save 2nd Admin location.');
     } finally {
       setSavingSecondAdmin(false);
@@ -1651,22 +1854,35 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setCreating2ndAdmin(true);
     setFeedbackMsg('');
     try {
-      const created = await adminCreateSecondAdmin({
-        name: new2ndName,
-        title: new2ndTitle,
-        email: new2ndEmail,
-        phone: new2ndPhone,
-        password: new2ndPassword,
-        actorEmail: adminSession.adminEmail,
+      let created: SecondAdminProfile | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'নতুন ২য় এডমিন নিবন্ধন অনুমোদন' : 'Authorize Create 2nd Admin',
+        subtitle: `${new2ndName.trim()} (${new2ndEmail.trim()})`,
+        actionName: 'create_second_admin',
+        run: async (auth) => {
+          created = await adminCreateSecondAdmin({
+            name: new2ndName,
+            title: new2ndTitle,
+            email: new2ndEmail,
+            phone: new2ndPhone,
+            password: new2ndPassword,
+            actorEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
-      setFeedbackMsg(
-        `Registered 2nd Admin ${created.name} (${created.adminId}). They can now sign in with ${created.email} and pin their location directly on the map.`
-      );
+      if (created) {
+        const res = created as SecondAdminProfile;
+        setFeedbackMsg(
+          `Registered 2nd Admin ${res.name} (${res.adminId}). They can now sign in with ${res.email} and pin their location directly on the map.`
+        );
+      }
       setNew2ndName('');
       setNew2ndEmail('');
       setNew2ndPhone('');
       setNew2ndPassword('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Failed to create 2nd Admin.');
     } finally {
       setCreating2ndAdmin(false);
@@ -1683,16 +1899,25 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setChangingMainPwd(true);
     setFeedbackMsg('');
     try {
-      await changeMainAdminPassword({
-        currentPassword: currentMainPwd,
-        newPassword: newMainPwd,
-        actorEmail: adminSession.adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'মেইন এডমিন পাসওয়ার্ড পরিবর্তন' : 'Authorize Main Admin Password Change',
+        subtitle: `${adminSession.adminEmail}`,
+        actionName: 'change_main_admin_password',
+        run: async (auth) => {
+          await changeMainAdminPassword({
+            currentPassword: currentMainPwd,
+            newPassword: newMainPwd,
+            actorEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
       setCurrentMainPwd('');
       setNewMainPwd('');
       setConfirmMainPwd('');
       setFeedbackMsg('Main Admin password updated securely and synced.');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not update Main Admin password.');
     } finally {
       setChangingMainPwd(false);
@@ -1706,33 +1931,46 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setSavingBooth(true);
     setFeedbackMsg('');
     try {
-      const saved = await adminSaveBooth(
-        {
-          boothType: boothTypeInput,
-          name: boothNameInput,
-          area: boothAreaInput,
-          city: boothCityInput,
-          address: boothAddressInput,
-          phone: boothPhoneInput || '16247',
-          agentAccountId: boothTypeInput === 'agent_booth' ? boothAgentIdInput : undefined,
-          hours: boothHoursInput,
-          status: 'open',
-          lat: Number(boothLatInput) || 23.7805,
-          lng: Number(boothLngInput) || 90.4165,
-          services: boothServicesInput
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean),
-          queueWaitMinutes: 4,
-          cashLiquidityLevel: boothTypeInput === 'agent_booth' ? 'high' : undefined,
+      let saved: AcashBooth | null = null;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'নতুন বুথ যুক্ত করার অনুমোদন' : 'Authorize Save Map Booth',
+        subtitle: `${boothNameInput.trim()} · ${boothAreaInput}, ${boothCityInput}`,
+        actionName: 'save_booth',
+        run: async (auth) => {
+          saved = await adminSaveBooth(
+            {
+              boothType: boothTypeInput,
+              name: boothNameInput,
+              area: boothAreaInput,
+              city: boothCityInput,
+              address: boothAddressInput,
+              phone: boothPhoneInput || '16247',
+              agentAccountId: boothTypeInput === 'agent_booth' ? boothAgentIdInput : undefined,
+              hours: boothHoursInput,
+              status: 'open',
+              lat: Number(boothLatInput) || 23.7805,
+              lng: Number(boothLngInput) || 90.4165,
+              services: boothServicesInput
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean),
+              queueWaitMinutes: 4,
+              cashLiquidityLevel: boothTypeInput === 'agent_booth' ? 'high' : undefined,
+            },
+            adminSession.adminEmail,
+            auth
+          );
         },
-        adminSession.adminEmail
-      );
-      setFeedbackMsg(`Added ${saved.name} (${saved.boothId}) to the Booth Map & Firestore.`);
+      });
+      if (saved) {
+        const res = saved as AcashBooth;
+        setFeedbackMsg(`Added ${res.name} (${res.boothId}) to the Booth Map & Firestore.`);
+      }
       setBoothNameInput('');
       setBoothAddressInput('');
       setBoothPhoneInput('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not save booth.');
     } finally {
       setSavingBooth(false);
@@ -1750,14 +1988,23 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setRefreshBusy(true);
     setFeedbackMsg('');
     try {
-      await mainAdminRefreshTreasuryBalance({
-        newBalance: nextBal,
-        reason: refreshReasonVal,
-        actorEmail: adminSession.adminEmail,
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'ট্রেজারি ব্যালেন্স আপডেট অনুমোদন' : 'Authorize Treasury Balance Refresh',
+        subtitle: `Set ADMIN-TREASURY to ${formatBdt(nextBal, lang)}`,
+        actionName: 'refresh_treasury_balance',
+        run: async (auth) => {
+          await mainAdminRefreshTreasuryBalance({
+            newBalance: nextBal,
+            reason: refreshReasonVal,
+            actorEmail: adminSession.adminEmail,
+            auth,
+          });
+        },
       });
       setFeedbackMsg(`Successfully refreshed ADMIN-TREASURY balance to ${formatBdt(nextBal, lang)}.`);
       setRefreshBalanceVal('');
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not refresh treasury balance.');
     } finally {
       setRefreshBusy(false);
@@ -1778,12 +2025,22 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setBulkBusy(true);
         setFeedbackMsg('');
         try {
-          const frozen = await adminFreezeAllUsers({
-            adminEmail: adminSession.adminEmail,
-            reason: 'Admin emergency freeze of all system accounts',
+          let frozen: AcashUser[] = [];
+          await requestAdminAuth({
+            title: lang === 'bn' ? 'সব অ্যাকাউন্ট ফ্রিজ অনুমোদন' : 'Authorize Emergency Freeze All',
+            subtitle: 'Freeze every active Customer, Agent & Merchant account',
+            actionName: 'freeze_all_users',
+            run: async (auth) => {
+              frozen = await adminFreezeAllUsers({
+                adminEmail: adminSession.adminEmail,
+                reason: 'Admin emergency freeze of all system accounts',
+                auth,
+              });
+            },
           });
           setFeedbackMsg(`Successfully froze ${frozen.length} active account(s).`);
         } catch (err) {
+          if (err instanceof Error && err.message === 'Verification cancelled.') return;
           setFeedbackMsg(err instanceof Error ? err.message : 'Could not freeze accounts.');
         } finally {
           setBulkBusy(false);
@@ -1809,14 +2066,24 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setBulkBusy(true);
         setFeedbackMsg('');
         try {
-          const deleted = await adminBulkDeleteUsers({
-            accountIds: selectedUserIds,
-            adminEmail: adminSession.adminEmail,
-            reason: 'Admin bulk delete selected accounts',
+          let deleted: string[] = [];
+          await requestAdminAuth({
+            title: lang === 'bn' ? 'নির্বাচিত অ্যাকাউন্ট ডিলিট অনুমোদন' : 'Authorize Bulk Delete Accounts',
+            subtitle: `${selectedUserIds.length} selected account(s)`,
+            actionName: 'bulk_delete_users',
+            run: async (auth) => {
+              deleted = await adminBulkDeleteUsers({
+                accountIds: selectedUserIds,
+                adminEmail: adminSession.adminEmail,
+                reason: 'Admin bulk delete selected accounts',
+                auth,
+              });
+            },
           });
           setFeedbackMsg(`Permanently deleted ${deleted.length} account(s) and released identity locks.`);
           setSelectedUserIds([]);
         } catch (err) {
+          if (err instanceof Error && err.message === 'Verification cancelled.') return;
           setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete accounts.');
         } finally {
           setBulkBusy(false);
@@ -1840,14 +2107,24 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setFeedbackMsg('');
         try {
           const allIds = users.map((u) => u.accountId);
-          const deleted = await adminBulkDeleteUsers({
-            accountIds: allIds,
-            adminEmail: adminSession.adminEmail,
-            reason: 'Admin bulk delete all system accounts',
+          let deleted: string[] = [];
+          await requestAdminAuth({
+            title: lang === 'bn' ? 'সব অ্যাকাউন্ট ডিলিট অনুমোদন' : 'Authorize Delete ALL Accounts',
+            subtitle: `${allIds.length} platform account(s)`,
+            actionName: 'delete_all_users',
+            run: async (auth) => {
+              deleted = await adminBulkDeleteUsers({
+                accountIds: allIds,
+                adminEmail: adminSession.adminEmail,
+                reason: 'Admin bulk delete all system accounts',
+                auth,
+              });
+            },
           });
           setFeedbackMsg(`Permanently deleted all ${deleted.length} system accounts.`);
           setSelectedUserIds([]);
         } catch (err) {
+          if (err instanceof Error && err.message === 'Verification cancelled.') return;
           setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete all accounts.');
         } finally {
           setBulkBusy(false);
@@ -1870,9 +2147,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setBulkBusy(true);
         setFeedbackMsg('');
         try {
-          await adminResetAllAccountsAndTransactions({
-            adminEmail: adminSession.adminEmail,
-            reason: 'System factory reset by Main Admin',
+          await requestAdminAuth({
+            title: lang === 'bn' ? 'সিস্টেম ফ্যাক্টরি রিসেট অনুমোদন' : 'Authorize System Factory Reset',
+            subtitle: 'Permanently wipe accounts, ledger, KYC & reset Treasury Vault',
+            actionName: 'factory_reset_system',
+            run: async (auth) => {
+              await adminResetAllAccountsAndTransactions({
+                adminEmail: adminSession.adminEmail,
+                reason: 'System factory reset by Main Admin',
+                auth,
+              });
+            },
           });
           setFeedbackMsg(
             'System factory reset completed successfully! All accounts, transactions & history wiped clean.'
@@ -1880,6 +2165,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           setSelectedUserIds([]);
           setViewedAccountId(null);
         } catch (err) {
+          if (err instanceof Error && err.message === 'Verification cancelled.') return;
           setFeedbackMsg(err instanceof Error ? err.message : 'Factory reset failed.');
         } finally {
           setBulkBusy(false);
@@ -1905,10 +2191,18 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setActionBusyId(accountId);
         setFeedbackMsg('');
         try {
-          await adminDeleteUser(accountId, adminSession.adminEmail, 'Admin deleted account');
+          await requestAdminAuth({
+            title: lang === 'bn' ? 'অ্যাকাউন্ট ডিলিট অনুমোদন' : 'Authorize Delete Account',
+            subtitle: `Account ${accountId}`,
+            actionName: 'delete_single_user',
+            run: async (auth) => {
+              await adminDeleteUser(accountId, adminSession.adminEmail, 'Admin deleted account', auth);
+            },
+          });
           setFeedbackMsg(`Successfully deleted account ${accountId}.`);
           if (viewedAccountId === accountId) setViewedAccountId(null);
         } catch (err) {
+          if (err instanceof Error && err.message === 'Verification cancelled.') return;
           setFeedbackMsg(err instanceof Error ? err.message : 'Could not delete account.');
         } finally {
           setActionBusyId(null);
@@ -1923,22 +2217,35 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     setBroadcastBusy(true);
     setFeedbackMsg('');
     try {
-      const sent = await adminSendAccountNotification({
-        recipientIdentifier: broadcastTarget,
-        title: broadcastTitle,
-        message: broadcastMessage,
-        severity: broadcastSeverity,
-        adminEmail: adminSession.adminEmail,
+      let sentRecipientId = broadcastTarget;
+      let sentTitle = broadcastTitle;
+      await requestAdminAuth({
+        title: lang === 'bn' ? 'লাইভ ব্রডকাস্ট অ্যালার্ট অনুমোদন' : 'Authorize Live Account Notification',
+        subtitle: `Target: ${broadcastTarget} · "${broadcastTitle.trim()}"`,
+        actionName: 'send_broadcast_alert',
+        run: async (auth) => {
+          const sent = await adminSendAccountNotification({
+            recipientIdentifier: broadcastTarget,
+            title: broadcastTitle,
+            message: broadcastMessage,
+            severity: broadcastSeverity,
+            adminEmail: adminSession.adminEmail,
+            auth,
+          });
+          sentRecipientId = sent.recipientId;
+          sentTitle = sent.title;
+        },
       });
       setFeedbackMsg(
-        sent.recipientId === 'ALL'
-          ? `Live broadcast popup pushed to ALL Accounts ("${sent.title}").`
-          : `Live popup alert pushed directly to ${sent.recipientId} ("${sent.title}").`
+        sentRecipientId === 'ALL'
+          ? `Live broadcast popup pushed to ALL Accounts ("${sentTitle}").`
+          : `Live popup alert pushed directly to ${sentRecipientId} ("${sentTitle}").`
       );
       setBroadcastTitle('');
       setBroadcastMessage('');
       setBroadcastModalOpen(false);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Verification cancelled.') return;
       setFeedbackMsg(err instanceof Error ? err.message : 'Could not send account alert.');
     } finally {
       setBroadcastBusy(false);
@@ -2708,9 +3015,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       e.preventDefault();
                       setSavingAlertEmail(true);
                       try {
-                        await setAdminAlertEmail(alertEmailInput);
+                        await requestAdminAuth({
+                          title: lang === 'bn' ? 'অ্যালার্ট ইমেইল পরিবর্তন অনুমোদন' : 'Authorize Alert Email Update',
+                          subtitle: alertEmailInput.trim().toLowerCase(),
+                          actionName: 'set_admin_alert_email',
+                          run: async (auth) => {
+                            await setAdminAlertEmail(alertEmailInput, adminSession.adminEmail, auth);
+                          },
+                        });
                         setFeedbackMsg(`Admin alert email updated to ${alertEmailInput.trim().toLowerCase()}.`);
                       } catch (err) {
+                        if (err instanceof Error && err.message === 'Verification cancelled.') return;
                         setFeedbackMsg(err instanceof Error ? err.message : 'Invalid email.');
                       } finally {
                         setSavingAlertEmail(false);
@@ -4548,6 +4863,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               users={users}
               adminEmail={adminSession.adminEmail}
               lang={lang}
+              requestAdminAuth={requestAdminAuth}
               onInspectAccount={(accId) => setViewedAccountId(accId)}
               onFeedback={(msg) => setFeedbackMsg(msg)}
             />
@@ -4562,6 +4878,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               customGiftCards={customGiftCards}
               giftCardPolicy={giftCardPolicy}
               portalTheme={portalTheme}
+              requestAdminAuth={requestAdminAuth}
               onInspectAccount={(accId) => setViewedAccountId(accId)}
               onFeedback={(msg) => setFeedbackMsg(msg)}
             />
@@ -4574,6 +4891,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               adminEmail={adminSession.adminEmail}
               securityEvents={securityEvents}
               securityPolicy={securityPolicy}
+              adminSecurityInfo={adminSecurityInfo}
+              requestAdminAuth={requestAdminAuth}
               onFeedback={(msg) => setFeedbackMsg(msg)}
             />
           )}
@@ -6664,9 +6983,21 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                             <button
                               key={st}
                               type="button"
-                              onClick={() =>
-                                adminToggleBoothStatus(b.boothId, st, adminSession.adminEmail)
-                              }
+                              onClick={async () => {
+                                try {
+                                  await requestAdminAuth({
+                                    title: lang === 'bn' ? 'বুথ স্ট্যাটাস পরিবর্তন অনুমোদন' : 'Authorize Booth Status Change',
+                                    subtitle: `${b.name} → ${st.toUpperCase()}`,
+                                    actionName: 'toggle_booth_status',
+                                    run: async (auth) => {
+                                      await adminToggleBoothStatus(b.boothId, st, adminSession.adminEmail, auth);
+                                    },
+                                  });
+                                } catch (err) {
+                                  if (err instanceof Error && err.message === 'Verification cancelled.') return;
+                                  setFeedbackMsg(err instanceof Error ? err.message : 'Failed to update booth status.');
+                                }
+                              }}
                               className={`px-2 py-1 rounded-lg text-[10px] font-semibold uppercase border transition-colors ${
                                 b.status === st
                                   ? st === 'open'
@@ -6682,7 +7013,21 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           ))}
                           <button
                             type="button"
-                            onClick={() => adminDeleteBooth(b.boothId, adminSession.adminEmail)}
+                            onClick={async () => {
+                              try {
+                                await requestAdminAuth({
+                                  title: lang === 'bn' ? 'বুথ ডিলিট অনুমোদন' : 'Authorize Delete Booth',
+                                  subtitle: `${b.name} (${b.boothId})`,
+                                  actionName: 'delete_booth',
+                                  run: async (auth) => {
+                                    await adminDeleteBooth(b.boothId, adminSession.adminEmail, auth);
+                                  },
+                                });
+                              } catch (err) {
+                                if (err instanceof Error && err.message === 'Verification cancelled.') return;
+                                setFeedbackMsg(err instanceof Error ? err.message : 'Failed to delete booth.');
+                              }
+                            }}
                             className="p-1.5 rounded-lg bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 text-rose-600 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-500/25 transition-colors"
                             title="Delete Booth"
                           >
@@ -7113,6 +7458,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           lang={lang}
           adminEmail={adminSession.adminEmail}
           actionBusy={actionBusyId === viewedAccount.accountId}
+          requestAdminAuth={requestAdminAuth}
           onClose={() => setViewedAccountId(null)}
           onCreditAccount={(accId) => {
             setCreditTarget(accId);
@@ -7332,6 +7678,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           setSection('ledger');
         }}
       />
+
+      {authModalElement}
     </div>
   );
 };

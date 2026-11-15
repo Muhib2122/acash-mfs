@@ -19,15 +19,17 @@ import {
   Search,
   MapPin,
   Bell,
+  Fingerprint,
+  Loader2,
 } from 'lucide-react';
 import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
 import {
+  authorizeMerchantOwnerUnlock,
   calculateFeeBreakdown,
   executeFinancialTransaction,
   executeMerchantRefund,
   UserComplianceState,
-  verifyMerchantOwnerPin,
 } from '../../lib/acashService';
 import {
   downloadAccountStatementPdf,
@@ -36,6 +38,7 @@ import {
 import { playMerchantSoundbox, playTransactionVoiceAlert } from '../../lib/soundbox';
 import { triggerHapticGesture } from '../../lib/deviceAlerts';
 import {
+  authorizeSensitiveActionWithBiometrics,
   authorizeTransactionWithBiometrics,
   detectWebAuthnCapability,
   WebAuthnCapability,
@@ -92,8 +95,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [unlockModalOpen, setUnlockModalOpen] = useState(false);
   const [unlockPin, setUnlockPin] = useState('');
   const [unlockError, setUnlockError] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
   const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
-  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'tap_hold'>('tap_hold');
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
 
   // Dynamic QR & Payment Link
   const [checkoutAmount, setCheckoutAmount] = useState('1250');
@@ -313,9 +317,13 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const handleUnlockOwner = async (e: React.FormEvent) => {
     e.preventDefault();
     setUnlockError('');
+    setUnlockBusy(true);
     try {
-      const ok = await verifyMerchantOwnerPin(user.accountId, unlockPin);
-      if (!ok) {
+      const res = await authorizeMerchantOwnerUnlock({
+        accountId: user.accountId,
+        auth: { pin: unlockPin },
+      });
+      if (!res.authorized) {
         setUnlockError(lang === 'bn' ? 'ভুল ওনার পিন!' : 'Invalid Owner PIN.');
         return;
       }
@@ -331,16 +339,48 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             ? 'ওনার পিন যাচাই করা যায়নি।'
             : 'Unable to verify Owner PIN.'
       );
+    } finally {
+      setUnlockBusy(false);
     }
   };
 
-  const handleRefundConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
+  const handleUnlockOwnerBiometric = async () => {
+    setUnlockError('');
+    setUnlockBusy(true);
+    try {
+      const biometricProof = await authorizeSensitiveActionWithBiometrics({
+        subjectId: user.accountId,
+        actionName: 'merchant_owner_unlock',
+        credentials: enrolledBiometrics,
+      });
+      await authorizeMerchantOwnerUnlock({
+        accountId: user.accountId,
+        auth: { biometricProof },
+      });
+      setCashierMode(false);
+      setUnlockModalOpen(false);
+      setUnlockPin('');
+      setUnlockError('');
+    } catch (err) {
+      setUnlockError(
+        err instanceof Error
+          ? err.message
+          : lang === 'bn'
+            ? 'বায়োমেট্রিক যাচাই ব্যর্থ হয়েছে।'
+            : 'Owner biometric verification failed.'
+      );
+    } finally {
+      setUnlockBusy(false);
+    }
+  };
+
+  const handleRefundConfirm = async (mode: 'biometric' | 'pin', secretOrPin?: string) => {
     setRefundError('');
     setRefundSubmitting(true);
     try {
       const amt = Number(refundAmount);
       const biometricProof =
-        useBiometric && biometricsReady
+        mode === 'biometric' && biometricsReady
           ? await authorizeTransactionWithBiometrics({
               accountId: user.accountId,
               txType: 'refund',
@@ -349,13 +389,16 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               credentials: enrolledBiometrics,
             })
           : undefined;
+      if (mode === 'pin' && (!secretOrPin || !/^\d{4,5}$/.test(secretOrPin.trim()))) {
+        throw new Error('Enter a valid 4 or 5-digit Security PIN.');
+      }
       const res = await executeMerchantRefund({
         merchantId: user.accountId,
         txHashInput: refundHash,
         refundAmount: amt,
         ...(biometricProof
-          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-          : { authorizeViaSession: true }),
+          ? { biometricProof, ...(secretOrPin ? { pin: secretOrPin.trim() } : {}) }
+          : { pin: secretOrPin!.trim() }),
       });
       triggerHapticGesture('success');
       setRefundResult(res);
@@ -368,13 +411,13 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
     }
   };
 
-  const handleB2bConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
+  const handleB2bConfirm = async (mode: 'biometric' | 'pin', secretOrPin?: string) => {
     setB2bError('');
     setB2bSubmitting(true);
     try {
       const amt = Number(b2bAmount);
       const biometricProof =
-        useBiometric && biometricsReady
+        mode === 'biometric' && biometricsReady
           ? await authorizeTransactionWithBiometrics({
               accountId: user.accountId,
               txType: 'b2b_transfer',
@@ -383,14 +426,17 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               credentials: enrolledBiometrics,
             })
           : undefined;
+      if (mode === 'pin' && (!secretOrPin || !/^\d{4,5}$/.test(secretOrPin.trim()))) {
+        throw new Error('Enter a valid 4 or 5-digit Security PIN.');
+      }
       const res = await executeFinancialTransaction({
         type: 'b2b_transfer',
         senderId: user.accountId,
         receiverIdentifier: b2bTarget,
         amount: amt,
         ...(biometricProof
-          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-          : { authorizeViaSession: true }),
+          ? { biometricProof, ...(secretOrPin ? { pin: secretOrPin.trim() } : {}) }
+          : { pin: secretOrPin!.trim() }),
         feeConfig,
         note: b2bNote || 'B2B Supplier Settlement',
       });
@@ -406,13 +452,13 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
     }
   };
 
-  const handleMerchantCashOutConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
+  const handleMerchantCashOutConfirm = async (mode: 'biometric' | 'pin', secretOrPin?: string) => {
     setCashOutError('');
     setCashOutSubmitting(true);
     try {
       const target = cashOutMode === 'admin' ? 'ADMIN-TREASURY' : cashOutAgentId;
       const biometricProof =
-        useBiometric && biometricsReady
+        mode === 'biometric' && biometricsReady
           ? await authorizeTransactionWithBiometrics({
               accountId: user.accountId,
               txType: 'merchant_cash_out',
@@ -421,14 +467,17 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               credentials: enrolledBiometrics,
             })
           : undefined;
+      if (mode === 'pin' && (!secretOrPin || !/^\d{4,5}$/.test(secretOrPin.trim()))) {
+        throw new Error('Enter a valid 4 or 5-digit Security PIN.');
+      }
       const res = await executeFinancialTransaction({
         type: 'merchant_cash_out',
         senderId: user.accountId,
         receiverIdentifier: target,
         amount: numericCashOutAmt,
         ...(biometricProof
-          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
-          : { authorizeViaSession: true }),
+          ? { biometricProof, ...(secretOrPin ? { pin: secretOrPin.trim() } : {}) }
+          : { pin: secretOrPin!.trim() }),
         feeConfig,
         note:
           cashOutNote ||
@@ -931,7 +980,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     );
                     return;
                   }
-                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
+                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
                   setCashOutStep('confirm');
                 }}
                 className="space-y-4"
@@ -1063,10 +1112,10 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   submitting={cashOutSubmitting}
                   error={cashOutError}
                   onClearError={() => setCashOutError('')}
-                  onConfirmBiometric={(pin) => handleMerchantCashOutConfirm(true, pin)}
-                  onConfirmTapHold={() => handleMerchantCashOutConfirm(false)}
+                  onConfirmBiometric={(pin) => handleMerchantCashOutConfirm('biometric', pin)}
+                  onConfirmPin={(pin) => handleMerchantCashOutConfirm('pin', pin)}
                   onOpenBiometricSettings={onOpenBiometricSettings}
-                  tapHoldButtonLabel={`Cash-Out ${formatBdt(totalCashOutDebit, lang)}`}
+                  pinButtonLabel={`Cash-Out ${formatBdt(totalCashOutDebit, lang)}`}
                 />
 
                 <button
@@ -1170,7 +1219,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     setRefundError('Enter a valid refund amount.');
                     return;
                   }
-                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
+                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
                   setRefundStep('confirm');
                 }}
                 className="space-y-4"
@@ -1307,10 +1356,10 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   submitting={refundSubmitting}
                   error={refundError}
                   onClearError={() => setRefundError('')}
-                  onConfirmBiometric={(pin) => handleRefundConfirm(true, pin)}
-                  onConfirmTapHold={() => handleRefundConfirm(false)}
+                  onConfirmBiometric={(pin) => handleRefundConfirm('biometric', pin)}
+                  onConfirmPin={(pin) => handleRefundConfirm('pin', pin)}
                   onOpenBiometricSettings={onOpenBiometricSettings}
-                  tapHoldButtonLabel={`Refund ${formatBdt(Number(refundAmount) || 0, lang)}`}
+                  pinButtonLabel={`Refund ${formatBdt(Number(refundAmount) || 0, lang)}`}
                 />
 
                 <button
@@ -1397,7 +1446,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   setB2bError('Enter supplier Merchant ID and amount.');
                   return;
                 }
-                setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
+                setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
                 setB2bStep('confirm');
               }}
               className="space-y-4"
@@ -1485,10 +1534,10 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   submitting={b2bSubmitting}
                   error={b2bError}
                   onClearError={() => setB2bError('')}
-                  onConfirmBiometric={(pin) => handleB2bConfirm(true, pin)}
-                  onConfirmTapHold={() => handleB2bConfirm(false)}
+                  onConfirmBiometric={(pin) => handleB2bConfirm('biometric', pin)}
+                  onConfirmPin={(pin) => handleB2bConfirm('pin', pin)}
                   onOpenBiometricSettings={onOpenBiometricSettings}
-                  tapHoldButtonLabel={`B2B Transfer ${formatBdt(Number(b2bAmount) || 0, lang)}`}
+                  pinButtonLabel={`B2B Transfer ${formatBdt(Number(b2bAmount) || 0, lang)}`}
                 />
 
                 <button
@@ -1687,8 +1736,32 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               Unlock Merchant Owner Mode
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Enter your Merchant Owner Passcode to exit Cashier Staff View.
+              {biometricsReady
+                ? 'Verify with Owner Biometrics or enter your Merchant Owner Security PIN to exit Cashier Staff View.'
+                : 'Enter your Merchant Owner Security PIN to exit Cashier Staff View.'}
             </p>
+            {biometricsReady && (
+              <>
+                <button
+                  type="button"
+                  disabled={unlockBusy}
+                  onClick={handleUnlockOwnerBiometric}
+                  className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer"
+                >
+                  {unlockBusy ? (
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                  ) : (
+                    <Fingerprint className="w-4 h-4 shrink-0" />
+                  )}
+                  <span>Unlock with Owner Biometrics</span>
+                </button>
+                <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                  <span className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+                  <span>OR</span>
+                  <span className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+                </div>
+              </>
+            )}
             <input
               type="password"
               required
@@ -1696,7 +1769,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               inputMode="numeric"
               value={unlockPin}
               onChange={(e) => setUnlockPin(e.target.value.replace(/\D/g, ''))}
-              placeholder="Owner Passcode"
+              placeholder="Owner Security PIN"
               className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 tracking-widest focus:outline-none focus:border-indigo-500"
             />
             {unlockError && (
@@ -1705,20 +1778,22 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <div className="flex gap-2">
               <button
                 type="button"
+                disabled={unlockBusy}
                 onClick={() => {
                   setUnlockModalOpen(false);
                   setUnlockPin('');
                   setUnlockError('');
                 }}
-                className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
+                disabled={unlockBusy || unlockPin.length < 4}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white disabled:opacity-50 cursor-pointer"
               >
-                Unlock
+                {unlockBusy ? 'Verifying...' : 'Unlock'}
               </button>
             </div>
           </form>
