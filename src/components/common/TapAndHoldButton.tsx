@@ -103,7 +103,7 @@ export const TapAndHoldButton: React.FC<TapAndHoldButtonProps> = ({
             cancelHold();
           }
         }}
-        className={`relative w-full h-16 rounded-2xl overflow-hidden border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+        className={`relative w-full min-h-[60px] py-2.5 rounded-2xl overflow-hidden border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
           disabled
             ? 'bg-slate-200 dark:bg-slate-800/70 border-slate-300 dark:border-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed'
             : isHolding
@@ -117,10 +117,10 @@ export const TapAndHoldButton: React.FC<TapAndHoldButtonProps> = ({
           style={{ width: `${progress}%`, opacity: 0.94 }}
         />
 
-        <div className="relative z-10 flex items-center justify-between px-5 h-full">
-          <div className="flex items-center gap-3.5">
-            <div className="relative w-11 h-11 flex items-center justify-center shrink-0">
-              <svg className="w-11 h-11 -rotate-90" viewBox="0 0 48 48">
+        <div className="relative z-10 flex items-center justify-between gap-3 px-4">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <div className="relative w-10 h-10 flex items-center justify-center shrink-0">
+              <svg className="w-10 h-10 -rotate-90" viewBox="0 0 48 48">
                 <circle
                   cx="24"
                   cy="24"
@@ -152,8 +152,8 @@ export const TapAndHoldButton: React.FC<TapAndHoldButtonProps> = ({
               </span>
             </div>
 
-            <div className="text-left">
-              <div className={`text-sm font-semibold tracking-tight ${disabled ? 'text-slate-500 dark:text-slate-400' : 'text-white'}`}>
+            <div className="text-left min-w-0 flex-1">
+              <div className={`text-sm font-semibold tracking-tight leading-snug ${disabled ? 'text-slate-500 dark:text-slate-400' : 'text-white'}`}>
                 {loading
                   ? lang === 'bn'
                     ? 'প্রক্রিয়াকরণ হচ্ছে...'
@@ -162,10 +162,10 @@ export const TapAndHoldButton: React.FC<TapAndHoldButtonProps> = ({
                     ? t('holdingProgress', lang)
                     : t('tapAndHold', lang)}
               </div>
-              <div className={`text-[11px] ${disabled ? 'text-slate-400 dark:text-slate-500' : 'text-indigo-200/85'}`}>
+              <div className={`text-[11px] leading-snug break-words ${disabled ? 'text-slate-400 dark:text-slate-500' : 'text-indigo-200/85'}`}>
                 {isHolding
                   ? `${Math.round(progress)}% · ${t('releaseCancel', lang)}`
-                  : amountLabel || (lang === 'bn' ? 'নিরাপদ বায়োমেট্রিক নিশ্চিতকরণ' : 'Hold 1.4s to authorize transaction')}
+                  : amountLabel || (lang === 'bn' ? '১.৪ সেকেন্ড ধরে রেখে নিশ্চিত করুন' : 'Hold 1.4s to authorize transaction')}
               </div>
             </div>
           </div>

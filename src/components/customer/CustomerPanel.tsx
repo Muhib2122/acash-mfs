@@ -8,21 +8,17 @@ import {
   QrCode,
   ScanLine,
   FileText,
-  Eye,
-  EyeOff,
   Search,
-  Lock,
   AlertTriangle,
   CheckCircle2,
-  ArrowDownLeft,
   MapPin,
   Volume2,
   VolumeX,
   Bell,
   Gift,
   Fingerprint,
-  KeyRound,
-  Loader2,
+  ArrowLeft,
+  History,
 } from 'lucide-react';
 import {
   AcashTransaction,
@@ -36,7 +32,11 @@ import {
   OperatorId,
 } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
-import { calculateFeeBreakdown, executeFinancialTransaction } from '../../lib/acashService';
+import {
+  calculateFeeBreakdown,
+  executeFinancialTransaction,
+  UserComplianceState,
+} from '../../lib/acashService';
 import { formatGiftSignature, getGiftCardTemplate } from '../../lib/giftCards';
 import { usePortalTheme } from '../../lib/portalThemes';
 import { downloadAccountStatementPdf } from '../../lib/pdfGenerator';
@@ -47,11 +47,13 @@ import {
   detectWebAuthnCapability,
   WebAuthnCapability,
 } from '../../lib/webauthn';
-import { TapAndHoldButton } from '../common/TapAndHoldButton';
+import { BiometricConfirmBox } from '../common/BiometricConfirmBox';
 import { OperatorLogo, OPERATORS, detectOperatorFromPhone } from '../common/OperatorLogo';
 import { QrModal } from '../common/QrModal';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { Wallet3DCard } from '../common/Wallet3DCard';
+import { ComplianceAlertBanner } from '../common/ComplianceAlertBanner';
+import { TransactionRowItem } from '../common/TransactionRowItem';
 import {
   GiftCardDraftState,
   GiftCardFlightOverlay,
@@ -71,11 +73,18 @@ interface CustomerPanelProps {
   onOpenBiometricSettings?: () => void;
   unreadNotifications?: number;
   externalQrSignal?: number;
+  homeNavSignal?: number;
   customGiftCards?: CustomGiftCardRecord[];
   giftCardPolicy?: GiftCardCatalogPolicy;
+  compliance?: UserComplianceState;
+  complianceBannerDismissed?: boolean;
+  onDismissComplianceBanner?: () => void;
+  onOpenKyc?: () => void;
+  onOpen2fa?: () => void;
 }
 
 type ServiceTab = 'send_money' | 'cash_out' | 'mobile_recharge' | 'bill_pay' | 'merchant_payment';
+type CustomerViewMode = 'home' | 'service' | 'history';
 
 const BILLERS: Array<{ id: BillerId; name: string; category: string }> = [
   { id: 'desco', name: 'DESCO (Dhaka Electric)', category: 'Electricity' },
@@ -98,11 +107,18 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   onOpenBiometricSettings,
   unreadNotifications = 0,
   externalQrSignal = 0,
+  homeNavSignal = 0,
   customGiftCards,
   giftCardPolicy,
+  compliance,
+  complianceBannerDismissed = false,
+  onDismissComplianceBanner,
+  onOpenKyc,
+  onOpen2fa,
 }) => {
   const { preset } = usePortalTheme();
   const [showBalance, setShowBalance] = useState(false);
+  const [viewMode, setViewMode] = useState<CustomerViewMode>('home');
   const [activeService, setActiveService] = useState<ServiceTab>('send_money');
   const [step, setStep] = useState<'form' | 'confirm' | 'done'>('form');
 
@@ -110,7 +126,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
-  const [pin, setPin] = useState('');
 
   // Recharge inputs
   const [rechargePhone, setRechargePhone] = useState('');
@@ -128,7 +143,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [error, setError] = useState('');
   const [completedTx, setCompletedTx] = useState<AcashTransaction | null>(null);
   const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
-  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'tap_hold'>('tap_hold');
 
   // Modals & Ledger filters
   const [qrMode, setQrMode] = useState<'show' | 'scan' | null>(null);
@@ -168,6 +183,13 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   useEffect(() => {
     seenTxIdsRef.current = null;
   }, [user.accountId]);
+
+  useEffect(() => {
+    if (homeNavSignal > 0) {
+      setViewMode('home');
+      setError('');
+    }
+  }, [homeNavSignal]);
 
   useEffect(() => {
     if (seenTxIdsRef.current === null) {
@@ -226,6 +248,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       if (initialPaymentIntent.amount) setAmount(String(initialPaymentIntent.amount));
       if (initialPaymentIntent.note) setNote(initialPaymentIntent.note);
       setStep('form');
+      setViewMode('service');
       if (onClearPaymentIntent) onClearPaymentIntent();
     }
   }, [initialPaymentIntent, onClearPaymentIntent]);
@@ -256,18 +279,33 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const isHighValue = numericAmount >= feeConfig.highValueThreshold;
   const isDisabledAccount = user.status !== 'active';
 
-  const resetForm = () => {
+  const resetForm = (preserveGift = false) => {
     setStep('form');
-    setPin('');
     setError('');
     setCompletedTx(null);
-    setGiftDraft((prev) => ({
-      ...prev,
-      enabled: false,
-      customMessage: '',
-      signaturePrefix: lang === 'bn' ? 'bn' : 'en',
-      senderDisplayName: user.name,
-    }));
+    if (!preserveGift) {
+      setGiftDraft((prev) => ({
+        ...prev,
+        enabled: false,
+        customMessage: '',
+        signaturePrefix: lang === 'bn' ? 'bn' : 'en',
+        senderDisplayName: user.name,
+      }));
+    }
+  };
+
+  const openServiceView = (service: ServiceTab, enableGiftCard = false) => {
+    setActiveService(service);
+    resetForm(enableGiftCard);
+    if (enableGiftCard) {
+      setGiftDraft((prev) => ({
+        ...prev,
+        enabled: true,
+        signaturePrefix: lang === 'bn' ? 'bn' : 'en',
+        senderDisplayName: prev.senderDisplayName || user.name,
+      }));
+    }
+    setViewMode('service');
   };
 
   const handleProceedToConfirm = (e: React.FormEvent) => {
@@ -308,8 +346,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       }
     }
 
-    setPin('');
-    setConfirmAuthMode(biometricsReady ? 'biometric' : 'pin');
+    setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
     setStep('confirm');
   };
 
@@ -337,14 +374,10 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     };
   };
 
-  const handleBiometricConfirmTransaction = async () => {
+  const handleBiometricConfirmTransaction = async (optionalAugmentPin?: string) => {
     setError('');
     if (!biometricsReady) {
-      setError(
-        lang === 'bn'
-          ? 'বায়োমেট্রিক পাসকি সক্রিয় নয়। পিন ব্যবহার করুন।'
-          : 'Biometric passkey is not ready on this device. Please use Security PIN.'
-      );
+      setConfirmAuthMode('tap_hold');
       return;
     }
 
@@ -371,6 +404,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         receiverIdentifier: recipient,
         amount: numericAmount,
         biometricProof,
+        ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}),
         feeConfig,
         operator: activeService === 'mobile_recharge' ? selectedOperator : undefined,
         rechargeNumber: activeService === 'mobile_recharge' ? rechargePhone : undefined,
@@ -387,7 +421,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       setStep('done');
       setAmount('');
       setNote('');
-      setPin('');
       if (tx.giftCard) {
         setFlightTx(tx);
       }
@@ -401,11 +434,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
 
   const handleTapAndHoldConfirmed = async () => {
     setError('');
-    if (!/^\d{4,5}$/.test(pin)) {
-      setError(lang === 'bn' ? 'সঠিক ৪-সংখ্যার পিন দিন।' : 'Enter your 4 or 5-digit Security PIN first.');
-      return;
-    }
-
     setSubmitting(true);
     try {
       const tx = await executeFinancialTransaction({
@@ -413,7 +441,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         senderId: user.accountId,
         receiverIdentifier: recipient,
         amount: numericAmount,
-        pin,
+        authorizeViaSession: true,
         feeConfig,
         operator: activeService === 'mobile_recharge' ? selectedOperator : undefined,
         rechargeNumber: activeService === 'mobile_recharge' ? rechargePhone : undefined,
@@ -430,7 +458,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       setStep('done');
       setAmount('');
       setNote('');
-      setPin('');
       if (tx.giftCard) {
         setFlightTx(tx);
       }
@@ -460,6 +487,11 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     };
   }, [transactions, user.accountId]);
 
+  const recentThreeTransactions = useMemo(
+    () => transactions.slice(0, 3),
+    [transactions]
+  );
+
   const filteredTransactions = useMemo(() => {
     const q = searchTx.trim().toLowerCase();
     if (!q) return transactions;
@@ -473,20 +505,57 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     );
   }, [transactions, searchTx]);
 
-  const services: Array<{ id: ServiceTab; label: string; icon: React.ElementType }> = [
-    { id: 'send_money', label: t('sendMoney', lang), icon: Send },
-    { id: 'cash_out', label: t('cashOut', lang), icon: ArrowUpRight },
-    { id: 'mobile_recharge', label: t('mobileRecharge', lang), icon: Smartphone },
-    { id: 'bill_pay', label: t('billPay', lang), icon: Zap },
-    { id: 'merchant_payment', label: t('merchantPay', lang), icon: Store },
+  const services: Array<{ id: ServiceTab; label: string; icon: React.ElementType; colorClass: string }> = [
+    {
+      id: 'send_money',
+      label: t('sendMoney', lang),
+      icon: Send,
+      colorClass: 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400',
+    },
+    {
+      id: 'cash_out',
+      label: t('cashOut', lang),
+      icon: ArrowUpRight,
+      colorClass: 'bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400',
+    },
+    {
+      id: 'mobile_recharge',
+      label: t('mobileRecharge', lang),
+      icon: Smartphone,
+      colorClass: 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400',
+    },
+    {
+      id: 'bill_pay',
+      label: t('billPay', lang),
+      icon: Zap,
+      colorClass: 'bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400',
+    },
+    {
+      id: 'merchant_payment',
+      label: t('merchantPay', lang),
+      icon: Store,
+      colorClass: 'bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400',
+    },
   ];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 pb-24 md:pb-10">
+    <div className="max-w-6xl mx-auto px-3.5 sm:px-6 py-4 sm:py-6 space-y-5 pb-24 md:pb-10">
+      {/* Animated Compliance Alert Bar on Home Open / Login if KYC or 2FA missing */}
+      {compliance && onDismissComplianceBanner && onOpenKyc && onOpen2fa && (
+        <ComplianceAlertBanner
+          compliance={compliance}
+          lang={lang}
+          dismissed={complianceBannerDismissed}
+          onDismiss={onDismissComplianceBanner}
+          onOpenKyc={onOpenKyc}
+          onOpen2fa={onOpen2fa}
+        />
+      )}
+
       {isDisabledAccount && (
         <div className="rounded-2xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/40 px-4 py-3.5 flex items-start gap-3 text-sm text-rose-800 dark:text-rose-200">
           <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-          <div>
+          <div className="min-w-0">
             <div>{t('suspendedBanner', lang)}</div>
             {user.disableReason && (
               <div className="text-xs text-rose-700 dark:text-rose-300 mt-1 font-medium">
@@ -515,193 +584,322 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
           <button
             type="button"
             onClick={() => setVoiceBanner(null)}
-            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#0B0D14] border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-slate-700 dark:text-slate-200 shrink-0"
+            className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0B0D14] border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-slate-700 dark:text-slate-200 shrink-0 cursor-pointer"
           >
             Dismiss
           </button>
         </div>
       )}
 
-      {/* Top 3D Wallet Hero + Action Workbench */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        <div className="lg:col-span-5 flex flex-col gap-3.5">
-          <Wallet3DCard
-            user={user}
-            lang={lang}
-            balanceLabel={t('balance', lang)}
-            showBalance={showBalance}
-            onToggleBalance={() => setShowBalance((prev) => !prev)}
-            accentVariant="customer"
-            topRightActions={
-              <>
-                <button
-                  type="button"
-                  onClick={() => setQrMode('show')}
-                  className="min-h-[38px] px-2.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-                >
-                  <QrCode className="w-3.5 h-3.5" />
-                  <span>{t('myQr', lang)}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setQrMode('scan')}
-                  className="min-h-[38px] px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-sm"
-                >
-                  <ScanLine className="w-3.5 h-3.5" />
-                  <span>{t('scanQr', lang)}</span>
-                </button>
-              </>
-            }
-            footerMeta={
-              <>
-                <span>
-                  {lang === 'bn' ? 'ক্যাশ আউট' : 'Cash Out'}:{' '}
-                  <span className="font-mono-tabular font-semibold text-indigo-200">
-                    ৳{feeConfig.feePer1000}/1k
-                  </span>
-                </span>
-                <span aria-hidden="true" className="text-white/30">·</span>
-                <span>
-                  {lang === 'bn' ? 'সেন্ড মানি' : 'Send Money'}:{' '}
-                  <span className="font-mono-tabular font-semibold text-amber-300">
-                    {feeConfig.sendMoneyChargeMode === 'per_1000'
-                      ? `৳${feeConfig.sendMoneyFeeRate}/1k`
-                      : feeConfig.sendMoneyFeeRate > 0
-                        ? `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`
-                        : 'Free'}
-                  </span>
-                </span>
-              </>
-            }
-            footerActions={
-              <>
-                <button
-                  type="button"
-                  onClick={toggleVoiceMute}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
-                >
-                  {voiceMuted ? (
-                    <VolumeX className="w-3.5 h-3.5 text-rose-300" />
-                  ) : (
-                    <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
-                  )}
-                  <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
-                </button>
-                {onOpenNotifications && (
+      {/* VIEW 1: Clean bKash-Style Home Hub */}
+      {viewMode === 'home' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Left column on desktop: 3D Wallet + Quick Insights */}
+          <div className="lg:col-span-5 space-y-3.5">
+            <Wallet3DCard
+              user={user}
+              lang={lang}
+              balanceLabel={t('balance', lang)}
+              showBalance={showBalance}
+              onToggleBalance={() => setShowBalance((prev) => !prev)}
+              accentVariant="customer"
+              topRightActions={
+                <>
                   <button
                     type="button"
-                    onClick={onOpenNotifications}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 transition-colors whitespace-nowrap"
+                    onClick={() => setQrMode('show')}
+                    className="min-h-[38px] px-2.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
                   >
-                    <Bell className="w-3.5 h-3.5 text-indigo-300" />
-                    <span>{lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Alerts'}</span>
-                    {unreadNotifications > 0 && (
-                      <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
-                        {unreadNotifications}
-                      </span>
-                    )}
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>{t('myQr', lang)}</span>
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setQrMode('scan')}
+                    className="min-h-[38px] px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-sm cursor-pointer"
+                  >
+                    <ScanLine className="w-3.5 h-3.5" />
+                    <span>{t('scanQr', lang)}</span>
+                  </button>
+                </>
+              }
+              footerMeta={
+                <>
+                  <span>
+                    {lang === 'bn' ? 'ক্যাশ আউট' : 'Cash Out'}:{' '}
+                    <span className="font-mono-tabular font-semibold text-indigo-200">
+                      ৳{feeConfig.feePer1000}/1k
+                    </span>
+                  </span>
+                  <span aria-hidden="true" className="text-white/30">·</span>
+                  <span>
+                    {lang === 'bn' ? 'সেন্ড মানি' : 'Send Money'}:{' '}
+                    <span className="font-mono-tabular font-semibold text-amber-300">
+                      {feeConfig.sendMoneyChargeMode === 'per_1000'
+                        ? `৳${feeConfig.sendMoneyFeeRate}/1k`
+                        : feeConfig.sendMoneyFeeRate > 0
+                          ? `৳${feeConfig.sendMoneyFeeRate} (>৳${feeConfig.sendMoneyFreeThreshold})`
+                          : 'Free'}
+                    </span>
+                  </span>
+                </>
+              }
+              footerActions={
+                <>
+                  <button
+                    type="button"
+                    onClick={toggleVoiceMute}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    {voiceMuted ? (
+                      <VolumeX className="w-3.5 h-3.5 text-rose-300" />
+                    ) : (
+                      <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
+                    )}
+                    <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
+                  </button>
+                  {onOpenNotifications && (
+                    <button
+                      type="button"
+                      onClick={onOpenNotifications}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      <Bell className="w-3.5 h-3.5 text-indigo-300" />
+                      <span>{lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}</span>
+                      {unreadNotifications > 0 && (
+                        <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
+                          {unreadNotifications}
+                        </span>
+                      )}
+                    </button>
+                  )}
+                  {onOpenBiometricSettings && (
+                    <button
+                      type="button"
+                      onClick={onOpenBiometricSettings}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                        enrolledBiometrics.length > 0
+                          ? 'bg-emerald-500/20 border-emerald-400/40 hover:bg-emerald-500/30 text-emerald-100'
+                          : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
+                      }`}
+                    >
+                      <Fingerprint
+                        className={`w-3.5 h-3.5 ${
+                          enrolledBiometrics.length > 0 ? 'text-emerald-300' : 'text-indigo-200'
+                        }`}
+                      />
+                      <span>
+                        {enrolledBiometrics.length > 0
+                          ? lang === 'bn'
+                            ? 'বায়োমেট্রিক চালু'
+                            : 'Biometrics On'
+                          : lang === 'bn'
+                            ? 'বায়োমেট্রিক'
+                            : 'Biometrics'}
+                      </span>
+                    </button>
+                  )}
+                </>
+              }
+            />
+
+            {/* Compact 3D Quick Insights */}
+            <div className="grid grid-cols-3 gap-2.5">
+              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                  {lang === 'bn' ? 'মোট গ্রহণ' : 'Incoming'}
+                </div>
+                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 truncate">
+                  {formatBdt(walletInsights.incoming, lang)}
+                </div>
+              </div>
+              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                  {lang === 'bn' ? 'মোট ব্যয়' : 'Outgoing'}
+                </div>
+                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-0.5 truncate">
+                  {formatBdt(walletInsights.outgoing, lang)}
+                </div>
+              </div>
+              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                  {lang === 'bn' ? 'লেনদেন' : 'Total Txs'}
+                </div>
+                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-slate-900 dark:text-white mt-0.5">
+                  {walletInsights.count}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right column on desktop: Clean Services Grid + Minimized Recent Activity */}
+          <div className="lg:col-span-7 space-y-5">
+            {/* Clean Services Hub Card */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <div>
+                  <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                    {lang === 'bn' ? 'আক্যাশ সার্ভিস সমূহ' : 'Acash Services'}
+                  </h2>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {lang === 'bn'
+                      ? 'যেকোনো সেবায় ট্যাপ করে দ্রুত লেনদেন শুরু করুন'
+                      : 'Tap a service to start a focused transaction'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                  className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span className="hidden sm:inline">{t('downloadStatement', lang)}</span>
+                  <span className="sm:hidden">PDF</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5 sm:gap-3">
+                {services.map((srv) => {
+                  const Icon = srv.icon;
+                  return (
+                    <button
+                      key={srv.id}
+                      type="button"
+                      onClick={() => openServiceView(srv.id, false)}
+                      className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-500/60 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
+                    >
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${srv.colorClass}`}>
+                        <Icon className="w-5 h-5" />
+                      </div>
+                      <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
+                        {srv.label}
+                      </span>
+                    </button>
+                  );
+                })}
+
+                <button
+                  type="button"
+                  onClick={() => openServiceView('send_money', true)}
+                  className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-rose-50/70 dark:bg-rose-950/25 border border-rose-200/80 dark:border-rose-900/50 hover:border-rose-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
+                >
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300">
+                    <Gift className="w-5 h-5" />
+                  </div>
+                  <span className="text-[11px] sm:text-xs font-semibold text-rose-900 dark:text-rose-200 leading-tight break-words">
+                    {lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money'}
+                  </span>
+                </button>
+
                 {onOpenBoothMap && (
                   <button
                     type="button"
                     onClick={onOpenBoothMap}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 transition-colors whitespace-nowrap"
+                    className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-emerald-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
                   >
-                    <MapPin className="w-3.5 h-3.5" />
-                    <span>{lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}</span>
-                  </button>
-                )}
-                {onOpenBiometricSettings && (
-                  <button
-                    type="button"
-                    onClick={onOpenBiometricSettings}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap ${
-                      enrolledBiometrics.length > 0
-                        ? 'bg-emerald-500/20 border-emerald-400/40 hover:bg-emerald-500/30 text-emerald-100'
-                        : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
-                    }`}
-                  >
-                    <Fingerprint className={`w-3.5 h-3.5 ${enrolledBiometrics.length > 0 ? 'text-emerald-300' : 'text-indigo-200'}`} />
-                    <span>
-                      {enrolledBiometrics.length > 0
-                        ? lang === 'bn'
-                          ? 'বায়োমেট্রিক চালু'
-                          : 'Biometrics On'
-                        : lang === 'bn'
-                          ? 'বায়োমেট্রিক সেট করুন'
-                          : 'Enable Biometrics'}
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
+                      <MapPin className="w-5 h-5" />
+                    </div>
+                    <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
+                      {lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
                     </span>
                   </button>
                 )}
+
                 <button
                   type="button"
-                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                  onClick={() => setViewMode('history')}
+                  className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-indigo-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
                 >
-                  <FileText className="w-3.5 h-3.5" />
-                  <span>{t('downloadStatement', lang)}</span>
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-violet-50 dark:bg-violet-950/60 text-violet-600 dark:text-violet-400">
+                    <History className="w-5 h-5" />
+                  </div>
+                  <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
+                    {lang === 'bn' ? 'ইতিহাস' : 'History'}
+                  </span>
                 </button>
-              </>
-            }
-          />
+              </div>
+            </div>
 
-          {/* 3D Quick Insights Strip */}
-          <div className="grid grid-cols-3 gap-2.5">
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                {lang === 'bn' ? 'মোট গ্রহণ' : 'Incoming'}
+            {/* Minimized Recent Activity (Latest 3 Transactions Only) */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
+              <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                <h3 className="font-display text-sm sm:text-base font-semibold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'সাম্প্রতিক ৩টি লেনদেন' : 'Recent Activity'}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('history')}
+                  className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline whitespace-nowrap cursor-pointer"
+                >
+                  {lang === 'bn' ? 'সব দেখুন →' : `View All (${transactions.length}) →`}
+                </button>
               </div>
-              <div className="font-mono-tabular text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 truncate">
-                {formatBdt(walletInsights.incoming, lang)}
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                {lang === 'bn' ? 'মোট ব্যয়' : 'Outgoing'}
-              </div>
-              <div className="font-mono-tabular text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-0.5 truncate">
-                {formatBdt(walletInsights.outgoing, lang)}
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                {lang === 'bn' ? 'লেনদেন' : 'Total Txs'}
-              </div>
-              <div className="font-mono-tabular text-sm font-bold text-slate-900 dark:text-white mt-0.5">
-                {walletInsights.count}
-              </div>
+
+              {recentThreeTransactions.length === 0 ? (
+                <div className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                  {t('noTransactions', lang)}
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {recentThreeTransactions.map((tx) => (
+                    <div
+                      key={tx.txId}
+                      onClick={() => setSelectedReceipt(tx)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedReceipt(tx);
+                        }
+                      }}
+                      className="cursor-pointer"
+                    >
+                      <TransactionRowItem
+                        tx={tx}
+                        viewerAccountId={user.accountId}
+                        lang={lang}
+                        onOpenGiftCard={(giftTx) => setViewedGiftTx(giftTx)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
+      )}
 
-        {/* Service Selector + Active Transaction Workbench */}
-        <div className="lg:col-span-7 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-6">
-          <div className="mb-3.5 px-3 py-2 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span>
-              <strong className="text-emerald-600 dark:text-emerald-400">
-                {lang === 'bn' ? 'ক্যাশ-ইন:' : 'Cash-In:'}
-              </strong>{' '}
-              {lang === 'bn' ? 'এজেন্ট ও অ্যাডমিন থেকে' : 'From Agent (A-) & Admin'}
-            </span>
-            <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
-            <span>
-              <strong className="text-indigo-600 dark:text-indigo-400">
-                {lang === 'bn' ? 'ক্যাশ আউট:' : 'Cash Out:'}
-              </strong>{' '}
-              {lang === 'bn' ? 'শুধুমাত্র এজেন্ট (A-)' : 'Agent (A-) Only'}
-            </span>
-            <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
-            <span>
-              <strong className="text-sky-600 dark:text-sky-400">
-                {lang === 'bn' ? 'পেমেন্ট:' : 'Payment:'}
-              </strong>{' '}
-              {lang === 'bn' ? 'শুধুমাত্র মার্চেন্ট (M-)' : 'Merchant (M-) Only'}
-            </span>
+      {/* VIEW 2: Focused Service Screen */}
+      {viewMode === 'service' && (
+        <div className="max-w-2xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-6 space-y-5">
+          {/* Header with Back to Home */}
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setViewMode('home');
+                resetForm();
+              }}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 hover:border-indigo-400 cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
+            </button>
+
+            <div className="text-right min-w-0">
+              <div className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                {services.find((s) => s.id === activeService)?.label}
+              </div>
+              <div className="text-[11px] font-mono-tabular text-indigo-600 dark:text-indigo-400">
+                {lang === 'bn' ? 'ব্যালেন্স:' : 'Bal:'} {formatBdt(user.balance, lang)}
+              </div>
+            </div>
           </div>
 
-          {/* Tactile 3D Service Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-6">
+          {/* Quick Service Switcher */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
             {services.map((srv) => {
               const Icon = srv.icon;
               const active = activeService === srv.id;
@@ -713,22 +911,14 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     setActiveService(srv.id);
                     resetForm();
                   }}
-                  className={`acash-3d-tile min-h-[54px] px-3 py-2.5 rounded-2xl border text-left flex items-center sm:flex-col sm:items-start gap-2.5 sm:gap-2 ${
+                  className={`min-h-[44px] px-2.5 py-2 rounded-xl border text-left flex items-center gap-2 transition-colors cursor-pointer ${
                     active
                       ? preset.activeTabClass
-                      : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-300 dark:hover:border-slate-700'
+                      : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-indigo-300'
                   }`}
                 >
-                  <div
-                    className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                      active
-                        ? 'bg-white/20 text-white'
-                        : preset.accentIconBgClass
-                    }`}
-                  >
-                    <Icon className="w-4 h-4" />
-                  </div>
-                  <span className="text-xs font-semibold truncate w-full">{srv.label}</span>
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="text-[11px] font-semibold truncate">{srv.label}</span>
                 </button>
               );
             })}
@@ -739,7 +929,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               {activeService === 'mobile_recharge' ? (
                 <div className="space-y-4">
                   <div>
-                    <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                       <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
                         {t('phone', lang)}
                       </label>
@@ -759,7 +949,6 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     />
                   </div>
 
-                  {/* Operator Logo Selector */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
@@ -771,7 +960,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                             key={rt}
                             type="button"
                             onClick={() => setRechargeType(rt)}
-                            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
                               rechargeType === rt
                                 ? 'bg-indigo-600 text-white'
                                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -794,18 +983,18 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                               setSelectedOperator(op.id);
                               setAutoDetectedOp(false);
                             }}
-                            className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-colors text-left ${
+                            className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-colors text-left cursor-pointer ${
                               isSelected
                                 ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-500 text-slate-900 dark:text-white shadow-xs'
                                 : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                             }`}
                           >
-                            <OperatorLogo operator={op.id} size={36} />
+                            <OperatorLogo operator={op.id} size={34} />
                             <div className="min-w-0">
                               <div className="text-xs font-semibold truncate">
                                 {lang === 'bn' ? op.bnName : op.name}
                               </div>
-                              <div className="text-[10px] font-mono-tabular text-slate-500 dark:text-slate-400">
+                              <div className="text-[10px] font-mono-tabular text-slate-500 dark:text-slate-400 truncate">
                                 {op.prefixes.join(', ')}
                               </div>
                             </div>
@@ -861,7 +1050,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 </div>
               ) : (
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                     <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
                       {activeService === 'cash_out'
                         ? t('agentAccount', lang)
@@ -871,10 +1060,10 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     </label>
                     <span className="text-[11px] font-mono-tabular text-indigo-600 dark:text-indigo-400">
                       {activeService === 'cash_out'
-                        ? 'Sandbox: A-200001'
+                        ? 'Agent (A-) Only'
                         : activeService === 'merchant_payment'
-                          ? 'Sandbox: M-300001'
-                          : 'e.g. U-100001 or 017...'}
+                          ? 'Merchant (M-) Only'
+                          : 'U-XXXXXX or 017...'}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -885,17 +1074,17 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                       onChange={(e) => setRecipient(e.target.value)}
                       placeholder={
                         activeService === 'cash_out'
-                          ? 'A-200001 or 01811000002'
+                          ? 'A-XXXXXX or 018...'
                           : activeService === 'merchant_payment'
-                            ? 'M-300001 or 01911000003'
+                            ? 'M-XXXXXX or 019...'
                             : 'U-XXXXXX or 017XXXXXXXX'
                       }
-                      className="flex-1 px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                      className="flex-1 min-w-0 px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
                     />
                     <button
                       type="button"
                       onClick={() => setQrMode('scan')}
-                      className={`px-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${preset.accentBorderHoverClass} ${preset.accentTextClass} transition-colors`}
+                      className={`px-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${preset.accentBorderHoverClass} ${preset.accentTextClass} transition-colors shrink-0 cursor-pointer`}
                       title={t('scanQr', lang)}
                     >
                       <ScanLine className="w-5 h-5" />
@@ -946,16 +1135,15 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 />
               )}
 
-              {/* Quick Amount Chips for Recharge/Transfers */}
               <div className="flex flex-wrap gap-2">
-                {[100, 500, 1000, 5000, 55000].map((preset) => (
+                {[100, 500, 1000, 5000, 55000].map((val) => (
                   <button
-                    key={preset}
+                    key={val}
                     type="button"
-                    onClick={() => setAmount(String(preset))}
-                    className="px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-500 text-xs font-mono-tabular text-slate-700 dark:text-slate-300 transition-colors"
+                    onClick={() => setAmount(String(val))}
+                    className="px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-500 text-xs font-mono-tabular text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
                   >
-                    ৳{preset.toLocaleString()}
+                    ৳{val.toLocaleString()}
                   </button>
                 ))}
               </div>
@@ -1010,7 +1198,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               <button
                 type="submit"
                 disabled={isDisabledAccount}
-                className={`w-full py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white transition-colors disabled:opacity-50 shadow-sm`}
+                className={`w-full min-h-[48px] py-3.5 rounded-xl ${preset.primaryButtonClass} text-sm font-semibold text-white transition-colors disabled:opacity-50 shadow-sm cursor-pointer`}
               >
                 {t('continueBtn', lang)}
               </button>
@@ -1020,27 +1208,27 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
           {step === 'confirm' && (
             <div className="space-y-4">
               <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 space-y-2.5 text-xs">
-                <div className="flex justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-slate-500 dark:text-slate-400">
                     {lang === 'bn' ? 'সেবা' : 'Service'}
                   </span>
-                  <span className="font-semibold text-slate-900 dark:text-white">
+                  <span className="font-semibold text-slate-900 dark:text-white text-right">
                     {services.find((s) => s.id === activeService)?.label}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-500 dark:text-slate-400">
+                  <span className="text-slate-500 dark:text-slate-400 shrink-0">
                     {lang === 'bn' ? 'প্রাপক' : 'Target'}
                   </span>
                   {activeService === 'mobile_recharge' ? (
-                    <span className="inline-flex items-center gap-2 font-mono-tabular text-indigo-600 dark:text-indigo-400 font-medium">
-                      <OperatorLogo operator={selectedOperator} size={24} />
+                    <span className="inline-flex items-center gap-2 font-mono-tabular text-indigo-600 dark:text-indigo-400 font-medium text-right break-all">
+                      <OperatorLogo operator={selectedOperator} size={22} />
                       <span>
                         {OPERATORS.find((o) => o.id === selectedOperator)?.name || selectedOperator.toUpperCase()} · {rechargePhone}
                       </span>
                     </span>
                   ) : (
-                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400 font-medium">
+                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400 font-medium text-right break-all">
                       {activeService === 'bill_pay'
                         ? `${selectedBiller.toUpperCase()} · ${billAccount}`
                         : recipient}
@@ -1096,167 +1284,28 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 })()}
               </div>
 
-              {biometricsReady && (
-                <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmAuthMode('biometric');
-                      setError('');
-                    }}
-                    className={`min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                      confirmAuthMode === 'biometric'
-                        ? 'bg-emerald-600 text-white shadow-sm'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    <Fingerprint className="w-4 h-4 shrink-0" />
-                    <span>
-                      {lang === 'bn' ? 'বায়োমেট্রিক (ফিঙ্গার/ফেস)' : 'Biometrics (Face / Touch)'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmAuthMode('pin');
-                      setError('');
-                    }}
-                    className={`min-h-[40px] px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                      confirmAuthMode === 'pin'
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    <KeyRound className="w-4 h-4 shrink-0" />
-                    <span>{lang === 'bn' ? 'সিকিউরিটি পিন' : 'Security PIN'}</span>
-                  </button>
-                </div>
-              )}
-
-              {biometricsReady && confirmAuthMode === 'biometric' ? (
-                <div className="space-y-3">
-                  <div className="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                      <Fingerprint className="w-6 h-6" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold text-slate-900 dark:text-white">
-                        {lang === 'bn'
-                          ? 'পিন ছাড়াই বায়োমেট্রিক নিশ্চিতকরণ প্রস্তুত'
-                          : 'Passwordless Biometric Confirmation Ready'}
-                      </div>
-                      <div className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
-                        {enrolledBiometrics[0]?.deviceLabel} ·{' '}
-                        {lang === 'bn'
-                          ? 'নিচের বাটনে ট্যাপ করে স্ক্যান করুন'
-                          : 'Tap below to verify with Fingerprint or Face ID'}
-                      </div>
-                    </div>
-                  </div>
-
-                  {error && (
-                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300 space-y-1.5">
-                      <div>{error}</div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setConfirmAuthMode('pin');
-                          setError('');
-                        }}
-                        className="font-semibold underline text-indigo-700 dark:text-indigo-300"
-                      >
-                        {lang === 'bn' ? 'পরিবর্তে পিন ব্যবহার করুন' : 'Switch to Security PIN instead'}
-                      </button>
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={handleBiometricConfirmTransaction}
-                    className="w-full min-h-[54px] px-5 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 hover:from-emerald-500 hover:to-teal-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2.5 shadow-lg shadow-emerald-600/20 active:scale-[0.99] transition-all disabled:opacity-60"
-                  >
-                    {submitting ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin shrink-0" />
-                        <span>
-                          {lang === 'bn'
-                            ? 'বায়োমেট্রিক যাচাই হচ্ছে...'
-                            : 'Verifying Device Biometrics...'}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        <Fingerprint className="w-5 h-5 shrink-0" />
-                        <span>
-                          {lang === 'bn'
-                            ? `ফিঙ্গারপ্রিন্ট / ফেস আইডি দিয়ে নিশ্চিত করুন (${formatBdt(totalDebit, lang)})`
-                            : `Confirm with Biometrics (${formatBdt(totalDebit, lang)})`}
-                        </span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                      {t('enterPinConfirm', lang)}
-                    </label>
-                    <div className="relative">
-                      <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="password"
-                        maxLength={5}
-                        inputMode="numeric"
-                        value={pin}
-                        onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
-                        placeholder="••••"
-                        className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
-                      />
-                    </div>
-                  </div>
-
-                  {!biometricsReady && webauthnCap?.supported && onOpenBiometricSettings && (
-                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                        <Fingerprint className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                        <span>
-                          {lang === 'bn'
-                            ? 'ভবিষ্যতে পিন না লিখেই ফিঙ্গারপ্রিন্ট/ফেস আইডি দিয়ে লেনদেন করতে চান?'
-                            : 'Skip typing passcodes next time with Fingerprint or Face ID.'}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={onOpenBiometricSettings}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[11px] font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
-                      >
-                        {lang === 'bn' ? 'বায়োমেট্রিক চালু করুন' : 'Enable Biometrics'}
-                      </button>
-                    </div>
-                  )}
-
-                  {error && (
-                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
-                      {error}
-                    </div>
-                  )}
-
-                  <TapAndHoldButton
-                    lang={lang}
-                    loading={submitting}
-                    disabled={pin.length < 4}
-                    amountLabel={`${t('totalDeduction', lang)}: ${formatBdt(totalDebit, lang)}`}
-                    onConfirm={handleTapAndHoldConfirmed}
-                  />
-                </>
-              )}
+              <BiometricConfirmBox
+                user={user}
+                lang={lang}
+                amount={numericAmount}
+                amountLabel={formatBdt(totalDebit, lang)}
+                platformHighValueThreshold={feeConfig.highValueThreshold}
+                webauthnCap={webauthnCap}
+                authMode={confirmAuthMode}
+                onAuthModeChange={setConfirmAuthMode}
+                submitting={submitting}
+                error={error}
+                onClearError={() => setError('')}
+                onConfirmBiometric={handleBiometricConfirmTransaction}
+                onConfirmTapHold={handleTapAndHoldConfirmed}
+                onOpenBiometricSettings={onOpenBiometricSettings}
+                tapHoldButtonLabel={`${t('totalDeduction', lang)}: ${formatBdt(totalDebit, lang)}`}
+              />
 
               <button
                 type="button"
                 onClick={() => setStep('form')}
-                className="w-full py-2.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                className="w-full py-2.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
               >
                 {t('back', lang)}
               </button>
@@ -1281,12 +1330,12 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   {t('txHash', lang)}: {completedTx.txHash}
                 </p>
               </div>
-              <div className="flex flex-wrap justify-center gap-3 pt-2">
+              <div className="flex flex-wrap justify-center gap-2.5 pt-2">
                 {completedTx.giftCard && (
                   <button
                     type="button"
                     onClick={() => setViewedGiftTx(completedTx)}
-                    className="px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-xs font-semibold text-rose-700 dark:text-rose-200 hover:bg-rose-100 inline-flex items-center gap-1.5"
+                    className="px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-xs font-semibold text-rose-700 dark:text-rose-200 hover:bg-rose-100 inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <Gift className="w-3.5 h-3.5" />
                     <span>{lang === 'bn' ? 'গিফট কার্ড দেখুন' : 'View Gift Card'}</span>
@@ -1295,132 +1344,106 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedReceipt(completedTx)}
-                  className="px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400"
+                  className="px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400 cursor-pointer"
                 >
                   {lang === 'bn' ? 'রসিদ দেখুন' : 'View Receipt'}
                 </button>
                 <button
                   type="button"
-                  onClick={resetForm}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
+                  onClick={() => resetForm()}
+                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white cursor-pointer"
                 >
                   {lang === 'bn' ? 'নতুন লেনদেন' : 'New Transaction'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewMode('home');
+                    resetForm();
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  {lang === 'bn' ? 'হোমে ফিরুন' : 'Done'}
                 </button>
               </div>
             </div>
           )}
         </div>
-      </div>
+      )}
 
-      {/* Transaction History Ledger */}
-      <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-            {t('recentTransactions', lang)}
-          </h3>
-          <div className="relative w-full sm:w-72">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchTx}
-              onChange={(e) => setSearchTx(e.target.value)}
-              placeholder={t('searchPlaceholder', lang)}
-              className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
-            />
-          </div>
-        </div>
-
-        {filteredTransactions.length === 0 ? (
-          <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-            {t('noTransactions', lang)}
-          </div>
-        ) : (
-          <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {filteredTransactions.map((tx) => {
-              const isIncoming = tx.receiverId === user.accountId;
-              const rateNote =
-                tx.fee > 0
-                  ? tx.feeBreakdown?.chargeMode === 'flat'
-                    ? 'Flat'
-                    : `@৳${tx.feeBreakdown?.ratePer1000 || 0}/1k`
-                  : '';
-              return (
+      {/* VIEW 3: Full Searchable History Ledger (Screenshot 1 fixed with TransactionRowItem) */}
+      {viewMode === 'history' && (
+        <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
+          <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
                 <button
-                  key={tx.txId}
                   type="button"
-                  onClick={() => setSelectedReceipt(tx)}
-                  className="w-full px-6 py-3.5 flex items-center justify-between gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors text-left"
+                  onClick={() => setViewMode('home')}
+                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 hover:border-indigo-400 cursor-pointer"
                 >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    {tx.type === 'mobile_recharge' && tx.operator ? (
-                      <OperatorLogo operator={tx.operator} size={34} />
-                    ) : (
-                      <div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                          isIncoming
-                            ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                            : 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
-                        }`}
-                      >
-                        {isIncoming ? <ArrowDownLeft className="w-5 h-5" /> : <ArrowUpRight className="w-5 h-5" />}
-                      </div>
-                    )}
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate flex items-center gap-2">
-                        <span className="truncate">{isIncoming ? tx.senderName : tx.receiverName}</span>
-                        {tx.giftCard && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-[10px] font-bold text-rose-700 dark:text-rose-300 shrink-0">
-                            <Gift className="w-3 h-3" />
-                            <span>{tx.giftCard.cardTitleBn}</span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span>{tx.type.replace(/_/g, ' ').toUpperCase()}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono-tabular">{tx.txHash}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{new Date(tx.createdAt).toLocaleString()}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <div
-                      className={`font-mono-tabular text-sm font-bold ${
-                        isIncoming
-                          ? 'text-emerald-600 dark:text-emerald-400'
-                          : 'text-slate-900 dark:text-white'
-                      }`}
-                    >
-                      {isIncoming ? '+' : '-'} {formatBdt(tx.amount, lang)}
-                    </div>
-                    {!isIncoming && tx.fee > 0 && (
-                      <div className="font-mono-tabular text-[11px] text-amber-600 dark:text-amber-300 mt-0.5">
-                        Charge: {formatBdt(tx.fee, lang)} ({rateNote}) · Total:{' '}
-                        {formatBdt(tx.totalDebited, lang)}
-                      </div>
-                    )}
-                    <div
-                      className={`text-[11px] font-medium mt-0.5 ${
-                        tx.status === 'completed'
-                          ? 'text-emerald-600 dark:text-emerald-400'
-                          : tx.status === 'pending_admin_approval'
-                            ? 'text-amber-600 dark:text-amber-400'
-                            : tx.status === 'rejected'
-                              ? 'text-rose-600 dark:text-rose-400'
-                              : 'text-sky-600 dark:text-sky-400'
-                      }`}
-                    >
-                      {tx.status.replace(/_/g, ' ')}
-                    </div>
-                  </div>
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
                 </button>
-              );
-            })}
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
+                  {t('recentTransactions', lang)}
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{t('downloadStatement', lang)}</span>
+              </button>
+            </div>
+
+            <div className="relative w-full">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchTx}
+                onChange={(e) => setSearchTx(e.target.value)}
+                placeholder={t('searchPlaceholder', lang)}
+                className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs sm:text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
           </div>
-        )}
-      </div>
+
+          {filteredTransactions.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+              {t('noTransactions', lang)}
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredTransactions.map((tx) => (
+                <div
+                  key={tx.txId}
+                  onClick={() => setSelectedReceipt(tx)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedReceipt(tx);
+                    }
+                  }}
+                  className="cursor-pointer"
+                >
+                  <TransactionRowItem
+                    tx={tx}
+                    viewerAccountId={user.accountId}
+                    lang={lang}
+                    onOpenGiftCard={(giftTx) => setViewedGiftTx(giftTx)}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {qrMode && (
         <QrModal
@@ -1443,6 +1466,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
             if (payload.amount) setAmount(String(payload.amount));
             if (payload.note) setNote(payload.note);
             setStep('form');
+            setViewMode('service');
           }}
         />
       )}

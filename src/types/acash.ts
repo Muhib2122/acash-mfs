@@ -133,6 +133,17 @@ export interface BiometricTxAuthorizationProof {
   };
 }
 
+export type BiometricHighValueMode = 'replace' | 'augment';
+
+export interface BiometricPreferences {
+  enabled: boolean;
+  highValueThreshold: number;
+  highValueMode: BiometricHighValueMode;
+  quickUnlockEnabled: boolean;
+  lastVerifiedAt?: number;
+  biometricTxCount?: number;
+}
+
 export interface AcashUser {
   accountId: string; // e.g. U-847291, A-392014, M-501928
   firebaseUid?: string; // Firebase Auth UID when authenticated via Google Sign-In
@@ -146,6 +157,7 @@ export interface AcashUser {
   pinHash: string;
   staffPinHash?: string; // for Merchant Cashier Mode
   webauthnCredentials?: WebAuthnCredentialRecord[];
+  biometricPrefs?: BiometricPreferences;
   totpSecret?: string; // Base32 RFC 6238 secret for Google Authenticator / TOTP apps
   totpEnrolledAt?: number;
   profilePhotoUrl?: string;
@@ -162,6 +174,10 @@ export interface AcashUser {
   referredByAgentId?: string;
   referredByAgentPhone?: string;
   referredByAgentName?: string;
+  unverifiedGraceExtendedUntil?: number;
+  unverifiedGraceExtendedCount?: number;
+  unverifiedGraceExtendedBy?: string;
+  unverifiedGraceNotifiedAt?: number;
   createdAt: number;
   lastActiveAt: number;
 }
@@ -379,7 +395,8 @@ export interface AcashTransaction {
   billMonth?: string;
   note?: string;
   giftCard?: GiftCardPayload;
-  authMethod?: 'pin' | 'biometric';
+  authMethod?: 'pin' | 'biometric' | 'tap_hold';
+  biometricDeviceLabel?: string;
   createdAt: number;
   approvedBy?: string;
   approvedAt?: number;

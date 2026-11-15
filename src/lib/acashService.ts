@@ -33,7 +33,11 @@ import {
   sendHighValuePendingEmails,
 } from './emailjs';
 import { verifyTotpCode } from './totp';
-import { verifyBiometricTransactionProof } from './webauthn';
+import {
+  normalizeBiometricPrefs,
+  syncBiometricQuickHint,
+  verifyBiometricTransactionProof,
+} from './webauthn';
 import {
   AcashBooth,
   AcashDirectoryEntry,
@@ -48,6 +52,7 @@ import {
   AdminActivityType,
   AdminNotification,
   BillerId,
+  BiometricPreferences,
   BiometricTxAuthorizationProof,
   BoothStatus,
   CreatorMapRole,
@@ -3400,12 +3405,124 @@ export function subscribeToAdminActivityLogs(
   };
 }
 
+export const UNVERIFIED_GRACE_DAYS = 7;
+export const UNVERIFIED_MAX_TX_VOLUME = 100000;
+
+const UNVERIFIED_OUTGOING_TX_TYPES = new Set<TransactionType>([
+  'send_money',
+  'cash_out',
+  'mobile_recharge',
+  'bill_pay',
+  'merchant_payment',
+  'cash_in',
+  'agent_cash_out',
+  'merchant_cash_out',
+  'b2b_transfer',
+]);
+
+export interface UserComplianceState {
+  kycVerified: boolean;
+  kycStatus: 'unverified' | 'submitted' | 'verified';
+  twoFactorEnabled: boolean;
+  isFullyVerified: boolean;
+  createdAt: number;
+  baseDeadline: number;
+  effectiveGraceDeadline: number;
+  isGraceExtended: boolean;
+  extendedCount: number;
+  remainingGraceMs: number;
+  daysRemaining: number;
+  hoursRemaining: number;
+  graceExpired: boolean;
+  totalOutgoingUsed: number;
+  maxOutgoingVolume: number;
+  remainingVolume: number;
+  volumeCapReached: boolean;
+  isBlocked: boolean;
+  notifiedAdminAt?: number;
+}
+
+export function getUserComplianceState(
+  user: AcashUser | null | undefined,
+  transactions: AcashTransaction[] = [],
+  now = Date.now()
+): UserComplianceState {
+  const createdAt = user?.createdAt || now;
+  const kycStatus = user?.kyc?.status || 'unverified';
+  const kycVerified = kycStatus === 'verified';
+  const twoFactorEnabled = Boolean(user?.totpSecret && user.totpSecret.length >= 16);
+  const isFullyVerified = kycVerified && twoFactorEnabled;
+
+  const baseDeadline = createdAt + UNVERIFIED_GRACE_DAYS * 86400000;
+  const extendedUntil = user?.unverifiedGraceExtendedUntil || 0;
+  const effectiveGraceDeadline = Math.max(baseDeadline, extendedUntil);
+  const isGraceExtended = extendedUntil > baseDeadline;
+  const extendedCount = user?.unverifiedGraceExtendedCount || 0;
+
+  const remainingGraceMs = isFullyVerified ? 0 : Math.max(0, effectiveGraceDeadline - now);
+  const graceExpired = !isFullyVerified && now > effectiveGraceDeadline;
+  const daysRemaining = isFullyVerified
+    ? UNVERIFIED_GRACE_DAYS
+    : graceExpired
+      ? 0
+      : Math.max(1, Math.ceil(remainingGraceMs / 86400000));
+  const hoursRemaining = isFullyVerified
+    ? UNVERIFIED_GRACE_DAYS * 24
+    : graceExpired
+      ? 0
+      : Math.max(1, Math.ceil(remainingGraceMs / 3600000));
+
+  const accountId = user?.accountId;
+  const totalOutgoingUsed = accountId
+    ? Number(
+        transactions
+          .reduce((sum, tx) => {
+            if (
+              tx.senderId === accountId &&
+              tx.status !== 'rejected' &&
+              UNVERIFIED_OUTGOING_TX_TYPES.has(tx.type)
+            ) {
+              return sum + (Number(tx.amount) || 0);
+            }
+            return sum;
+          }, 0)
+          .toFixed(2)
+      )
+    : 0;
+
+  const remainingVolume = Math.max(0, Number((UNVERIFIED_MAX_TX_VOLUME - totalOutgoingUsed).toFixed(2)));
+  const volumeCapReached = !isFullyVerified && totalOutgoingUsed >= UNVERIFIED_MAX_TX_VOLUME;
+
+  return {
+    kycVerified,
+    kycStatus,
+    twoFactorEnabled,
+    isFullyVerified,
+    createdAt,
+    baseDeadline,
+    effectiveGraceDeadline,
+    isGraceExtended,
+    extendedCount,
+    remainingGraceMs,
+    daysRemaining,
+    hoursRemaining,
+    graceExpired,
+    totalOutgoingUsed,
+    maxOutgoingVolume: UNVERIFIED_MAX_TX_VOLUME,
+    remainingVolume,
+    volumeCapReached,
+    isBlocked: graceExpired || volumeCapReached,
+    notifiedAdminAt: user?.unverifiedGraceNotifiedAt,
+  };
+}
+
 export async function executeFinancialTransaction(params: {
   type: TransactionType;
   senderId: string;
   receiverIdentifier: string;
   amount: number;
   pin?: string;
+  authorizeViaSession?: boolean;
   biometricProof?: BiometricTxAuthorizationProof;
   feeConfig: FeeConfig;
   operator?: OperatorId;
@@ -3491,8 +3608,46 @@ export async function executeFinancialTransaction(params: {
   if (!senderLocal) throw new Error('Sender account does not exist.');
   if (senderLocal.status !== 'active') throw new Error('Your account is currently disabled by Admin.');
 
+  // Enforce 7-Day Grace Period & ৳1,00,000 Cap when KYC & 2FA are incomplete
+  let senderOutgoingTxs: AcashTransaction[] = Object.values(store.transactions).filter(
+    (tx) => tx.senderId === senderLocal.accountId
+  );
+  if (!(senderLocal.kyc?.status === 'verified' && Boolean(senderLocal.totpSecret && senderLocal.totpSecret.length >= 16))) {
+    try {
+      const txSnap = await getDocs(
+        query(collection(db, TX_COL), where('senderId', '==', senderLocal.accountId))
+      );
+      if (!txSnap.empty) {
+        const mergedMap = new Map<string, AcashTransaction>();
+        senderOutgoingTxs.forEach((tx) => mergedMap.set(tx.txId, tx));
+        txSnap.docs.forEach((d) => {
+          const tx = d.data() as AcashTransaction;
+          mergedMap.set(tx.txId, tx);
+        });
+        senderOutgoingTxs = Array.from(mergedMap.values());
+      }
+    } catch {
+      // fallback to synced local store
+    }
+    const compliance = getUserComplianceState(senderLocal, senderOutgoingTxs);
+    if (compliance.graceExpired) {
+      void ensureUnverifiedGraceAdminNotification(senderLocal.accountId);
+      throw new Error(
+        'Unverified 7-Day Limit Expired: Complete KYC & 2FA Authenticator in Profile, or request a +7 day Admin extension.'
+      );
+    }
+    if (compliance.totalOutgoingUsed + amount > UNVERIFIED_MAX_TX_VOLUME) {
+      throw new Error(
+        `Unverified ৳1,00,000 Cap Reached: Remaining limit is ৳${compliance.remainingVolume.toLocaleString()}. Complete both KYC & 2FA Authenticator in Profile to unlock unlimited transactions.`
+      );
+    }
+  }
+
   let usedBiometricAuth = false;
+  let usedTapHoldAuth = false;
+  let usedBiometricDeviceLabel: string | undefined;
   let updatedSenderWebauthnCreds: WebAuthnCredentialRecord[] | undefined;
+  let updatedSenderBiometricPrefs: BiometricPreferences | undefined;
 
   if (params.biometricProof) {
     const enrolled = senderLocal.webauthnCredentials || [];
@@ -3525,7 +3680,7 @@ export async function executeFinancialTransaction(params: {
       });
       if (res.locked) {
         throw new Error(
-          `Transaction Locked (${res.attempts} failed verifications). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+          `Verification Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
         );
       }
       throw new Error(
@@ -3533,9 +3688,33 @@ export async function executeFinancialTransaction(params: {
       );
     }
 
+    // If Dual-Lock High-Value Augment mode also supplied a PIN, verify the PIN too
+    if (params.pin) {
+      const pinCheck = await verifySecretAgainstStored(
+        params.pin,
+        senderLocal.pinHash,
+        hashPin
+      );
+      if (!pinCheck.valid) {
+        const res = recordFailedSecurityAttempt(
+          'tx_pin',
+          params.senderId,
+          secPolicy.maxLoginFailures,
+          secPolicy.lockoutMinutes
+        );
+        throw new Error(
+          res.locked
+            ? `Verification Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+            : `Incorrect Security PIN for dual-lock confirmation. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+        );
+      }
+    }
+
     clearSecurityAttempts('tx_pin', params.senderId);
     usedBiometricAuth = true;
     const usedAt = Date.now();
+    const matchedCred = enrolled.find((c) => c.credentialId === bioCheck.matchedCredentialId);
+    usedBiometricDeviceLabel = matchedCred?.deviceLabel;
     updatedSenderWebauthnCreds = enrolled.map((cred) =>
       cred.credentialId === bioCheck.matchedCredentialId
         ? stripUndefined({
@@ -3548,9 +3727,18 @@ export async function executeFinancialTransaction(params: {
           })
         : stripUndefined(cred)
     );
-  } else {
+    const basePrefs = normalizeBiometricPrefs(senderLocal.biometricPrefs);
+    updatedSenderBiometricPrefs = {
+      ...basePrefs,
+      lastVerifiedAt: usedAt,
+      biometricTxCount: (basePrefs.biometricTxCount || 0) + 1,
+    };
+  } else if (params.authorizeViaSession) {
+    clearSecurityAttempts('tx_pin', params.senderId);
+    usedTapHoldAuth = true;
+  } else if (params.pin) {
     const pinCheck = await verifySecretAgainstStored(
-      params.pin || '',
+      params.pin,
       senderLocal.pinHash,
       hashPin
     );
@@ -3565,24 +3753,26 @@ export async function executeFinancialTransaction(params: {
         void logSecurityEvent({
           eventType: 'brute_force_lockout',
           severity: 'critical',
-          title: `Transaction PIN Lockout · ${params.senderId}`,
-          details: `${res.attempts} invalid Transaction PIN attempts triggered lockout on ${params.type} (৳${amount}).`,
+          title: `Transaction Lockout · ${params.senderId}`,
+          details: `${res.attempts} invalid confirmation attempts triggered lockout on ${params.type} (৳${amount}).`,
           targetIdentifier: params.senderId,
           attempts: res.attempts,
           blockedUntil: res.lockedUntil,
         });
         throw new Error(
-          `Transaction PIN Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
+          `Confirmation Locked (${res.attempts} failed attempts). Try again in ${formatDurationRemaining(res.lockedUntil - Date.now())}.`
         );
       }
       throw new Error(
-        `Incorrect Security PIN. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
+        `Invalid confirmation credential. (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} remaining)`
       );
     }
     clearSecurityAttempts('tx_pin', params.senderId);
+  } else {
+    throw new Error('Please confirm the transaction using Biometrics or Tap & Hold.');
   }
 
-  // Anti-Spam Transaction Flood & Idempotency Shield (after PIN verified so wrong PIN doesn't consume quota)
+  // Anti-Spam Transaction Flood & Idempotency Shield
   if (secPolicy.strictAntiSpamMode) {
     const fpTarget = isExternalUtility
       ? params.rechargeNumber || params.billAccountNumber || cleanReceiverInput
@@ -3754,7 +3944,10 @@ export async function executeFinancialTransaction(params: {
     ...(params.billMonth ? { billMonth: params.billMonth } : {}),
     ...(sanitizedNote ? { note: sanitizedNote } : {}),
     ...(sanitizedGiftCard ? { giftCard: stripUndefined(sanitizedGiftCard) } : {}),
-    authMethod: usedBiometricAuth ? 'biometric' : 'pin',
+    authMethod: usedBiometricAuth ? 'biometric' : usedTapHoldAuth ? 'tap_hold' : 'pin',
+    ...(usedBiometricDeviceLabel
+      ? { biometricDeviceLabel: usedBiometricDeviceLabel.slice(0, 80) }
+      : {}),
     createdAt: now,
   };
 
@@ -3838,6 +4031,9 @@ export async function executeFinancialTransaction(params: {
         ...(updatedSenderWebauthnCreds
           ? { webauthnCredentials: updatedSenderWebauthnCreds }
           : {}),
+        ...(updatedSenderBiometricPrefs
+          ? { biometricPrefs: updatedSenderBiometricPrefs }
+          : {}),
         lastActiveAt: now,
       });
 
@@ -3884,6 +4080,9 @@ export async function executeFinancialTransaction(params: {
         commissionBalance: committedSender.commissionBalance,
         ...(updatedSenderWebauthnCreds
           ? { webauthnCredentials: updatedSenderWebauthnCreds }
+          : {}),
+        ...(updatedSenderBiometricPrefs
+          ? { biometricPrefs: updatedSenderBiometricPrefs }
           : {}),
         lastActiveAt: now,
       });
@@ -4018,7 +4217,9 @@ export async function executeMerchantRefund(params: {
   merchantId: string;
   txHashInput: string;
   refundAmount: number;
-  pin: string;
+  pin?: string;
+  authorizeViaSession?: boolean;
+  biometricProof?: BiometricTxAuthorizationProof;
   note?: string;
 }): Promise<AcashTransaction> {
   const cleanHash = params.txHashInput.trim().toUpperCase();
@@ -4060,7 +4261,7 @@ export async function executeMerchantRefund(params: {
   const refundLock = checkAttemptLockout('tx_pin', params.merchantId);
   if (!refundLock.allowed) {
     throw new Error(
-      `Merchant PIN Locked: Try again in ${formatDurationRemaining(refundLock.remainingMs)}.`
+      `Verification Locked: Try again in ${formatDurationRemaining(refundLock.remainingMs)}.`
     );
   }
 
@@ -4072,28 +4273,83 @@ export async function executeMerchantRefund(params: {
   if (merchant.status !== 'active') throw new Error('Merchant account is disabled.');
 
   const secPolicy = getEffectiveSecurityPolicy();
-  const refundPinCheck = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
-  if (!refundPinCheck.valid) {
-    const res = recordFailedSecurityAttempt(
-      'tx_pin',
-      params.merchantId,
-      secPolicy.maxLoginFailures,
-      secPolicy.lockoutMinutes
-    );
-    if (res.locked) {
-      void logSecurityEvent({
-        eventType: 'brute_force_lockout',
-        severity: 'critical',
-        title: `Merchant Refund PIN Lockout · ${params.merchantId}`,
-        details: `${res.attempts} invalid PIN attempts on refund request.`,
-        targetIdentifier: params.merchantId,
-        attempts: res.attempts,
-        blockedUntil: res.lockedUntil,
-      });
+  let refundAuthMethod: 'pin' | 'biometric' | 'tap_hold' = 'tap_hold';
+  let refundBioDeviceLabel: string | undefined;
+  let updatedMerchantCreds: WebAuthnCredentialRecord[] | undefined;
+  let updatedMerchantBioPrefs: BiometricPreferences | undefined;
+  if (params.biometricProof) {
+    const enrolled = merchant.webauthnCredentials || [];
+    const expectedOrigin = typeof window !== 'undefined' ? window.location.origin : undefined;
+    const bioCheck = await verifyBiometricTransactionProof({
+      proof: params.biometricProof,
+      enrolledCredentials: enrolled,
+      expectedAccountId: params.merchantId,
+      expectedTxType: 'refund',
+      expectedAmount: refundAmt,
+      expectedOrigin,
+    });
+    if (!bioCheck.valid) {
+      throw new Error(`Biometric verification failed: ${bioCheck.reason || 'Invalid proof.'}`);
     }
-    throw new Error('Incorrect Security PIN.');
+    if (params.pin) {
+      const pinRes = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
+      if (!pinRes.valid) {
+        throw new Error('Incorrect Security PIN for dual-lock refund confirmation.');
+      }
+    }
+    clearSecurityAttempts('tx_pin', params.merchantId);
+    refundAuthMethod = 'biometric';
+    const usedAt = Date.now();
+    const matchedCred = enrolled.find((c) => c.credentialId === bioCheck.matchedCredentialId);
+    refundBioDeviceLabel = matchedCred?.deviceLabel;
+    updatedMerchantCreds = enrolled.map((cred) =>
+      cred.credentialId === bioCheck.matchedCredentialId
+        ? stripUndefined({
+            ...cred,
+            signCount:
+              typeof bioCheck.nextSignCount === 'number' && bioCheck.nextSignCount > 0
+                ? bioCheck.nextSignCount
+                : cred.signCount,
+            lastUsedAt: usedAt,
+          })
+        : stripUndefined(cred)
+    );
+    const basePrefs = normalizeBiometricPrefs(merchant.biometricPrefs);
+    updatedMerchantBioPrefs = {
+      ...basePrefs,
+      lastVerifiedAt: usedAt,
+      biometricTxCount: (basePrefs.biometricTxCount || 0) + 1,
+    };
+  } else if (params.authorizeViaSession) {
+    clearSecurityAttempts('tx_pin', params.merchantId);
+    refundAuthMethod = 'tap_hold';
+  } else if (params.pin) {
+    const refundPinCheck = await verifySecretAgainstStored(params.pin, merchant.pinHash, hashPin);
+    if (!refundPinCheck.valid) {
+      const res = recordFailedSecurityAttempt(
+        'tx_pin',
+        params.merchantId,
+        secPolicy.maxLoginFailures,
+        secPolicy.lockoutMinutes
+      );
+      if (res.locked) {
+        void logSecurityEvent({
+          eventType: 'brute_force_lockout',
+          severity: 'critical',
+          title: `Merchant Refund Lockout · ${params.merchantId}`,
+          details: `${res.attempts} invalid attempts on refund request.`,
+          targetIdentifier: params.merchantId,
+          attempts: res.attempts,
+          blockedUntil: res.lockedUntil,
+        });
+      }
+      throw new Error('Verification failed.');
+    }
+    clearSecurityAttempts('tx_pin', params.merchantId);
+    refundAuthMethod = 'pin';
+  } else {
+    throw new Error('Please confirm refund using Biometrics or Tap & Hold.');
   }
-  clearSecurityAttempts('tx_pin', params.merchantId);
 
   if (merchant.balance < refundAmt) {
     throw new Error('Insufficient Merchant balance to process this refund.');
@@ -4139,6 +4395,8 @@ export async function executeMerchantRefund(params: {
     status: 'completed',
     refundedAmount: 0,
     parentTxHash: orig.txHash,
+    authMethod: refundAuthMethod,
+    ...(refundBioDeviceLabel ? { biometricDeviceLabel: refundBioDeviceLabel.slice(0, 80) } : {}),
     note: sanitizePlainText(params.note || '', 240) || `Refund for ${orig.txHash}`,
     createdAt: now,
   };
@@ -4187,6 +4445,8 @@ export async function executeMerchantRefund(params: {
     committedMerchant = stripUndefined({
       ...authMerchant,
       balance: Number((authMerchant.balance - refundAmt).toFixed(2)),
+      ...(updatedMerchantCreds ? { webauthnCredentials: updatedMerchantCreds } : {}),
+      ...(updatedMerchantBioPrefs ? { biometricPrefs: updatedMerchantBioPrefs } : {}),
       lastActiveAt: now,
     });
     committedCustomer = stripUndefined({
@@ -4206,6 +4466,8 @@ export async function executeMerchantRefund(params: {
 
     transaction.update(merchantRef, {
       balance: committedMerchant.balance,
+      ...(updatedMerchantCreds ? { webauthnCredentials: updatedMerchantCreds } : {}),
+      ...(updatedMerchantBioPrefs ? { biometricPrefs: updatedMerchantBioPrefs } : {}),
       lastActiveAt: now,
     });
 
@@ -6133,15 +6395,22 @@ export async function enrollUserWebAuthnPasskey(params: {
     (c) => c.credentialId !== params.credential.credentialId
   );
   const nextCreds = [stripUndefined(params.credential), ...existing].slice(0, 5);
+  const nextPrefs = normalizeBiometricPrefs({
+    ...(user.biometricPrefs || {}),
+    enabled: true,
+    lastVerifiedAt: now,
+  });
 
   const updated: AcashUser = stripUndefined({
     ...user,
     webauthnCredentials: nextCreds,
+    biometricPrefs: nextPrefs,
     lastActiveAt: now,
   });
 
   store.users[params.accountId] = updated;
   writeLocalStore(store, true);
+  syncBiometricQuickHint(updated);
 
   try {
     await setDoc(doc(db, USERS_COL, params.accountId), updated, { merge: true });
@@ -6195,6 +6464,7 @@ export async function removeUserWebAuthnPasskey(
 
   store.users[accountId] = updated;
   writeLocalStore(store, true);
+  syncBiometricQuickHint(updated);
 
   try {
     await updateDoc(doc(db, USERS_COL, accountId), {
@@ -6207,6 +6477,124 @@ export async function removeUserWebAuthnPasskey(
   }
 
   return updated;
+}
+
+export async function renameUserWebAuthnPasskey(params: {
+  accountId: string;
+  credentialId: string;
+  newLabel: string;
+}): Promise<AcashUser> {
+  const cleanLabel = sanitizePlainText(params.newLabel, 64);
+  if (!cleanLabel) throw new Error('Enter a valid device label.');
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[params.accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const nextCreds = (user.webauthnCredentials || []).map((c) =>
+    c.credentialId === params.credentialId
+      ? stripUndefined({ ...c, deviceLabel: cleanLabel })
+      : stripUndefined(c)
+  );
+
+  const updated: AcashUser = stripUndefined({
+    ...user,
+    webauthnCredentials: nextCreds,
+    lastActiveAt: now,
+  });
+
+  store.users[params.accountId] = updated;
+  writeLocalStore(store, true);
+  syncBiometricQuickHint(updated);
+
+  try {
+    await updateDoc(doc(db, USERS_COL, params.accountId), {
+      webauthnCredentials: nextCreds,
+      lastActiveAt: now,
+    });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.UPDATE, `${USERS_COL}/${params.accountId}`);
+    }
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return updated;
+}
+
+export async function updateUserBiometricPreferences(params: {
+  accountId: string;
+  prefs: Partial<BiometricPreferences>;
+}): Promise<AcashUser> {
+  const now = Date.now();
+  const store = readLocalStore();
+  let user = store.users[params.accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+    }
+  } catch {
+    // fallback to local
+  }
+  if (!user) throw new Error('Account not found.');
+
+  const nextPrefs = normalizeBiometricPrefs({
+    ...(user.biometricPrefs || {}),
+    ...params.prefs,
+  });
+
+  const updated: AcashUser = stripUndefined({
+    ...user,
+    biometricPrefs: nextPrefs,
+    lastActiveAt: now,
+  });
+
+  store.users[params.accountId] = updated;
+  writeLocalStore(store, true);
+  syncBiometricQuickHint(updated);
+
+  try {
+    await updateDoc(doc(db, USERS_COL, params.accountId), {
+      biometricPrefs: stripUndefined(nextPrefs),
+      lastActiveAt: now,
+    });
+    firestoreBackendMode = 'firestore';
+  } catch (err) {
+    if (isPermissionError(err)) {
+      handleFirestoreError(err, OperationType.UPDATE, `${USERS_COL}/${params.accountId}`);
+    }
+    firestoreBackendMode = 'local_sync';
+  }
+
+  return updated;
+}
+
+export async function prepareBiometricQuickLogin(accountId: string): Promise<AcashUser> {
+  const user = await findUserByIdentifier(accountId);
+  if (!user) {
+    throw new Error('Remembered account was not found in Acash directory.');
+  }
+  if (user.status !== 'active') {
+    throw new Error('This account is disabled by Admin.');
+  }
+  const prefs = normalizeBiometricPrefs(user.biometricPrefs);
+  if (!prefs.enabled || !prefs.quickUnlockEnabled) {
+    throw new Error('Biometric quick sign-in is turned off for this account.');
+  }
+  if (!user.webauthnCredentials || user.webauthnCredentials.length === 0) {
+    throw new Error('No biometric passkey is registered on this account.');
+  }
+  return user;
 }
 
 export async function enrollUserTotpSecret(params: {
@@ -8841,6 +9229,150 @@ export async function verifyAdmin2faChallengeCode(params: {
     `Invalid 2FA verification code.${expiredEmailNote} (${res.remainingAttempts} ${res.remainingAttempts === 1 ? 'attempt' : 'attempts'} left before lockout)`
   );
 }
+
+export async function ensureUnverifiedGraceAdminNotification(
+  accountId: string
+): Promise<boolean> {
+  if (!accountId) return false;
+  const store = readLocalStore();
+  let user = store.users[accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, accountId));
+    if (snap.exists()) {
+      user = snap.data() as AcashUser;
+      store.users[accountId] = user;
+    }
+  } catch {
+    // fallback to local store
+  }
+  if (!user) return false;
+
+  const compliance = getUserComplianceState(
+    user,
+    Object.values(store.transactions)
+  );
+  if (!compliance.graceExpired) return false;
+
+  const extStartWindow = user.unverifiedGraceExtendedUntil
+    ? user.unverifiedGraceExtendedUntil - UNVERIFIED_GRACE_DAYS * 86400000
+    : 0;
+  if (
+    user.unverifiedGraceNotifiedAt &&
+    user.unverifiedGraceNotifiedAt >= Math.max(compliance.createdAt, extStartWindow)
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+  const extCount = user.unverifiedGraceExtendedCount || 0;
+  const notifId = `NTF-GRACE-${user.accountId}-${extCount}`;
+  const adminNotif: AdminNotification = {
+    id: notifId,
+    title: `7-Day Unverified Limit Expired · ${user.accountId}`,
+    message: `${user.businessName || user.name} (${user.accountId}) exceeded ${UNVERIFIED_GRACE_DAYS} days without both KYC & 2FA active. Used ৳${compliance.totalOutgoingUsed.toLocaleString()} of ৳${UNVERIFIED_MAX_TX_VOLUME.toLocaleString()}. Grant +7 Days access or request verification.`,
+    category: 'kyc_update',
+    severity: 'warning',
+    createdAt: now,
+    read: false,
+    targetSection: 'users',
+  };
+
+  store.users[user.accountId] = {
+    ...user,
+    unverifiedGraceNotifiedAt: now,
+  };
+  store.notifications[notifId] = adminNotif;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      updateDoc(doc(db, USERS_COL, user.accountId), {
+        unverifiedGraceNotifiedAt: now,
+      }),
+      setDoc(doc(db, ADMIN_NOTIF_COL, notifId), adminNotif),
+    ]);
+  } catch (err) {
+    console.warn('Unverified grace admin notify warning:', err);
+  }
+
+  return true;
+}
+
+export async function adminExtendUserUnverifiedGrace(params: {
+  accountId: string;
+  adminEmail: string;
+  days?: number;
+}): Promise<AcashUser> {
+  const days = Math.max(1, Math.min(30, Number(params.days || 7)));
+  const now = Date.now();
+  const store = readLocalStore();
+  let targetUser = store.users[params.accountId];
+  try {
+    const snap = await getDoc(doc(db, USERS_COL, params.accountId));
+    if (snap.exists()) {
+      targetUser = snap.data() as AcashUser;
+    }
+  } catch {
+    // use cached
+  }
+  if (!targetUser) {
+    throw new Error('Target account not found.');
+  }
+
+  const nextUntil = now + days * 86400000;
+  const nextCount = (targetUser.unverifiedGraceExtendedCount || 0) + 1;
+
+  const updatedUser: AcashUser = stripUndefined({
+    ...targetUser,
+    unverifiedGraceExtendedUntil: nextUntil,
+    unverifiedGraceExtendedCount: nextCount,
+    unverifiedGraceExtendedBy: params.adminEmail,
+    lastActiveAt: now,
+  });
+
+  const actEntry = makeActivityEntry({
+    idPrefix: 'ACT-GRACE',
+    actionType: 'kyc_decision',
+    title: `Extended Unverified Access (+${days}d) · ${params.accountId}`,
+    details: `${params.adminEmail} granted ${targetUser.businessName || targetUser.name} (${params.accountId}) +${days} days grace until ${new Date(nextUntil).toLocaleDateString()}. ৳1,00,000 cumulative cap still applies until KYC & 2FA are completed.`,
+    actorEmail: params.adminEmail,
+    targetIds: [params.accountId],
+    timestamp: now,
+  });
+
+  store.users[params.accountId] = updatedUser;
+  store.activityLogs[actEntry.id] = actEntry;
+  writeLocalStore(store, true);
+
+  try {
+    await Promise.all([
+      updateDoc(doc(db, USERS_COL, params.accountId), {
+        unverifiedGraceExtendedUntil: nextUntil,
+        unverifiedGraceExtendedCount: nextCount,
+        unverifiedGraceExtendedBy: params.adminEmail,
+        lastActiveAt: now,
+      }),
+      setDoc(doc(db, ADMIN_ACTIVITY_COL, actEntry.id), actEntry),
+    ]);
+  } catch (err) {
+    console.warn('Admin grace extend sync warning:', err);
+  }
+
+  const userNotif = buildAccountNotification({
+    recipientId: params.accountId,
+    recipientRole: targetUser.role,
+    title: `⏳ Admin Granted +${days} Days Access`,
+    message: `Your account remains usable until ${new Date(nextUntil).toLocaleDateString()}. Complete both KYC & 2FA Authenticator in Profile soon (৳1,00,000 unverified cap applies).`,
+    category: 'kyc',
+    severity: 'info',
+    createdBy: params.adminEmail,
+    createdAt: now,
+  });
+  await persistAccountNotifications([userNotif]);
+
+  return updatedUser;
+}
+
 
 
 

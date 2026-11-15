@@ -7,10 +7,12 @@ import {
   Building2,
   Calendar,
   CheckCircle2,
+  Clock,
   CreditCard,
   Eye,
   FileBadge2,
   FileText,
+  KeyRound,
   Lock,
   Mail,
   MapPin,
@@ -27,7 +29,14 @@ import {
 } from 'lucide-react';
 import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
 import { formatBdt } from '../../lib/i18n';
-import { adminSendAccountNotification, formatUserReferralSource } from '../../lib/acashService';
+import {
+  UNVERIFIED_GRACE_DAYS,
+  UNVERIFIED_MAX_TX_VOLUME,
+  adminExtendUserUnverifiedGrace,
+  adminSendAccountNotification,
+  formatUserReferralSource,
+  getUserComplianceState,
+} from '../../lib/acashService';
 import {
   downloadAccountStatementPdf,
   downloadCreatorKycProfilePdf,
@@ -70,6 +79,8 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
   );
   const [alertSending, setAlertSending] = useState(false);
   const [alertStatusMsg, setAlertStatusMsg] = useState('');
+  const [graceBusy, setGraceBusy] = useState(false);
+  const [graceMsg, setGraceMsg] = useState('');
 
   const accountTransactions = useMemo(
     () =>
@@ -78,6 +89,32 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
         .sort((a, b) => b.createdAt - a.createdAt),
     [allTransactions, user.accountId]
   );
+
+  const compliance = useMemo(
+    () => getUserComplianceState(user, accountTransactions),
+    [user, accountTransactions]
+  );
+
+  const handleExtendGrace = async () => {
+    setGraceBusy(true);
+    setGraceMsg('');
+    try {
+      await adminExtendUserUnverifiedGrace({
+        accountId: user.accountId,
+        adminEmail,
+        days: UNVERIFIED_GRACE_DAYS,
+      });
+      setGraceMsg(
+        lang === 'bn'
+          ? `${user.accountId}-এর আনভেরিফায়েড অ্যাক্সেস আরও ${UNVERIFIED_GRACE_DAYS} দিনের জন্য সচল করা হয়েছে।`
+          : `Extended unverified operational access for ${user.accountId} by +${UNVERIFIED_GRACE_DAYS} days.`
+      );
+    } catch (err) {
+      setGraceMsg(err instanceof Error ? err.message : 'Failed to extend grace period.');
+    } finally {
+      setGraceBusy(false);
+    }
+  };
 
   const txStats = useMemo(() => {
     let incoming = 0;
@@ -453,6 +490,115 @@ export const AdminAccountViewModal: React.FC<AdminAccountViewModalProps> = ({
               </div>
             </div>
           )}
+
+          {/* KYC + 2FA Compliance & 7-Day / ৳1 Lakh Grace Monitor */}
+          <div
+            className={`rounded-2xl border p-4 space-y-3 text-xs ${
+              compliance.isFullyVerified
+                ? 'bg-emerald-50/70 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
+                : compliance.graceExpired || compliance.volumeCapReached
+                  ? 'bg-rose-50/80 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/35'
+                  : 'bg-amber-50/80 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/35'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <div className="flex flex-wrap items-center gap-2 font-bold text-slate-900 dark:text-white">
+                  {compliance.isFullyVerified ? (
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  ) : (
+                    <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  )}
+                  <span>
+                    {compliance.isFullyVerified
+                      ? lang === 'bn'
+                        ? 'সম্পূর্ণ ভেরিফায়েড (KYC + 2FA সক্রিয়)'
+                        : 'Fully Verified (KYC + 2FA Active)'
+                      : compliance.graceExpired
+                        ? lang === 'bn'
+                          ? '৭ দিনের আনভেরিফায়েড সময়সীমা শেষ'
+                          : '7-Day Unverified Access Expired'
+                        : lang === 'bn'
+                          ? `আনভেরিফায়েড গ্রেস পিরিয়ড: ${compliance.daysRemaining} দিন বাকি`
+                          : `Unverified Grace Window: ${compliance.daysRemaining} day(s) remaining`}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300">
+                  <span className={compliance.kycVerified ? 'text-emerald-700 dark:text-emerald-300 font-semibold' : 'text-rose-700 dark:text-rose-300 font-semibold'}>
+                    KYC: {compliance.kycVerified ? 'Verified' : (user.kyc?.status || 'unverified').toUpperCase()}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className={compliance.twoFactorEnabled ? 'text-emerald-700 dark:text-emerald-300 font-semibold' : 'text-rose-700 dark:text-rose-300 font-semibold'}>
+                    <KeyRound className="w-3 h-3 inline mr-1" />
+                    2FA Authenticator: {compliance.twoFactorEnabled ? 'Linked' : 'Not Linked'}
+                  </span>
+                  {(user.unverifiedGraceExtendedCount || 0) > 0 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-semibold text-indigo-700 dark:text-indigo-300">
+                        Extended {user.unverifiedGraceExtendedCount}×
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {!compliance.isFullyVerified && (
+                <button
+                  type="button"
+                  disabled={graceBusy}
+                  onClick={() => void handleExtendGrace()}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 shadow-sm transition-colors disabled:opacity-50 shrink-0"
+                >
+                  <Clock className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {graceBusy
+                      ? lang === 'bn'
+                        ? 'আপডেট হচ্ছে...'
+                        : 'Extending...'
+                      : lang === 'bn'
+                        ? '+৭ দিন অ্যাক্সেস দিন'
+                        : 'Extend +7 Days Access'}
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {!compliance.isFullyVerified && (
+              <div className="space-y-1.5 pt-1">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="text-slate-600 dark:text-slate-300 font-medium">
+                    {lang === 'bn'
+                      ? 'আনভেরিফায়েড আউটগোয়িং লিমিট ব্যবহার'
+                      : 'Unverified Outgoing Volume Cap'}
+                  </span>
+                  <span className="font-mono-tabular font-bold text-slate-900 dark:text-white">
+                    {formatBdt(compliance.totalOutgoingUsed, lang)} / {formatBdt(UNVERIFIED_MAX_TX_VOLUME, lang)}
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-white/80 dark:bg-[#0B0D14] overflow-hidden border border-slate-200/70 dark:border-slate-700/70">
+                  <div
+                    className={`h-full transition-all ${
+                      compliance.volumeCapReached
+                        ? 'bg-rose-600'
+                        : compliance.totalOutgoingUsed >= UNVERIFIED_MAX_TX_VOLUME * 0.8
+                          ? 'bg-amber-500'
+                          : 'bg-indigo-600'
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.round((compliance.totalOutgoingUsed / UNVERIFIED_MAX_TX_VOLUME) * 100))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {graceMsg && (
+              <div className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+                {graceMsg}
+              </div>
+            )}
+          </div>
 
           {/* KPI Summary Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

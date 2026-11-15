@@ -16,7 +16,6 @@ import {
   FileText,
   Sparkles,
   ArrowUpRight,
-  ArrowDownLeft,
   Search,
   MapPin,
   Bell,
@@ -27,6 +26,7 @@ import {
   calculateFeeBreakdown,
   executeFinancialTransaction,
   executeMerchantRefund,
+  UserComplianceState,
   verifyMerchantOwnerPin,
 } from '../../lib/acashService';
 import {
@@ -34,10 +34,18 @@ import {
   downloadMerchantQrStandeePdf,
 } from '../../lib/pdfGenerator';
 import { playMerchantSoundbox, playTransactionVoiceAlert } from '../../lib/soundbox';
-import { TapAndHoldButton } from '../common/TapAndHoldButton';
+import { triggerHapticGesture } from '../../lib/deviceAlerts';
+import {
+  authorizeTransactionWithBiometrics,
+  detectWebAuthnCapability,
+  WebAuthnCapability,
+} from '../../lib/webauthn';
+import { BiometricConfirmBox } from '../common/BiometricConfirmBox';
 import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { ACASH_MAIN_LOGO_SRC } from '../common/BrandLogo';
 import { Wallet3DCard } from '../common/Wallet3DCard';
+import { ComplianceAlertBanner } from '../common/ComplianceAlertBanner';
+import { TransactionRowItem } from '../common/TransactionRowItem';
 import { usePortalTheme } from '../../lib/portalThemes';
 
 interface MerchantPanelProps {
@@ -47,8 +55,15 @@ interface MerchantPanelProps {
   lang: Language;
   onOpenMapLocationPicker?: () => void;
   onOpenNotifications?: () => void;
+  onOpenBiometricSettings?: () => void;
   unreadNotifications?: number;
   externalQrSignal?: number;
+  homeNavSignal?: number;
+  compliance?: UserComplianceState;
+  complianceBannerDismissed?: boolean;
+  onDismissComplianceBanner?: () => void;
+  onOpenKyc?: () => void;
+  onOpen2fa?: () => void;
 }
 
 type MerchantTab = 'checkout' | 'cashout' | 'refunds' | 'b2b' | 'analytics' | 'statement';
@@ -60,8 +75,15 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   lang,
   onOpenMapLocationPicker,
   onOpenNotifications,
+  onOpenBiometricSettings,
   unreadNotifications = 0,
   externalQrSignal = 0,
+  homeNavSignal = 0,
+  compliance,
+  complianceBannerDismissed = false,
+  onDismissComplianceBanner,
+  onOpenKyc,
+  onOpen2fa,
 }) => {
   const { preset } = usePortalTheme();
   const [activeTab, setActiveTab] = useState<MerchantTab>('checkout');
@@ -70,6 +92,8 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [unlockModalOpen, setUnlockModalOpen] = useState(false);
   const [unlockPin, setUnlockPin] = useState('');
   const [unlockError, setUnlockError] = useState('');
+  const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
+  const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'tap_hold'>('tap_hold');
 
   // Dynamic QR & Payment Link
   const [checkoutAmount, setCheckoutAmount] = useState('1250');
@@ -88,7 +112,6 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   // Refund state
   const [refundHash, setRefundHash] = useState('');
   const [refundAmount, setRefundAmount] = useState('');
-  const [refundPin, setRefundPin] = useState('');
   const [refundStep, setRefundStep] = useState<'form' | 'confirm' | 'done'>('form');
   const [refundSubmitting, setRefundSubmitting] = useState(false);
   const [refundError, setRefundError] = useState('');
@@ -98,7 +121,6 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [b2bTarget, setB2bTarget] = useState('');
   const [b2bAmount, setB2bAmount] = useState('');
   const [b2bNote, setB2bNote] = useState('');
-  const [b2bPin, setB2bPin] = useState('');
   const [b2bStep, setB2bStep] = useState<'form' | 'confirm' | 'done'>('form');
   const [b2bSubmitting, setB2bSubmitting] = useState(false);
   const [b2bError, setB2bError] = useState('');
@@ -109,13 +131,32 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const [cashOutAgentId, setCashOutAgentId] = useState('');
   const [cashOutAmount, setCashOutAmount] = useState('');
   const [cashOutNote, setCashOutNote] = useState('');
-  const [cashOutPin, setCashOutPin] = useState('');
   const [cashOutStep, setCashOutStep] = useState<'form' | 'confirm' | 'done'>('form');
   const [cashOutSubmitting, setCashOutSubmitting] = useState(false);
   const [cashOutError, setCashOutError] = useState('');
   const [cashOutResult, setCashOutResult] = useState<AcashTransaction | null>(null);
 
   const [selectedReceipt, setSelectedReceipt] = useState<AcashTransaction | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void detectWebAuthnCapability().then((cap) => {
+      if (mounted) setWebauthnCap(cap);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const enrolledBiometrics = user.webauthnCredentials || [];
+  const biometricsReady =
+    enrolledBiometrics.length > 0 && Boolean(webauthnCap?.supported);
+
+  useEffect(() => {
+    if (homeNavSignal > 0) {
+      setActiveTab('checkout');
+    }
+  }, [homeNavSignal]);
 
   const numericCashOutAmt = Number(cashOutAmount) || 0;
   const { fee: cashOutFee } = useMemo(
@@ -293,61 +334,101 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
     }
   };
 
-  const handleRefundConfirm = async () => {
+  const handleRefundConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
     setRefundError('');
     setRefundSubmitting(true);
     try {
+      const amt = Number(refundAmount);
+      const biometricProof =
+        useBiometric && biometricsReady
+          ? await authorizeTransactionWithBiometrics({
+              accountId: user.accountId,
+              txType: 'refund',
+              amount: amt,
+              target: refundHash,
+              credentials: enrolledBiometrics,
+            })
+          : undefined;
       const res = await executeMerchantRefund({
         merchantId: user.accountId,
         txHashInput: refundHash,
-        refundAmount: Number(refundAmount),
-        pin: refundPin,
+        refundAmount: amt,
+        ...(biometricProof
+          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
+          : { authorizeViaSession: true }),
       });
+      triggerHapticGesture('success');
       setRefundResult(res);
       setRefundStep('done');
-      setRefundPin('');
     } catch (err) {
+      triggerHapticGesture('warning');
       setRefundError(err instanceof Error ? err.message : 'Refund failed.');
     } finally {
       setRefundSubmitting(false);
     }
   };
 
-  const handleB2bConfirm = async () => {
+  const handleB2bConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
     setB2bError('');
     setB2bSubmitting(true);
     try {
+      const amt = Number(b2bAmount);
+      const biometricProof =
+        useBiometric && biometricsReady
+          ? await authorizeTransactionWithBiometrics({
+              accountId: user.accountId,
+              txType: 'b2b_transfer',
+              amount: amt,
+              target: b2bTarget,
+              credentials: enrolledBiometrics,
+            })
+          : undefined;
       const res = await executeFinancialTransaction({
         type: 'b2b_transfer',
         senderId: user.accountId,
         receiverIdentifier: b2bTarget,
-        amount: Number(b2bAmount),
-        pin: b2bPin,
+        amount: amt,
+        ...(biometricProof
+          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
+          : { authorizeViaSession: true }),
         feeConfig,
         note: b2bNote || 'B2B Supplier Settlement',
       });
+      triggerHapticGesture('success');
       setB2bResult(res);
       setB2bStep('done');
-      setB2bPin('');
       setB2bAmount('');
     } catch (err) {
+      triggerHapticGesture('warning');
       setB2bError(err instanceof Error ? err.message : 'B2B Transfer failed.');
     } finally {
       setB2bSubmitting(false);
     }
   };
 
-  const handleMerchantCashOutConfirm = async () => {
+  const handleMerchantCashOutConfirm = async (useBiometric = false, optionalAugmentPin?: string) => {
     setCashOutError('');
     setCashOutSubmitting(true);
     try {
       const target = cashOutMode === 'admin' ? 'ADMIN-TREASURY' : cashOutAgentId;
+      const biometricProof =
+        useBiometric && biometricsReady
+          ? await authorizeTransactionWithBiometrics({
+              accountId: user.accountId,
+              txType: 'merchant_cash_out',
+              amount: numericCashOutAmt,
+              target,
+              credentials: enrolledBiometrics,
+            })
+          : undefined;
       const res = await executeFinancialTransaction({
         type: 'merchant_cash_out',
         senderId: user.accountId,
         receiverIdentifier: target,
         amount: numericCashOutAmt,
-        pin: cashOutPin,
+        ...(biometricProof
+          ? { biometricProof, ...(optionalAugmentPin ? { pin: optionalAugmentPin } : {}) }
+          : { authorizeViaSession: true }),
         feeConfig,
         note:
           cashOutNote ||
@@ -355,11 +436,12 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             ? 'Merchant Cash-Out to Admin Treasury'
             : `Merchant Cash-Out via Agent ${cashOutAgentId}`),
       });
+      triggerHapticGesture('success');
       setCashOutResult(res);
       setCashOutStep('done');
-      setCashOutPin('');
       setCashOutAmount('');
     } catch (err) {
+      triggerHapticGesture('warning');
       setCashOutError(err instanceof Error ? err.message : 'Merchant Cash-Out failed.');
     } finally {
       setCashOutSubmitting(false);
@@ -369,7 +451,18 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   const isDisabled = user.status !== 'active';
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 pb-24 md:pb-10">
+    <div className="max-w-7xl mx-auto px-3.5 sm:px-6 py-4 sm:py-6 space-y-5 pb-24 md:pb-10">
+      {compliance && onDismissComplianceBanner && onOpenKyc && onOpen2fa && (
+        <ComplianceAlertBanner
+          compliance={compliance}
+          lang={lang}
+          dismissed={complianceBannerDismissed}
+          onDismiss={onDismissComplianceBanner}
+          onOpenKyc={onOpenKyc}
+          onOpen2fa={onOpen2fa}
+        />
+      )}
+
       {isDisabled && (
         <div className="rounded-2xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/40 px-4 py-3.5 flex items-start gap-3 text-sm text-rose-800 dark:text-rose-200">
           <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
@@ -503,12 +596,12 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
         }
       />
 
-      {/* Tactile 3D Merchant Sub-Navigation Tabs */}
-      <div className="flex flex-wrap gap-2">
+      {/* Tactile 3D Merchant Sub-Navigation Tabs — wrap-safe mobile grid */}
+      <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
         <button
           type="button"
           onClick={() => setActiveTab('checkout')}
-          className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap shrink-0 ${
+          className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border truncate cursor-pointer ${
             activeTab === 'checkout'
               ? preset.activeTabClass
               : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
@@ -522,62 +615,62 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('cashout')}
-              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
                 activeTab === 'cashout'
                   ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <ArrowUpRight className="w-3.5 h-3.5" />
-              <span>{t('merchantCashOut', lang)}</span>
+              <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{t('merchantCashOut', lang)}</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('refunds')}
-              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
                 activeTab === 'refunds'
                   ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>{t('refundEngine', lang)}</span>
+              <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{t('refundEngine', lang)}</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('b2b')}
-              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
                 activeTab === 'b2b'
                   ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Building2 className="w-3.5 h-3.5" />
-              <span>{t('b2bTransfer', lang)}</span>
+              <Building2 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{t('b2bTransfer', lang)}</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('analytics')}
-              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
                 activeTab === 'analytics'
                   ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <BarChart3 className="w-3.5 h-3.5" />
-              <span>{t('salesAnalytics', lang)}</span>
+              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{t('salesAnalytics', lang)}</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('statement')}
-              className={`acash-3d-tile min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
                 activeTab === 'statement'
                   ? preset.activeTabClass
                   : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <FileText className="w-3.5 h-3.5" />
-              <span>{lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement'}</span>
+              <FileText className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement'}</span>
             </button>
           </>
         )}
@@ -686,16 +779,27 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             </button>
           </div>
 
-          {/* Incoming Counter Feed */}
+          {/* Incoming Counter Feed (Minimized to latest 5 with Statement link) */}
           <div className="lg:col-span-7 acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
                 {lang === 'bn' ? 'প্রাপ্ত পেমেন্টসমূহ' : 'Incoming Counter Payments'}
               </h3>
-              <span className="text-xs text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1.5 font-medium">
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>{t('soundboxActive', lang)}</span>
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1 font-medium">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{t('soundboxActive', lang)}</span>
+                </span>
+                {!cashierMode && incomingPayments.length > 5 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('statement')}
+                    className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                  >
+                    {lang === 'bn' ? 'সব দেখুন →' : `All (${incomingPayments.length}) →`}
+                  </button>
+                )}
+              </div>
             </div>
 
             {incomingPayments.length === 0 ? (
@@ -703,51 +807,35 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                 {t('noTransactions', lang)}
               </div>
             ) : (
-              <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[540px] overflow-y-auto">
-                {incomingPayments.map((tx) => (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {incomingPayments.slice(0, 5).map((tx) => (
                   <div
                     key={tx.txId}
-                    className="px-6 py-3.5 flex items-center justify-between gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                    onClick={() => setSelectedReceipt(tx)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedReceipt(tx);
+                      }
+                    }}
+                    className="cursor-pointer"
                   >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedReceipt(tx)}
-                      className="text-left min-w-0 flex-1"
-                    >
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {tx.senderName} ({tx.senderId})
-                      </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2 truncate">
-                        <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400">{tx.txHash}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{new Date(tx.createdAt).toLocaleString()}</span>
-                      </div>
-                    </button>
-
-                    <div className="text-right shrink-0 flex items-center gap-3">
-                      <div>
-                        <div className="font-mono-tabular text-sm font-bold text-emerald-600 dark:text-emerald-400">
-                          + {formatBdt(tx.amount, lang)}
-                        </div>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {tx.status.replace(/_/g, ' ')}
-                        </div>
-                      </div>
-                      {!cashierMode && tx.status !== 'refunded' && tx.status === 'completed' && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRefundHash(tx.txHash);
-                            setRefundAmount(String(tx.amount - (tx.refundedAmount || 0)));
-                            setRefundStep('form');
-                            setActiveTab('refunds');
-                          }}
-                          className="px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-[11px] font-semibold text-rose-700 dark:text-rose-200"
-                        >
-                          Refund
-                        </button>
-                      )}
-                    </div>
+                    <TransactionRowItem
+                      tx={tx}
+                      viewerAccountId={user.accountId}
+                      lang={lang}
+                      showRefundAction={!cashierMode}
+                      onRefundClick={(targetTx) => {
+                        setRefundHash(targetTx.txHash);
+                        setRefundAmount(
+                          String(targetTx.amount - (targetTx.refundedAmount || 0))
+                        );
+                        setRefundStep('form');
+                        setActiveTab('refunds');
+                      }}
+                    />
                   </div>
                 ))}
               </div>
@@ -843,7 +931,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     );
                     return;
                   }
-                  setCashOutPin('');
+                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
                   setCashOutStep('confirm');
                 }}
                 className="space-y-4"
@@ -949,9 +1037,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             {cashOutStep === 'confirm' && (
               <div className="space-y-4">
                 <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 text-xs space-y-1.5">
-                  <div className="flex justify-between">
+                  <div className="flex justify-between gap-2">
                     <span className="text-slate-500 dark:text-slate-400">Cash-Out Destination</span>
-                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400 font-semibold">
+                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400 font-semibold text-right break-all">
                       {cashOutMode === 'admin' ? 'ADMIN-TREASURY' : cashOutAgentId}
                     </span>
                   </div>
@@ -963,34 +1051,28 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   </div>
                 </div>
 
-                <input
-                  type="password"
-                  maxLength={5}
-                  inputMode="numeric"
-                  value={cashOutPin}
-                  onChange={(e) => setCashOutPin(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Enter Merchant PIN"
-                  className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 tracking-widest focus:outline-none focus:border-indigo-500"
-                />
-
-                {cashOutError && (
-                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
-                    {cashOutError}
-                  </div>
-                )}
-
-                <TapAndHoldButton
+                <BiometricConfirmBox
+                  user={user}
                   lang={lang}
-                  loading={cashOutSubmitting}
-                  disabled={cashOutPin.length < 4}
-                  amountLabel={`Cash-Out ${formatBdt(totalCashOutDebit, lang)}`}
-                  onConfirm={handleMerchantCashOutConfirm}
+                  amount={numericCashOutAmt}
+                  amountLabel={formatBdt(totalCashOutDebit, lang)}
+                  platformHighValueThreshold={feeConfig.highValueThreshold}
+                  webauthnCap={webauthnCap}
+                  authMode={confirmAuthMode}
+                  onAuthModeChange={setConfirmAuthMode}
+                  submitting={cashOutSubmitting}
+                  error={cashOutError}
+                  onClearError={() => setCashOutError('')}
+                  onConfirmBiometric={(pin) => handleMerchantCashOutConfirm(true, pin)}
+                  onConfirmTapHold={() => handleMerchantCashOutConfirm(false)}
+                  onOpenBiometricSettings={onOpenBiometricSettings}
+                  tapHoldButtonLabel={`Cash-Out ${formatBdt(totalCashOutDebit, lang)}`}
                 />
 
                 <button
                   type="button"
                   onClick={() => setCashOutStep('form')}
-                  className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                  className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
                 >
                   {t('back', lang)}
                 </button>
@@ -1025,41 +1107,35 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             )}
           </div>
 
-          <div className="lg:col-span-6 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-6 space-y-3 shadow-sm">
-            <h4 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
-              Recent Merchant Cash-Outs (Agent / Admin)
-            </h4>
-            <div className="space-y-2 max-h-96 overflow-y-auto">
+          <div className="lg:col-span-6 rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+              <h4 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+                Recent Merchant Cash-Outs (Agent / Admin)
+              </h4>
+            </div>
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-96 overflow-y-auto">
               {transactions
                 .filter((tx) => tx.senderId === user.accountId && tx.type === 'merchant_cash_out')
                 .map((tx) => (
-                  <button
+                  <div
                     key={tx.txId}
-                    type="button"
                     onClick={() => setSelectedReceipt(tx)}
-                    className="w-full p-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-500/60 flex items-center justify-between text-left transition-colors"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedReceipt(tx);
+                      }
+                    }}
+                    className="cursor-pointer"
                   >
-                    <div>
-                      <div className="text-xs font-semibold text-slate-900 dark:text-white">
-                        To {tx.receiverName} ({tx.receiverId})
-                      </div>
-                      <div className="font-mono-tabular text-[11px] text-indigo-600 dark:text-indigo-400">
-                        {tx.txHash} · {new Date(tx.createdAt).toLocaleString()}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono-tabular text-xs font-bold text-slate-900 dark:text-white">
-                        - {formatBdt(tx.amount, lang)}
-                      </div>
-                      {tx.fee > 0 && (
-                        <div className="font-mono-tabular text-[11px] text-amber-600 dark:text-amber-300">
-                          Fee: {formatBdt(tx.fee, lang)} (@৳{tx.feeBreakdown?.ratePer1000 || 0}/1k) · Total:{' '}
-                          {formatBdt(tx.totalDebited, lang)}
-                        </div>
-                      )}
-                      <div className="text-[11px] text-emerald-600 dark:text-emerald-400">{tx.status.replace(/_/g, ' ')}</div>
-                    </div>
-                  </button>
+                    <TransactionRowItem
+                      tx={tx}
+                      viewerAccountId={user.accountId}
+                      lang={lang}
+                    />
+                  </div>
                 ))}
               {transactions.filter(
                 (tx) => tx.senderId === user.accountId && tx.type === 'merchant_cash_out'
@@ -1094,6 +1170,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     setRefundError('Enter a valid refund amount.');
                     return;
                   }
+                  setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
                   setRefundStep('confirm');
                 }}
                 className="space-y-4"
@@ -1206,9 +1283,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             {refundStep === 'confirm' && (
               <div className="space-y-4">
                 <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 text-xs space-y-1.5">
-                  <div className="flex justify-between">
+                  <div className="flex justify-between gap-2">
                     <span className="text-slate-500 dark:text-slate-400">Target Tx Hash</span>
-                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400">{refundHash}</span>
+                    <span className="font-mono-tabular text-indigo-600 dark:text-indigo-400 break-all">{refundHash}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500 dark:text-slate-400">Refund Amount</span>
@@ -1218,39 +1295,28 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
-                    {t('enterPinConfirm', lang)}
-                  </label>
-                  <input
-                    type="password"
-                    maxLength={5}
-                    inputMode="numeric"
-                    value={refundPin}
-                    onChange={(e) => setRefundPin(e.target.value.replace(/\D/g, ''))}
-                    placeholder="••••"
-                    className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 tracking-widest focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                {refundError && (
-                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
-                    {refundError}
-                  </div>
-                )}
-
-                <TapAndHoldButton
+                <BiometricConfirmBox
+                  user={user}
                   lang={lang}
-                  loading={refundSubmitting}
-                  disabled={refundPin.length < 4}
-                  amountLabel={`Refund ${formatBdt(Number(refundAmount), lang)}`}
-                  onConfirm={handleRefundConfirm}
+                  amount={Number(refundAmount) || 0}
+                  amountLabel={formatBdt(Number(refundAmount) || 0, lang)}
+                  platformHighValueThreshold={feeConfig.highValueThreshold}
+                  webauthnCap={webauthnCap}
+                  authMode={confirmAuthMode}
+                  onAuthModeChange={setConfirmAuthMode}
+                  submitting={refundSubmitting}
+                  error={refundError}
+                  onClearError={() => setRefundError('')}
+                  onConfirmBiometric={(pin) => handleRefundConfirm(true, pin)}
+                  onConfirmTapHold={() => handleRefundConfirm(false)}
+                  onOpenBiometricSettings={onOpenBiometricSettings}
+                  tapHoldButtonLabel={`Refund ${formatBdt(Number(refundAmount) || 0, lang)}`}
                 />
 
                 <button
                   type="button"
                   onClick={() => setRefundStep('form')}
-                  className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                  className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
                 >
                   {t('back', lang)}
                 </button>
@@ -1331,6 +1397,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   setB2bError('Enter supplier Merchant ID and amount.');
                   return;
                 }
+                setConfirmAuthMode(biometricsReady ? 'biometric' : 'tap_hold');
                 setB2bStep('confirm');
               }}
               className="space-y-4"
@@ -1391,54 +1458,48 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
             </form>
           )}
 
-          {b2bStep === 'confirm' && (
-            <div className="space-y-4">
-              <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 text-xs space-y-1.5">
-                <div className="flex justify-between">
-                  <span className="text-slate-500 dark:text-slate-400">Supplier Merchant</span>
-                  <span className="font-mono-tabular text-slate-900 dark:text-white font-semibold">{b2bTarget}</span>
+            {b2bStep === 'confirm' && (
+              <div className="space-y-4">
+                <div className="rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 text-xs space-y-1.5">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Supplier Merchant</span>
+                    <span className="font-mono-tabular text-slate-900 dark:text-white font-semibold">{b2bTarget}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 dark:text-slate-400">Settlement Amount</span>
+                    <span className="font-mono-tabular font-bold text-indigo-600 dark:text-indigo-400">
+                      {formatBdt(Number(b2bAmount), lang)}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500 dark:text-slate-400">Settlement Amount</span>
-                  <span className="font-mono-tabular font-bold text-indigo-600 dark:text-indigo-400">
-                    {formatBdt(Number(b2bAmount), lang)}
-                  </span>
-                </div>
+
+                <BiometricConfirmBox
+                  user={user}
+                  lang={lang}
+                  amount={Number(b2bAmount) || 0}
+                  amountLabel={formatBdt(Number(b2bAmount) || 0, lang)}
+                  platformHighValueThreshold={feeConfig.highValueThreshold}
+                  webauthnCap={webauthnCap}
+                  authMode={confirmAuthMode}
+                  onAuthModeChange={setConfirmAuthMode}
+                  submitting={b2bSubmitting}
+                  error={b2bError}
+                  onClearError={() => setB2bError('')}
+                  onConfirmBiometric={(pin) => handleB2bConfirm(true, pin)}
+                  onConfirmTapHold={() => handleB2bConfirm(false)}
+                  onOpenBiometricSettings={onOpenBiometricSettings}
+                  tapHoldButtonLabel={`B2B Transfer ${formatBdt(Number(b2bAmount) || 0, lang)}`}
+                />
+
+                <button
+                  type="button"
+                  onClick={() => setB2bStep('form')}
+                  className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                >
+                  {t('back', lang)}
+                </button>
               </div>
-
-              <input
-                type="password"
-                maxLength={5}
-                inputMode="numeric"
-                value={b2bPin}
-                onChange={(e) => setB2bPin(e.target.value.replace(/\D/g, ''))}
-                placeholder="Enter Merchant PIN"
-                className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 tracking-widest focus:outline-none focus:border-indigo-500"
-              />
-
-              {b2bError && (
-                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
-                  {b2bError}
-                </div>
-              )}
-
-              <TapAndHoldButton
-                lang={lang}
-                loading={b2bSubmitting}
-                disabled={b2bPin.length < 4}
-                amountLabel={`B2B Transfer ${formatBdt(Number(b2bAmount), lang)}`}
-                onConfirm={handleB2bConfirm}
-              />
-
-              <button
-                type="button"
-                onClick={() => setB2bStep('form')}
-                className="w-full py-2 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-              >
-                {t('back', lang)}
-              </button>
-            </div>
-          )}
+            )}
 
           {b2bStep === 'done' && b2bResult && (
             <div className="py-5 text-center space-y-3">
@@ -1580,70 +1641,36 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     tx.type.toLowerCase().includes(q)
                   );
                 })
-                .map((tx) => {
-                  const isIncoming = tx.receiverId === user.accountId;
-                  const rateNote =
-                    tx.fee > 0
-                      ? tx.feeBreakdown?.chargeMode === 'flat'
-                        ? 'Flat'
-                        : `@৳${tx.feeBreakdown?.ratePer1000 || 0}/1k`
-                      : '';
-                  return (
-                    <button
-                      key={tx.txId}
-                      type="button"
-                      onClick={() => setSelectedReceipt(tx)}
-                      className="w-full px-6 py-3.5 flex items-center justify-between gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors text-left"
-                    >
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                            isIncoming
-                              ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                              : 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
-                          }`}
-                        >
-                          {isIncoming ? (
-                            <ArrowDownLeft className="w-5 h-5" />
-                          ) : (
-                            <ArrowUpRight className="w-5 h-5" />
-                          )}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                            {isIncoming ? tx.senderName : tx.receiverName}
-                          </div>
-                          <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                            <span>{tx.type.replace(/_/g, ' ').toUpperCase()}</span>
-                            <span aria-hidden="true">·</span>
-                            <span className="font-mono-tabular">{tx.txHash}</span>
-                            <span aria-hidden="true">·</span>
-                            <span>{new Date(tx.createdAt).toLocaleString()}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="text-right shrink-0">
-                        <div
-                          className={`font-mono-tabular text-sm font-bold ${
-                            isIncoming ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-900 dark:text-white'
-                          }`}
-                        >
-                          {isIncoming ? '+' : '-'} {formatBdt(tx.amount, lang)}
-                        </div>
-                        {!isIncoming && tx.fee > 0 && (
-                          <div className="font-mono-tabular text-[11px] text-amber-600 dark:text-amber-300 mt-0.5">
-                            Charge: {formatBdt(tx.fee, lang)} ({rateNote}) · Total:{' '}
-                            {formatBdt(tx.totalDebited, lang)}
-                          </div>
-                        )}
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                          {tx.status.replace(/_/g, ' ')}
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
+                .map((tx) => (
+                  <div
+                    key={tx.txId}
+                    onClick={() => setSelectedReceipt(tx)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedReceipt(tx);
+                      }
+                    }}
+                    className="cursor-pointer"
+                  >
+                    <TransactionRowItem
+                      tx={tx}
+                      viewerAccountId={user.accountId}
+                      lang={lang}
+                      showRefundAction={!cashierMode}
+                      onRefundClick={(targetTx) => {
+                        setRefundHash(targetTx.txHash);
+                        setRefundAmount(
+                          String(targetTx.amount - (targetTx.refundedAmount || 0))
+                        );
+                        setRefundStep('form');
+                        setActiveTab('refunds');
+                      }}
+                    />
+                  </div>
+                ))}
             </div>
           )}
         </div>
@@ -1660,7 +1687,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               Unlock Merchant Owner Mode
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Enter your Merchant Owner PIN to exit Cashier Staff View.
+              Enter your Merchant Owner Passcode to exit Cashier Staff View.
             </p>
             <input
               type="password"
@@ -1669,7 +1696,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               inputMode="numeric"
               value={unlockPin}
               onChange={(e) => setUnlockPin(e.target.value.replace(/\D/g, ''))}
-              placeholder="Owner PIN"
+              placeholder="Owner Passcode"
               className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 tracking-widest focus:outline-none focus:border-indigo-500"
             />
             {unlockError && (

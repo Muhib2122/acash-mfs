@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
   Camera,
+  Check,
   CheckCircle2,
   Copy,
   FileBadge2,
   Fingerprint,
   KeyRound,
   LogOut,
+  Pencil,
   QrCode,
   RefreshCw,
   ShieldCheck,
@@ -19,7 +21,14 @@ import {
   MapPin,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { AcashTransaction, AcashUser, FeeConfig, Language, UserGender } from '../../types/acash';
+import {
+  AcashTransaction,
+  AcashUser,
+  BiometricHighValueMode,
+  FeeConfig,
+  Language,
+  UserGender,
+} from '../../types/acash';
 import {
   changeUserSecurityPin,
   enrollUserTotpSecret,
@@ -27,7 +36,9 @@ import {
   formatUserReferralSource,
   removeUserTotpSecret,
   removeUserWebAuthnPasskey,
+  renameUserWebAuthnPasskey,
   saveUserMapLocation,
+  updateUserBiometricPreferences,
   updateUserGender,
   updateUserKyc,
   updateUserProfilePhoto,
@@ -42,6 +53,7 @@ import {
 import {
   authorizeTransactionWithBiometrics,
   detectWebAuthnCapability,
+  normalizeBiometricPrefs,
   registerCustomerBiometricPasskey,
   WebAuthnCapability,
 } from '../../lib/webauthn';
@@ -135,6 +147,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [bioPinConfirm, setBioPinConfirm] = useState('');
   const [bioDeviceLabel, setBioDeviceLabel] = useState('');
   const [bioBusy, setBioBusy] = useState(false);
+  const [editingCredId, setEditingCredId] = useState<string | null>(null);
+  const [editingCredLabel, setEditingCredLabel] = useState('');
+
+  const bioPrefs = normalizeBiometricPrefs(user.biometricPrefs);
 
   // Google Authenticator (TOTP) 2FA login state
   const [pendingTotpSecret, setPendingTotpSecret] = useState<string | null>(null);
@@ -342,6 +358,60 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not remove biometric passkey.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleRenameBiometricPasskey = async (credentialId: string) => {
+    const trimmed = editingCredLabel.trim();
+    if (!trimmed) return;
+    setErrorMsg('');
+    setStatusMsg('');
+    setBioBusy(true);
+    try {
+      await renameUserWebAuthnPasskey({
+        accountId: user.accountId,
+        credentialId,
+        newLabel: trimmed,
+      });
+      setEditingCredId(null);
+      setEditingCredLabel('');
+      setStatusMsg(
+        lang === 'bn'
+          ? 'ডিভাইসের নাম আপডেট হয়েছে।'
+          : 'Biometric device label updated.'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not rename device.');
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleUpdateBioPrefs = async (
+    patch: Partial<{
+      enabled: boolean;
+      highValueThreshold: number;
+      highValueMode: BiometricHighValueMode;
+      quickUnlockEnabled: boolean;
+    }>
+  ) => {
+    setErrorMsg('');
+    setStatusMsg('');
+    setBioBusy(true);
+    try {
+      await updateUserBiometricPreferences({
+        accountId: user.accountId,
+        prefs: patch,
+      });
+      setStatusMsg(
+        lang === 'bn'
+          ? 'বায়োমেট্রিক সুরক্ষা সেটিংস সংরক্ষণ হয়েছে।'
+          : 'Biometric protection preferences saved.'
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not save biometric preferences.');
     } finally {
       setBioBusy(false);
     }
@@ -969,23 +1039,52 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           {/* TAB 3: Biometric Passkeys (WebAuthn) & Change Security PIN */}
           {tab === 'pin' && (
             <div className="space-y-6">
-              {/* Device Biometrics / WebAuthn Enrollment */}
-              <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-4">
+              {/* Device Biometrics / WebAuthn Enrollment & High-Value Policy */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 flex items-center justify-center shrink-0">
-                      <Fingerprint className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 flex items-center justify-center shrink-0">
+                      <Fingerprint className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <h4 className="font-display text-sm font-bold text-slate-900 dark:text-white">
                         {lang === 'bn'
-                          ? 'ডিভাইস বায়োমেট্রিক লেনদেন নিশ্চিতকরণ (WebAuthn)'
-                          : 'Device Biometric Transaction Confirmation (WebAuthn)'}
+                          ? 'বায়োমেট্রিক সুরক্ষা ও উচ্চ-মূল্য শিল্ড'
+                          : 'Biometric Authentication & High-Value Shield'}
                       </h4>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
                         {lang === 'bn'
-                          ? 'ফোন বা কম্পিউটারের ফিঙ্গারপ্রিন্ট / ফেস আইডি দিয়ে পিন না লিখেই নিরাপদে লেনদেন নিশ্চিত করুন।'
-                          : 'Confirm transactions with Fingerprint, Face ID, or Windows Hello instead of typing your passcode.'}
+                          ? 'ফিঙ্গারপ্রিন্ট বা ফেস আইডি দিয়ে সহজ নিশ্চিতকরণ এবং উচ্চ-মূল্যের লেনদেনে অতিরিক্ত সুরক্ষা সেট করুন।'
+                          : 'Use Face ID, Fingerprint, or Windows Hello to replace or augment verification on high-value transfers.'}
+                      </p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 font-mono-tabular">
+                        {webauthnCap === null
+                          ? lang === 'bn'
+                            ? 'ডিভাইস সেন্সর যাচাই হচ্ছে...'
+                            : 'Checking device sensor...'
+                          : webauthnCap.supported
+                            ? webauthnCap.inEmbeddedFrame
+                              ? lang === 'bn'
+                                ? 'এমবেডেড ফ্রেম · নতুন ট্যাবে সম্পূর্ণ বায়োমেট্রিক চলবে'
+                                : 'Embedded Frame · Open in own tab for native sensor'
+                              : webauthnCap.platformAvailable
+                                ? lang === 'bn'
+                                  ? 'প্ল্যাটফর্ম বায়োমেট্রিক সেন্সর প্রস্তুত'
+                                  : 'Platform Biometric Sensor Ready'
+                                : lang === 'bn'
+                                  ? 'WebAuthn পাসকি প্রস্তুত'
+                                  : 'WebAuthn Passkey Ready'
+                            : lang === 'bn'
+                              ? 'এই ব্রাউজারে বায়োমেট্রিক সাপোর্ট নেই'
+                              : 'Biometrics unsupported in this browser'}
+                        {(bioPrefs.biometricTxCount || 0) > 0 && (
+                          <>
+                            {' · '}
+                            {lang === 'bn'
+                              ? `${bioPrefs.biometricTxCount}টি যাচাইকৃত লেনদেন`
+                              : `${bioPrefs.biometricTxCount} verified transfers`}
+                          </>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -995,30 +1094,184 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       type="button"
                       disabled={bioBusy}
                       onClick={handleTestBiometricPrompt}
-                      className="min-h-[38px] px-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-xs font-semibold text-indigo-600 dark:text-indigo-400 whitespace-nowrap shrink-0 disabled:opacity-50"
+                      className="min-h-[40px] px-3.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-emerald-400 text-xs font-semibold text-emerald-700 dark:text-emerald-300 whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
                     >
                       {bioBusy
-                        ? 'Verifying...'
+                        ? lang === 'bn'
+                          ? 'যাচাই হচ্ছে...'
+                          : 'Verifying...'
                         : lang === 'bn'
-                          ? 'বায়োমেট্রিক টেস্ট করুন'
-                          : 'Test Biometric Prompt'}
+                          ? 'সেন্সর টেস্ট'
+                          : 'Test Scan'}
                     </button>
                   )}
                 </div>
 
-                {webauthnCap && !webauthnCap.supported && (
-                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-xs text-amber-800 dark:text-amber-200">
-                    {lang === 'bn'
-                      ? 'এই ব্রাউজারে WebAuthn বায়োমেট্রিক্স সাপোর্টেড নয়। নিরাপদ ব্রাউজার ব্যবহার করুন।'
-                      : 'WebAuthn biometric credentials are not supported in this browser environment.'}
-                  </div>
-                )}
+                {/* High-Value Confirmation Policy Controls */}
+                {(user.webauthnCredentials?.length || 0) > 0 && (
+                  <div className="p-4 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 space-y-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-900 dark:text-white">
+                          {lang === 'bn'
+                            ? 'লেনদেনে বায়োমেট্রিক সক্রিয় রাখুন'
+                            : 'Biometric Transaction Confirmation'}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                          {lang === 'bn'
+                            ? 'বন্ধ করলে সব লেনদেন শুধু ট্যাপ ও হোল্ড দিয়ে নিশ্চিত হবে'
+                            : 'Toggle off anytime to revert strictly to Tap & Hold'}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={bioBusy}
+                        onClick={() => handleUpdateBioPrefs({ enabled: !bioPrefs.enabled })}
+                        aria-pressed={bioPrefs.enabled}
+                        className={`min-h-[36px] px-3.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
+                          bioPrefs.enabled
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        {bioPrefs.enabled
+                          ? lang === 'bn'
+                            ? 'চালু'
+                            : 'On'
+                          : lang === 'bn'
+                            ? 'বন্ধ'
+                            : 'Off'}
+                      </button>
+                    </div>
 
-                {webauthnCap?.supported && webauthnCap.inEmbeddedFrame && (
-                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-xs text-amber-800 dark:text-amber-200">
-                    {lang === 'bn'
-                      ? 'এমবেডেড প্রিভিউ ফ্রেমে ব্রাউজার বায়োমেট্রিক প্রম্পট সীমাবদ্ধ করতে পারে—নতুন ট্যাবে খুললে পূর্ণ ফিঙ্গারপ্রিন্ট/ফেস আইডি কাজ করবে।'
-                      : 'Embedded preview frames may restrict OS biometric prompts. If blocked, open the portal directly in its own browser tab.'}
+                    {bioPrefs.enabled && (
+                      <>
+                        <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold text-slate-800 dark:text-slate-200">
+                              {lang === 'bn'
+                                ? 'উচ্চ-মূল্য বায়োমেট্রিক সীমা'
+                                : 'High-Value Protection Threshold'}
+                            </span>
+                            <span className="font-mono-tabular font-semibold text-emerald-700 dark:text-emerald-300">
+                              ≥ ৳{bioPrefs.highValueThreshold.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-4 gap-1.5">
+                            {[5000, 10000, 25000, 50000].map((presetAmt) => {
+                              const active = bioPrefs.highValueThreshold === presetAmt;
+                              return (
+                                <button
+                                  key={presetAmt}
+                                  type="button"
+                                  disabled={bioBusy}
+                                  onClick={() =>
+                                    handleUpdateBioPrefs({ highValueThreshold: presetAmt })
+                                  }
+                                  className={`min-h-[38px] px-2 rounded-lg text-[11px] font-mono-tabular font-semibold border transition-colors cursor-pointer ${
+                                    active
+                                      ? 'bg-emerald-600 border-emerald-600 text-white'
+                                      : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-emerald-400'
+                                  }`}
+                                >
+                                  ৳{(presetAmt / 1000).toFixed(0)}k
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                          <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                            {lang === 'bn'
+                              ? 'উচ্চ-মূল্যের লেনদেন নিশ্চিতকরণ পদ্ধতি'
+                              : 'High-Value Verification Mode'}
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              disabled={bioBusy}
+                              onClick={() => handleUpdateBioPrefs({ highValueMode: 'replace' })}
+                              className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                                bioPrefs.highValueMode === 'replace'
+                                  ? 'bg-emerald-50/80 dark:bg-emerald-950/35 border-emerald-500 text-slate-900 dark:text-white'
+                                  : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              <div className="text-xs font-semibold">
+                                {lang === 'bn'
+                                  ? 'এক-ট্যাপ বায়োমেট্রিক (Replace)'
+                                  : 'Replace PIN (One-Tap Biometrics)'}
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                                {lang === 'bn'
+                                  ? 'শুধু ফেস আইডি / ফিঙ্গারপ্রিন্টেই অনুমোদন'
+                                  : 'Face ID or Fingerprint confirms directly'}
+                              </div>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={bioBusy}
+                              onClick={() => handleUpdateBioPrefs({ highValueMode: 'augment' })}
+                              className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                                bioPrefs.highValueMode === 'augment'
+                                  ? 'bg-emerald-50/80 dark:bg-emerald-950/35 border-emerald-500 text-slate-900 dark:text-white'
+                                  : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              <div className="text-xs font-semibold">
+                                {lang === 'bn'
+                                  ? 'ডুয়াল-লক (Biometrics + PIN)'
+                                  : 'Augment High-Value (Biometrics + PIN)'}
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                                {lang === 'bn'
+                                  ? 'সীমার বেশি লেনদেনে বায়োমেট্রিক ও পিন উভয়ই লাগবে'
+                                  : 'Requires both sensor scan & PIN above threshold'}
+                              </div>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-slate-900 dark:text-white">
+                              {lang === 'bn'
+                                ? 'ডিভাইসে দ্রুত বায়োমেট্রিক সাইন-ইন'
+                                : 'Biometric Quick Sign-In on This Device'}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              {lang === 'bn'
+                                ? 'লগইনে পিনের বদলে ফেস/ফিঙ্গারপ্রিন্ট দিয়ে ২FA ধাপে যান'
+                                : 'Use Face ID / Fingerprint instead of ID & PIN on login'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={bioBusy}
+                            onClick={() =>
+                              handleUpdateBioPrefs({
+                                quickUnlockEnabled: !bioPrefs.quickUnlockEnabled,
+                              })
+                            }
+                            aria-pressed={bioPrefs.quickUnlockEnabled}
+                            className={`min-h-[36px] px-3.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
+                              bioPrefs.quickUnlockEnabled
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                            }`}
+                          >
+                            {bioPrefs.quickUnlockEnabled
+                              ? lang === 'bn'
+                                ? 'চালু'
+                                : 'On'
+                              : lang === 'bn'
+                                ? 'বন্ধ'
+                                : 'Off'}
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -1028,36 +1281,90 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       {lang === 'bn' ? 'নিবন্ধিত বায়োমেট্রিক ডিভাইস' : 'Enrolled Biometric Passkeys'}
                     </div>
                     <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800">
-                      {(user.webauthnCredentials || []).map((cred) => (
-                        <div
-                          key={cred.credentialId}
-                          className="px-3.5 py-2.5 flex items-center justify-between gap-3"
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <Smartphone className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                            <div className="min-w-0">
-                              <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                                {cred.deviceLabel}
-                              </div>
-                              <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
-                                ID: {cred.credentialId.slice(0, 14)}… ·{' '}
-                                {cred.lastUsedAt
-                                  ? `Used ${new Date(cred.lastUsedAt).toLocaleDateString()}`
-                                  : `Added ${new Date(cred.createdAt).toLocaleDateString()}`}
+                      {(user.webauthnCredentials || []).map((cred) => {
+                        const isEditing = editingCredId === cred.credentialId;
+                        return (
+                          <div
+                            key={cred.credentialId}
+                            className="px-3.5 py-3 flex flex-wrap items-center justify-between gap-2.5"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              <Smartphone className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                {isEditing ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      maxLength={60}
+                                      value={editingCredLabel}
+                                      onChange={(e) => setEditingCredLabel(e.target.value)}
+                                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-indigo-400 text-xs text-slate-900 dark:text-white focus:outline-none"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={bioBusy}
+                                      onClick={() => handleRenameBiometricPasskey(cred.credentialId)}
+                                      className="min-h-[34px] min-w-[34px] rounded-lg bg-emerald-600 text-white flex items-center justify-center cursor-pointer"
+                                      aria-label="Save device name"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCredId(null);
+                                        setEditingCredLabel('');
+                                      }}
+                                      className="min-h-[34px] min-w-[34px] rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 flex items-center justify-center cursor-pointer"
+                                      aria-label="Cancel"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                      {cred.deviceLabel}
+                                    </div>
+                                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
+                                      {cred.credentialId.slice(0, 12)}… ·{' '}
+                                      {cred.lastUsedAt
+                                        ? `Used ${new Date(cred.lastUsedAt).toLocaleDateString()}`
+                                        : `Added ${new Date(cred.createdAt).toLocaleDateString()}`}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             </div>
+
+                            {!isEditing && (
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={bioBusy}
+                                  onClick={() => {
+                                    setEditingCredId(cred.credentialId);
+                                    setEditingCredLabel(cred.deviceLabel);
+                                  }}
+                                  className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Pencil className="w-3 h-3" />
+                                  <span>{lang === 'bn' ? 'নাম' : 'Rename'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={bioBusy}
+                                  onClick={() => handleRemoveBiometricPasskey(cred.credentialId)}
+                                  className="min-h-[36px] px-2.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 text-[11px] font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>{lang === 'bn' ? 'মুছুন' : 'Remove'}</span>
+                                </button>
+                              </div>
+                            )}
                           </div>
-                          <button
-                            type="button"
-                            disabled={bioBusy}
-                            onClick={() => handleRemoveBiometricPasskey(cred.credentialId)}
-                            className="min-h-[36px] px-2.5 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 text-[11px] font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1 shrink-0 whitespace-nowrap"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>{lang === 'bn' ? 'মুছুন' : 'Remove'}</span>
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -1074,7 +1381,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         value={bioDeviceLabel}
                         onChange={(e) => setBioDeviceLabel(e.target.value)}
                         placeholder={webauthnCap?.defaultDeviceLabel || 'My Device Biometrics'}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                        className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
                       />
                     </div>
                     <div>
@@ -1091,7 +1398,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         value={bioPinConfirm}
                         onChange={(e) => setBioPinConfirm(e.target.value.replace(/\D/g, ''))}
                         placeholder="••••"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-mono-tabular text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-indigo-500"
+                        className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-mono-tabular text-slate-900 dark:text-white tracking-widest focus:outline-none focus:border-emerald-500"
                       />
                     </div>
                   </div>
@@ -1102,7 +1409,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       bioPinConfirm.length < 4 ||
                       (webauthnCap !== null && !webauthnCap.supported)
                     }
-                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                    className="w-full min-h-[46px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
                   >
                     <Fingerprint className="w-4 h-4 shrink-0" />
                     <span>

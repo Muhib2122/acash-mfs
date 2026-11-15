@@ -98,6 +98,7 @@ import {
 import {
   DEFAULT_ADMIN_ALERT_EMAIL,
   DEFAULT_FEE_CONFIG,
+  UNVERIFIED_MAX_TX_VOLUME,
   adminApproveTransaction,
   adminBulkUpdateUserStatus,
   adminCreateSecondAdmin,
@@ -106,6 +107,7 @@ import {
   adminDeleteTransaction,
   adminDeleteUser,
   adminBulkDeleteUsers,
+  adminExtendUserUnverifiedGrace,
   adminResetAllAccountsAndTransactions,
   adminFreezeAllUsers,
   adminMarkTransactionPending,
@@ -122,6 +124,7 @@ import {
   formatUserReferralSource,
   getAdminTotpSecretForEmail,
   getEffectiveSecurityPolicy,
+  getUserComplianceState,
   isMainAdminEmail,
   mainAdminMintTreasuryCredit,
   mainAdminRefreshTreasuryBalance,
@@ -805,6 +808,29 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     };
   }, [users, transactions]);
 
+  const complianceByAccountId = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getUserComplianceState>>();
+    for (const u of users) {
+      map.set(u.accountId, getUserComplianceState(u, transactions));
+    }
+    return map;
+  }, [users, transactions]);
+
+  const unverifiedAttentionList = useMemo(() => {
+    return users
+      .map((u) => ({
+        user: u,
+        compliance: complianceByAccountId.get(u.accountId) || getUserComplianceState(u, transactions),
+      }))
+      .filter((item) => !item.compliance.isFullyVerified)
+      .sort((a, b) => {
+        const aUrgent = a.compliance.graceExpired || a.compliance.volumeCapReached ? 0 : 1;
+        const bUrgent = b.compliance.graceExpired || b.compliance.volumeCapReached ? 0 : 1;
+        if (aUrgent !== bUrgent) return aUrgent - bUrgent;
+        return a.compliance.remainingGraceMs - b.compliance.remainingGraceMs;
+      });
+  }, [users, transactions, complianceByAccountId]);
+
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
     return users.filter((u) => {
@@ -1220,6 +1246,28 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setDisableCause('');
     } finally {
       setDisableSubmitting(false);
+    }
+  };
+
+  const handleExtendUnverifiedGrace = async (targetUser: AcashUser) => {
+    if (!adminSession) return;
+    setActionBusyId(targetUser.accountId);
+    setFeedbackMsg('');
+    try {
+      await adminExtendUserUnverifiedGrace({
+        accountId: targetUser.accountId,
+        adminEmail: adminSession.adminEmail,
+        days: 7,
+      });
+      setFeedbackMsg(
+        lang === 'bn'
+          ? `${targetUser.accountId}-এর আনভেরিফায়েড অ্যাক্সেস আরও ৭ দিনের জন্য সচল করা হয়েছে।`
+          : `Extended unverified operational access for ${targetUser.accountId} by +7 days.`
+      );
+    } catch (err) {
+      setFeedbackMsg(err instanceof Error ? err.message : 'Failed to extend access.');
+    } finally {
+      setActionBusyId(null);
     }
   };
 
@@ -2870,67 +2918,67 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             </div>
           )}
 
-          {/* 3D Executive KPI Strip */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
-            <div className="acash-3d-tile rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-4 text-white">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-slate-300">{t('totalSystemFloat', lang)}</span>
-                <button
-                  type="button"
-                  onClick={() => setSection('treasury')}
-                  className="text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/30 text-indigo-200 hover:bg-indigo-500/40"
-                >
-                  Mint Vault
-                </button>
-              </div>
-              <div className="font-mono-tabular text-xl font-bold text-white mt-1.5">
-                {formatBdt(metrics.totalFloat, lang)}
-              </div>
-              <div className="text-[11px] text-indigo-300 mt-1">
-                Vault: {formatBdt(treasuryVault.balance, lang)} · {metrics.activeUsersCount}/{users.length} active
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">{t('adminRevenue', lang)}</div>
-              <div className="font-mono-tabular text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-1.5">
-                {formatBdt(metrics.adminRevenue, lang)}
-              </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                {feeConfig.adminShare} Tk / 1,000 rate
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">{t('govtLevy', lang)}</div>
-              <div className="font-mono-tabular text-xl font-bold text-sky-600 dark:text-sky-400 mt-1.5">
-                {formatBdt(metrics.govtPool, lang)}
-              </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                {feeConfig.govtShare} Tk / 1,000 rate
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">{t('agentPool', lang)}</div>
-              <div className="font-mono-tabular text-xl font-bold text-indigo-600 dark:text-indigo-400 mt-1.5">
-                {formatBdt(metrics.agentPool, lang)}
-              </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                {feeConfig.agentShare} Tk / 1,000 rate
-              </div>
-            </div>
-            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-amber-200 dark:border-amber-500/35 p-4">
-              <div className="text-xs text-amber-700 dark:text-amber-300 font-medium">{t('pendingReviews', lang)}</div>
-              <div className="font-mono-tabular text-xl font-bold text-amber-600 dark:text-amber-200 mt-1.5">
-                {metrics.pendingHighValue.length}
-              </div>
-              <div className="text-[11px] text-amber-700/80 dark:text-amber-300/80 mt-1">
-                Threshold: {formatBdt(feeConfig.highValueThreshold, lang)}
-              </div>
-            </div>
-          </div>
-
           {/* SECTION: Overview */}
           {section === 'overview' && (
             <div className="space-y-6">
+              {/* 3D Executive KPI Strip (Overview Only for Clean Sub-Views) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3 sm:gap-4">
+                <div className="col-span-2 sm:col-span-1 acash-3d-tile rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-4 text-white">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-slate-300">{t('totalSystemFloat', lang)}</span>
+                    <button
+                      type="button"
+                      onClick={() => setSection('treasury')}
+                      className="text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/30 text-indigo-200 hover:bg-indigo-500/40"
+                    >
+                      Mint Vault
+                    </button>
+                  </div>
+                  <div className="font-mono-tabular text-lg sm:text-xl font-bold text-white mt-1.5">
+                    {formatBdt(metrics.totalFloat, lang)}
+                  </div>
+                  <div className="text-[11px] text-indigo-300 mt-1">
+                    Vault: {formatBdt(treasuryVault.balance, lang)} · {metrics.activeUsersCount}/{users.length} active
+                  </div>
+                </div>
+                <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">{t('adminRevenue', lang)}</div>
+                  <div className="font-mono-tabular text-lg sm:text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-1.5">
+                    {formatBdt(metrics.adminRevenue, lang)}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {feeConfig.adminShare} Tk / 1,000 rate
+                  </div>
+                </div>
+                <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">{t('govtLevy', lang)}</div>
+                  <div className="font-mono-tabular text-lg sm:text-xl font-bold text-sky-600 dark:text-sky-400 mt-1.5">
+                    {formatBdt(metrics.govtPool, lang)}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {feeConfig.govtShare} Tk / 1,000 rate
+                  </div>
+                </div>
+                <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">{t('agentPool', lang)}</div>
+                  <div className="font-mono-tabular text-lg sm:text-xl font-bold text-indigo-600 dark:text-indigo-400 mt-1.5">
+                    {formatBdt(metrics.agentPool, lang)}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {feeConfig.agentShare} Tk / 1,000 rate
+                  </div>
+                </div>
+                <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-amber-200 dark:border-amber-500/35 p-4">
+                  <div className="text-xs text-amber-700 dark:text-amber-300 font-medium">{t('pendingReviews', lang)}</div>
+                  <div className="font-mono-tabular text-lg sm:text-xl font-bold text-amber-600 dark:text-amber-200 mt-1.5">
+                    {metrics.pendingHighValue.length}
+                  </div>
+                  <div className="text-[11px] text-amber-700/80 dark:text-amber-300/80 mt-1">
+                    Threshold: {formatBdt(feeConfig.highValueThreshold, lang)}
+                  </div>
+                </div>
+              </div>
+
               <TransactionVolumeChart transactions={transactions} lang={lang} theme={theme} />
 
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
@@ -3105,6 +3153,116 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   setSection('ledger');
                 }}
               />
+
+              {/* Unverified 7-Day Grace & ৳1 Lakh Compliance Monitor */}
+              <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-6 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-display text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                      <span>
+                        {lang === 'bn'
+                          ? `আনভেরিফায়েড ৭-দিন ও ৳১ লক্ষ লিমিট মনিটর (${unverifiedAttentionList.length})`
+                          : `Unverified 7-Day Grace & ৳1 Lakh Cap Monitor (${unverifiedAttentionList.length})`}
+                      </span>
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      {lang === 'bn'
+                        ? 'যেসব অ্যাকাউন্টে KYC + 2FA নেই তারা সর্বোচ্চ ৭ দিন ও মোট ৳১,০০,০০০ ব্যবহার করতে পারবে; প্রয়োজনে +৭ দিন বাড়ান।'
+                        : 'Accounts without both KYC & 2FA are capped at 7 days & ৳1,00,000 total outgoing volume unless extended by Admin.'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSection('kyc_queue')}
+                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/35 text-xs font-semibold text-amber-800 dark:text-amber-200 hover:bg-amber-100"
+                    >
+                      {lang === 'bn' ? 'কেওয়াইসি কিউ' : 'Open KYC Queue'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSection('users')}
+                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/35 text-xs font-semibold text-indigo-700 dark:text-indigo-200 hover:bg-indigo-100"
+                    >
+                      {lang === 'bn' ? 'সব ইউজার' : 'All Users'}
+                    </button>
+                  </div>
+                </div>
+
+                {unverifiedAttentionList.length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-emerald-50/70 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 text-center text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                    {lang === 'bn'
+                      ? 'সব সক্রিয় অ্যাকাউন্টে KYC এবং 2FA সম্পূর্ণ ভেরিফায়েড আছে।'
+                      : 'All accounts have completed both KYC verification and 2FA Authenticator setup.'}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {unverifiedAttentionList.slice(0, 6).map(({ user: u, compliance: comp }) => (
+                      <div
+                        key={u.accountId}
+                        className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          comp.graceExpired || comp.volumeCapReached
+                            ? 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-200 dark:border-rose-500/40'
+                            : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800'
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-mono-tabular font-bold text-indigo-600 dark:text-indigo-400">
+                              {u.accountId}
+                            </span>
+                            <span className="font-semibold text-slate-900 dark:text-white truncate">
+                              {u.businessName || u.name}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                comp.graceExpired
+                                  ? 'bg-rose-600 text-white'
+                                  : 'bg-amber-100 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300'
+                              }`}
+                            >
+                              {comp.graceExpired
+                                ? lang === 'bn'
+                                  ? '৭ দিন শেষ'
+                                  : '7D Expired'
+                                : `${comp.daysRemaining}d left`}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2">
+                            <span>KYC: {comp.kycVerified ? 'OK' : (u.kyc?.status || 'None').toUpperCase()}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>2FA: {comp.twoFactorEnabled ? 'OK' : 'OFF'}</span>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-mono-tabular">
+                              {formatBdt(comp.totalOutgoingUsed, lang)} / {formatBdt(UNVERIFIED_MAX_TX_VOLUME, lang)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setViewedAccountId(u.accountId)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400"
+                          >
+                            {lang === 'bn' ? 'দেখুন' : 'Inspect'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actionBusyId === u.accountId}
+                            onClick={() => void handleExtendUnverifiedGrace(u)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1 disabled:opacity-50"
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>{lang === 'bn' ? '+৭ দিন দিন' : '+7 Days Access'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -3782,14 +3940,14 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               )}
 
               <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
-                <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-[#0B0D14] p-1 rounded-xl border border-slate-200 dark:border-slate-800">
+                <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+                  <div className="flex flex-wrap items-center gap-1 bg-slate-100 dark:bg-[#0B0D14] p-1 rounded-xl border border-slate-200 dark:border-slate-800 w-full lg:w-auto">
                     {(['ALL', 'U', 'A', 'M'] as const).map((rf) => (
                       <button
                         key={rf}
                         type="button"
                         onClick={() => setRoleFilter(rf)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                        className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                           roleFilter === rf
                             ? 'bg-indigo-600 text-white shadow-sm'
                             : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -3806,8 +3964,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     ))}
                   </div>
 
-                  <div className="flex items-center gap-2.5 w-full sm:w-auto">
-                    <div className="relative flex-1 sm:w-72">
+                  <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+                    <div className="relative flex-1 min-w-[200px] sm:w-64">
                       <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
@@ -3816,7 +3974,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                           setUserSearch(e.target.value);
                           setSelectedDossierId(null);
                         }}
-                        placeholder="Search Creator ID, name, phone, email, NID..."
+                        placeholder="Search ID, name, phone, NID..."
                         className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                       />
                     </div>
@@ -3827,7 +3985,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       className="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 text-xs font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-40"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      <span>Export CSV</span>
+                      <span>CSV</span>
                     </button>
                     <button
                       type="button"
@@ -3835,7 +3993,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                       className="px-3 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 inline-flex items-center gap-1.5 shrink-0 transition-colors"
                     >
                       <FileText className="w-3.5 h-3.5" />
-                      <span>Directory PDF</span>
+                      <span>PDF</span>
                     </button>
                     <button
                       type="button"
@@ -3938,7 +4096,153 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   </div>
                 )}
 
-                <div className="overflow-x-auto">
+                {/* Mobile Stacked Cards (< md) */}
+                <div className="md:hidden divide-y divide-slate-200 dark:divide-slate-800">
+                  {filteredUsers.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                      No matching accounts found.
+                    </div>
+                  ) : (
+                    filteredUsers.map((u) => {
+                      const isChecked = selectedUserSet.has(u.accountId);
+                      const comp = complianceByAccountId.get(u.accountId);
+                      return (
+                        <div
+                          key={u.accountId}
+                          onClick={() => setSelectedDossierId(u.accountId)}
+                          className={`p-4 space-y-3 ${
+                            isChecked ? 'bg-indigo-50/80 dark:bg-indigo-500/10' : ''
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <input
+                                type="checkbox"
+                                aria-label={`Select account ${u.accountId}`}
+                                checked={isChecked}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={() => toggleSelectUser(u.accountId)}
+                                className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 accent-indigo-600 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                  <span className="font-mono-tabular font-bold text-indigo-600 dark:text-indigo-400">
+                                    {u.accountId}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                    · {u.role === 'U' ? 'Customer' : u.role === 'A' ? 'Agent' : 'Merchant'}
+                                  </span>
+                                </div>
+                                <div className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                                  {u.businessName || u.name}
+                                </div>
+                                <div className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400 truncate">
+                                  {u.phone}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div className="font-mono-tabular text-sm font-bold text-slate-900 dark:text-white">
+                                {formatBdt(u.balance, lang)}
+                              </div>
+                              <div
+                                className={`text-[10px] font-semibold ${
+                                  u.status === 'active'
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : 'text-rose-600 dark:text-rose-400'
+                                }`}
+                              >
+                                {u.status === 'active' ? 'ACTIVE' : 'DISABLED'}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                            <span
+                              className={`px-2 py-0.5 rounded-md font-semibold ${
+                                u.kyc?.status === 'verified'
+                                  ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                  : 'bg-amber-50 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                              }`}
+                            >
+                              KYC: {(u.kyc?.status || 'unverified').toUpperCase()}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md font-semibold ${
+                                comp?.twoFactorEnabled
+                                  ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                              }`}
+                            >
+                              2FA: {comp?.twoFactorEnabled ? 'ON' : 'OFF'}
+                            </span>
+                            {comp && !comp.isFullyVerified && (
+                              <span
+                                className={`px-2 py-0.5 rounded-md font-semibold ${
+                                  comp.graceExpired
+                                    ? 'bg-rose-100 dark:bg-rose-500/20 text-rose-700 dark:text-rose-300'
+                                    : 'bg-amber-50 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                                }`}
+                              >
+                                {comp.graceExpired ? '7D EXPIRED' : `${comp.daysRemaining}d left`}
+                              </span>
+                            )}
+                          </div>
+
+                          <div
+                            className="flex flex-wrap items-center gap-1.5 pt-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setViewedAccountId(u.accountId)}
+                              className="min-h-[36px] px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>{lang === 'bn' ? 'দেখুন' : 'View'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCreditTarget(u.accountId);
+                                setSection('treasury');
+                              }}
+                              className="min-h-[36px] px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300"
+                            >
+                              + Credit
+                            </button>
+                            {comp && !comp.isFullyVerified && (
+                              <button
+                                type="button"
+                                disabled={actionBusyId === u.accountId}
+                                onClick={() => void handleExtendUnverifiedGrace(u)}
+                                className="min-h-[36px] px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-[11px] font-semibold"
+                              >
+                                +7d Access
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={actionBusyId === u.accountId}
+                              onClick={() => handleUserStatusButtonClick(u)}
+                              className={`min-h-[36px] px-3 py-1.5 rounded-xl text-[11px] font-semibold border ${
+                                u.status === 'active'
+                                  ? 'bg-rose-50 dark:bg-rose-500/15 border-rose-200 dark:border-rose-500/40 text-rose-700 dark:text-rose-200'
+                                  : 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-200'
+                              }`}
+                            >
+                              {u.status === 'active' ? 'Disable' : 'Enable'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Desktop Table (>= md) */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0B0D14]">
@@ -3965,6 +4269,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {filteredUsers.map((u) => {
                         const isChecked = selectedUserSet.has(u.accountId);
+                        const comp = complianceByAccountId.get(u.accountId);
                         return (
                         <tr
                           key={u.accountId}
@@ -4025,8 +4330,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                                 u.kyc?.status === 'verified' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-300'
                               }`}
                             >
-                              KYC: {(u.kyc?.status || 'unverified').toUpperCase()}
+                              KYC: {(u.kyc?.status || 'unverified').toUpperCase()} · 2FA: {comp?.twoFactorEnabled ? 'ON' : 'OFF'}
                             </div>
+                            {comp && !comp.isFullyVerified && (
+                              <div
+                                className={`text-[10px] font-semibold mt-0.5 ${
+                                  comp.graceExpired ? 'text-rose-600 dark:text-rose-400' : 'text-amber-700 dark:text-amber-300'
+                                }`}
+                              >
+                                {comp.graceExpired ? '7D Grace Expired' : `Grace: ${comp.daysRemaining}d left`} · {formatBdt(comp.totalOutgoingUsed, lang)}/{formatBdt(UNVERIFIED_MAX_TX_VOLUME, lang)}
+                              </div>
+                            )}
                             <div className="text-[10px] text-indigo-600/80 dark:text-indigo-300/80 mt-0.5">
                               {formatUserReferralSource(u)}
                             </div>
@@ -4078,6 +4392,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                               >
                                 + Credit
                               </button>
+                              {comp && !comp.isFullyVerified && (
+                                <button
+                                  type="button"
+                                  disabled={actionBusyId === u.accountId}
+                                  onClick={() => void handleExtendUnverifiedGrace(u)}
+                                  title="Grant +7 Days unverified operational access"
+                                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition-colors"
+                                >
+                                  +7d
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() =>
@@ -5341,8 +5666,119 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   )}
                 </div>
 
-                {/* Table */}
-                <div className="overflow-x-auto">
+                {/* Mobile Card List (< md) */}
+                <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+                  {filteredLedgerTransactions.length === 0 ? (
+                    <div className="py-10 px-6 text-center text-slate-500 dark:text-slate-400">
+                      <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                        {lang === 'bn'
+                          ? 'নির্বাচিত ফিল্টারের সাথে কোনো লেনদেন পাওয়া যায়নি।'
+                          : 'No transactions match the active audit filters.'}
+                      </p>
+                      {hasActiveLedgerFilters && (
+                        <button
+                          type="button"
+                          onClick={resetLedgerFilters}
+                          className="mt-3 px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/35 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>{lang === 'bn' ? 'সব ফিল্টার রিসেট করুন' : 'Clear All Filters'}</span>
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    filteredLedgerTransactions.map((tx) => (
+                      <div key={tx.txId} className="p-4 space-y-2.5 text-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="font-mono-tabular font-bold text-indigo-600 dark:text-indigo-400 truncate">
+                              {tx.txHash}
+                            </div>
+                            <div className="text-[11px] font-semibold text-slate-800 dark:text-slate-200">
+                              {tx.type.replace(/_/g, ' ').toUpperCase()}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-mono-tabular text-sm font-bold text-slate-900 dark:text-white">
+                              {formatBdt(tx.amount, lang)}
+                            </div>
+                            <div className="font-mono-tabular text-[11px] text-slate-500 dark:text-slate-400">
+                              Fee: {formatBdt(tx.fee, lang)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-[11px] text-slate-700 dark:text-slate-300 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                          <span className="font-medium">{tx.senderName}</span>
+                          {/^[UAM]-/.test(tx.senderId) ? (
+                            <button
+                              type="button"
+                              onClick={() => setViewedAccountId(tx.senderId)}
+                              className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400 underline"
+                            >
+                              ({tx.senderId})
+                            </button>
+                          ) : (
+                            <span className="text-slate-500">({tx.senderId})</span>
+                          )}
+                          <span>→</span>
+                          <span className="font-medium">{tx.receiverName}</span>
+                          {/^[UAM]-/.test(tx.receiverId) ? (
+                            <button
+                              type="button"
+                              onClick={() => setViewedAccountId(tx.receiverId)}
+                              className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400 underline"
+                            >
+                              ({tx.receiverId})
+                            </button>
+                          ) : (
+                            <span className="text-slate-500">({tx.receiverId})</span>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <div className="text-[10px] font-mono-tabular text-slate-500 dark:text-slate-400">
+                            {new Date(tx.createdAt).toLocaleString()} ·{' '}
+                            <span
+                              className={`font-semibold ${
+                                tx.status === 'completed'
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : tx.status === 'pending_admin_approval'
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-rose-600 dark:text-rose-400'
+                              }`}
+                            >
+                              {tx.status.replace(/_/g, ' ')}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {tx.status !== 'pending_admin_approval' && (
+                              <button
+                                type="button"
+                                disabled={actionBusyId === tx.txId}
+                                onClick={() => openTxActionModal('pending', tx)}
+                                className="min-h-[34px] px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/35 text-[11px] font-semibold text-amber-700 dark:text-amber-300"
+                              >
+                                Pending
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={actionBusyId === tx.txId}
+                              onClick={() => openTxActionModal('delete', tx)}
+                              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/35 text-[11px] font-semibold text-rose-700 dark:text-rose-300"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Desktop Table (>= md) */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-[#0B0D14]">

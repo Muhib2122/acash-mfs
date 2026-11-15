@@ -168,12 +168,18 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 </span>
                 <span className="text-slate-900 dark:text-white font-medium text-right">
                   {tx.authMethod === 'biometric'
-                    ? lang === 'bn'
-                      ? 'ডিভাইস বায়োমেট্রিক্স (WebAuthn)'
-                      : 'Device Biometrics (WebAuthn)'
-                    : lang === 'bn'
-                      ? 'সিকিউরিটি পিন'
-                      : 'Security PIN'}
+                    ? tx.biometricDeviceLabel
+                      ? `${tx.biometricDeviceLabel} · WebAuthn`
+                      : lang === 'bn'
+                        ? 'ফেস / ফিঙ্গারপ্রিন্ট (WebAuthn)'
+                        : 'Face ID / Fingerprint (WebAuthn)'
+                    : tx.authMethod === 'tap_hold'
+                      ? lang === 'bn'
+                        ? 'ট্যাপ ও হোল্ড অনুমোদন'
+                        : 'Tap & Hold Gesture'
+                      : lang === 'bn'
+                        ? 'সিকিউরিটি পিন'
+                        : 'Security PIN'}
                 </span>
               </div>
             )}

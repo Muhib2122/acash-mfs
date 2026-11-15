@@ -39,6 +39,8 @@ import {
   DEFAULT_GIFT_CARD_POLICY,
   DEFAULT_TREASURY_VAULT,
   ensureDefaultPlatformData,
+  ensureUnverifiedGraceAdminNotification,
+  getUserComplianceState,
   isAccountNotificationRead,
   markAccountNotificationRead,
   markAllAccountNotificationsRead,
@@ -267,6 +269,9 @@ export default function App() {
   const [dismissedGiftIds, setDismissedGiftIds] = useState<Set<string>>(() => new Set());
   const openedGiftIdsRef = useRef<Set<string>>(new Set());
   const [qrTriggerCount, setQrTriggerCount] = useState(0);
+  const [homeNavSignal, setHomeNavSignal] = useState(0);
+  const [complianceBannerDismissed, setComplianceBannerDismissed] = useState(false);
+  const graceNotifiedRef = useRef<string | null>(null);
   const seenNotifsRef = useRef<Set<string> | null>(null);
   const isOnline = useOnlineStatus();
 
@@ -567,6 +572,20 @@ export default function App() {
       .length;
   }, [accountNotifications, currentUser]);
 
+  const userCompliance = useMemo(
+    () => (currentUser ? getUserComplianceState(currentUser, userTransactions) : undefined),
+    [currentUser, userTransactions]
+  );
+
+  // Notify Admin automatically once when an unverified account exceeds the 7-day grace window
+  useEffect(() => {
+    if (!currentUser || !userCompliance?.graceExpired) return;
+    const key = `${currentUser.accountId}:${currentUser.unverifiedGraceExtendedCount || 0}`;
+    if (graceNotifiedRef.current === key) return;
+    graceNotifiedRef.current = key;
+    void ensureUnverifiedGraceAdminNotification(currentUser.accountId);
+  }, [currentUser, userCompliance?.graceExpired]);
+
   // Automatic full-screen festival celebration for incoming unopened Gift Cards
   useEffect(() => {
     if (!currentUser || currentUser.role !== 'U') {
@@ -668,6 +687,8 @@ export default function App() {
     setUserSession(session);
     setCurrentUser(user);
     setUserBootLoading(false);
+    setComplianceBannerDismissed(false);
+    setHomeNavSignal((c) => c + 1);
     triggerHapticGesture('success');
   };
 
@@ -684,6 +705,7 @@ export default function App() {
     setActiveGiftOverlayTx(null);
     setDismissedGiftIds(new Set());
     openedGiftIdsRef.current = new Set();
+    setComplianceBannerDismissed(false);
     setUserSession(null);
     setCurrentUser(null);
   };
@@ -755,7 +777,15 @@ export default function App() {
         {/* Responsive 3-Zone Top Bar — never clips Logout on phones/PWAs */}
         <header className={`sticky top-0 z-30 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-b ${activePortalTheme.headerAccentBg}`}>
           <div className="max-w-7xl mx-auto px-2.5 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-1.5 sm:gap-3">
-            <div className="min-w-0 flex-1">
+            <div
+              className={`min-w-0 flex-1 ${currentUser ? 'cursor-pointer' : ''}`}
+              onClick={() => {
+                if (currentUser) {
+                  setHomeNavSignal((c) => c + 1);
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+              }}
+            >
               <BrandLogo
                 size="sm"
                 subtitle={
@@ -1240,8 +1270,20 @@ export default function App() {
             }}
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
+            homeNavSignal={homeNavSignal}
             customGiftCards={customGiftCards}
             giftCardPolicy={giftCardPolicy}
+            compliance={userCompliance}
+            complianceBannerDismissed={complianceBannerDismissed}
+            onDismissComplianceBanner={() => setComplianceBannerDismissed(true)}
+            onOpenKyc={() => {
+              setProfileInitialTab('kyc');
+              setProfileOpen(true);
+            }}
+            onOpen2fa={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
           />
         ) : currentUser.role === 'A' ? (
           <AgentPanel
@@ -1254,8 +1296,24 @@ export default function App() {
               setProfileOpen(true);
             }}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenBiometricSettings={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
+            homeNavSignal={homeNavSignal}
+            compliance={userCompliance}
+            complianceBannerDismissed={complianceBannerDismissed}
+            onDismissComplianceBanner={() => setComplianceBannerDismissed(true)}
+            onOpenKyc={() => {
+              setProfileInitialTab('kyc');
+              setProfileOpen(true);
+            }}
+            onOpen2fa={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
           />
         ) : (
           <MerchantPanel
@@ -1268,8 +1326,24 @@ export default function App() {
               setProfileOpen(true);
             }}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenBiometricSettings={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
             unreadNotifications={unreadNotifCount}
             externalQrSignal={qrTriggerCount}
+            homeNavSignal={homeNavSignal}
+            compliance={userCompliance}
+            complianceBannerDismissed={complianceBannerDismissed}
+            onDismissComplianceBanner={() => setComplianceBannerDismissed(true)}
+            onOpenKyc={() => {
+              setProfileInitialTab('kyc');
+              setProfileOpen(true);
+            }}
+            onOpen2fa={() => {
+              setProfileInitialTab('pin');
+              setProfileOpen(true);
+            }}
           />
         )}
       </main>
@@ -1281,6 +1355,7 @@ export default function App() {
           unreadNotifications={unreadNotifCount}
           onHome={() => {
             triggerHapticGesture('tap');
+            setHomeNavSignal((c) => c + 1);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           onOpenBoothMap={() => {

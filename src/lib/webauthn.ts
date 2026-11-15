@@ -1,6 +1,10 @@
 import {
+  AcashUser,
+  BiometricHighValueMode,
+  BiometricPreferences,
   BiometricTxAuthorizationProof,
   TransactionType,
+  UserRole,
   WebAuthnCredentialRecord,
 } from '../types/acash';
 
@@ -374,7 +378,7 @@ function mapWebAuthnError(err: unknown): Error {
     const msg = err.message || '';
     if (/permissions policy|publickey-credentials|not enabled in this document/i.test(msg)) {
       return new Error(
-        'Device biometrics prompt is blocked inside this embedded preview frame. Open the portal directly in your browser tab or use your Security PIN.'
+        'Device biometrics prompt is blocked inside this embedded preview frame. Open the portal directly in your browser tab or switch to Tap & Hold confirmation.'
       );
     }
     if (name === 'NotAllowedError') {
@@ -765,3 +769,372 @@ export async function verifyBiometricTransactionProof(params: {
     nextSignCount: newSignCount,
   };
 }
+
+// ============================================================
+// BIOMETRIC POLICY & QUICK DEVICE LOGIN HELPERS
+// ============================================================
+
+export const DEFAULT_BIOMETRIC_PREFS: BiometricPreferences = {
+  enabled: true,
+  highValueThreshold: 10000,
+  highValueMode: 'replace',
+  quickUnlockEnabled: true,
+  biometricTxCount: 0,
+};
+
+export function normalizeBiometricPrefs(
+  prefs?: Partial<BiometricPreferences>
+): BiometricPreferences {
+  const rawThreshold = Number(prefs?.highValueThreshold);
+  const highValueThreshold =
+    Number.isFinite(rawThreshold) && rawThreshold >= 500 && rawThreshold <= 500000
+      ? Math.round(rawThreshold)
+      : DEFAULT_BIOMETRIC_PREFS.highValueThreshold;
+  const highValueMode: BiometricHighValueMode =
+    prefs?.highValueMode === 'augment' ? 'augment' : 'replace';
+
+  return {
+    enabled: prefs?.enabled !== false,
+    highValueThreshold,
+    highValueMode,
+    quickUnlockEnabled: prefs?.quickUnlockEnabled !== false,
+    ...(typeof prefs?.lastVerifiedAt === 'number'
+      ? { lastVerifiedAt: prefs.lastVerifiedAt }
+      : {}),
+    biometricTxCount:
+      typeof prefs?.biometricTxCount === 'number' && prefs.biometricTxCount >= 0
+        ? Math.floor(prefs.biometricTxCount)
+        : 0,
+  };
+}
+
+export interface BiometricTxPolicyDecision {
+  prefs: BiometricPreferences;
+  effectiveThreshold: number;
+  isHighValueForBio: boolean;
+  isPlatformAmlHighValue: boolean;
+  shouldPrioritizeBiometrics: boolean;
+  requireAugmentStep: boolean;
+}
+
+export function resolveBiometricPolicyForAmount(params: {
+  user: Pick<AcashUser, 'biometricPrefs' | 'webauthnCredentials'>;
+  amount: number;
+  platformHighValueThreshold: number;
+  biometricsReady: boolean;
+}): BiometricTxPolicyDecision {
+  const prefs = normalizeBiometricPrefs(params.user.biometricPrefs);
+  const platformLimit = Math.max(500, Number(params.platformHighValueThreshold) || 50000);
+  const effectiveThreshold = prefs.enabled
+    ? Math.min(prefs.highValueThreshold, platformLimit)
+    : platformLimit;
+  const numericAmount = Number(params.amount) || 0;
+  const isHighValueForBio = prefs.enabled && numericAmount >= effectiveThreshold;
+  const isPlatformAmlHighValue = numericAmount >= platformLimit;
+  const shouldPrioritizeBiometrics = params.biometricsReady && prefs.enabled;
+  const requireAugmentStep =
+    params.biometricsReady &&
+    prefs.enabled &&
+    isHighValueForBio &&
+    prefs.highValueMode === 'augment';
+
+  return {
+    prefs,
+    effectiveThreshold,
+    isHighValueForBio,
+    isPlatformAmlHighValue,
+    shouldPrioritizeBiometrics,
+    requireAugmentStep,
+  };
+}
+
+export interface BiometricLoginProof {
+  accountId: string;
+  credentialId: string;
+  challengeBase64Url: string;
+  authenticatorDataBase64Url: string;
+  clientDataJsonBase64Url: string;
+  signatureBase64Url: string;
+  rpId: string;
+  verifiedAt: number;
+}
+
+export async function verifyBiometricLoginProof(params: {
+  proof: BiometricLoginProof;
+  enrolledCredentials: WebAuthnCredentialRecord[];
+  expectedAccountId: string;
+  expectedOrigin?: string;
+  maxAgeMs?: number;
+}): Promise<{
+  valid: boolean;
+  reason?: string;
+  matchedCredentialId?: string;
+  nextSignCount?: number;
+}> {
+  const { proof } = params;
+  const maxAgeMs = params.maxAgeMs ?? 90_000;
+
+  if (!proof || !proof.credentialId || !proof.signatureBase64Url) {
+    return { valid: false, reason: 'Missing WebAuthn biometric login assertion.' };
+  }
+  if (proof.accountId !== params.expectedAccountId) {
+    return { valid: false, reason: 'Biometric assertion account mismatch.' };
+  }
+  if (Date.now() - proof.verifiedAt > maxAgeMs || proof.verifiedAt - Date.now() > 15_000) {
+    return { valid: false, reason: 'Biometric sign-in prompt expired. Please scan again.' };
+  }
+
+  const cred = params.enrolledCredentials.find((c) => c.credentialId === proof.credentialId);
+  if (!cred) {
+    return { valid: false, reason: 'Passkey is not registered on this account.' };
+  }
+
+  let clientData: { type?: string; challenge?: string; origin?: string };
+  const clientDataBytes = base64UrlToBytes(proof.clientDataJsonBase64Url);
+  try {
+    clientData = JSON.parse(new TextDecoder().decode(clientDataBytes));
+  } catch {
+    return { valid: false, reason: 'Malformed WebAuthn clientDataJSON.' };
+  }
+
+  if (clientData.type !== 'webauthn.get') {
+    return { valid: false, reason: 'Invalid WebAuthn ceremony type.' };
+  }
+  if (clientData.challenge !== proof.challengeBase64Url) {
+    return { valid: false, reason: 'WebAuthn challenge mismatch.' };
+  }
+  if (params.expectedOrigin && clientData.origin !== params.expectedOrigin) {
+    return { valid: false, reason: 'WebAuthn origin verification failed.' };
+  }
+
+  const authDataBytes = base64UrlToBytes(proof.authenticatorDataBase64Url);
+  if (authDataBytes.length < 37) {
+    return { valid: false, reason: 'Malformed authenticatorData.' };
+  }
+
+  const expectedRpIdHash = await sha256(new TextEncoder().encode(proof.rpId));
+  for (let i = 0; i < 32; i++) {
+    if (authDataBytes[i] !== expectedRpIdHash[i]) {
+      return { valid: false, reason: 'WebAuthn RP ID hash verification failed.' };
+    }
+  }
+
+  const flags = authDataBytes[32];
+  const userPresent = (flags & 0x01) !== 0;
+  const userVerified = (flags & 0x04) !== 0;
+  if (!userPresent || !userVerified) {
+    return {
+      valid: false,
+      reason: 'Biometric user verification (UV flag) was not satisfied.',
+    };
+  }
+
+  const newSignCount = readSignCountFromAuthData(authDataBytes);
+  if (cred.signCount > 0 && newSignCount > 0 && newSignCount <= cred.signCount) {
+    return {
+      valid: false,
+      reason: 'Authenticator signature counter anomaly detected.',
+    };
+  }
+
+  if (!globalThis.crypto?.subtle) {
+    return { valid: false, reason: 'Web Crypto SubtleCrypto is unavailable.' };
+  }
+
+  try {
+    const clientDataHash = await sha256(clientDataBytes);
+    const signedPayload = new Uint8Array(authDataBytes.length + clientDataHash.length);
+    signedPayload.set(authDataBytes, 0);
+    signedPayload.set(clientDataHash, authDataBytes.length);
+
+    const spkiBytes = base64UrlToBytes(cred.publicKeySpki);
+    const sigBytes = base64UrlToBytes(proof.signatureBase64Url);
+
+    if (cred.algorithm === -7) {
+      const cryptoKey = await globalThis.crypto.subtle.importKey(
+        'spki',
+        toExactArrayBuffer(spkiBytes),
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify']
+      );
+      const rawSig = derEcdsaSignatureToRawP1363(sigBytes, 32);
+      const ok = await globalThis.crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        cryptoKey,
+        toExactArrayBuffer(rawSig),
+        toExactArrayBuffer(signedPayload)
+      );
+      if (!ok) return { valid: false, reason: 'Invalid ECDSA biometric signature.' };
+    } else if (cred.algorithm === -257) {
+      const cryptoKey = await globalThis.crypto.subtle.importKey(
+        'spki',
+        toExactArrayBuffer(spkiBytes),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['verify']
+      );
+      const ok = await globalThis.crypto.subtle.verify(
+        { name: 'RSASSA-PKCS1-v1_5' },
+        cryptoKey,
+        toExactArrayBuffer(sigBytes),
+        toExactArrayBuffer(signedPayload)
+      );
+      if (!ok) return { valid: false, reason: 'Invalid RSA biometric signature.' };
+    } else {
+      return { valid: false, reason: `Unsupported credential algorithm: ${cred.algorithm}` };
+    }
+  } catch (err) {
+    return {
+      valid: false,
+      reason: err instanceof Error ? err.message : 'Biometric login verification failed.',
+    };
+  }
+
+  return {
+    valid: true,
+    matchedCredentialId: cred.credentialId,
+    nextSignCount: newSignCount,
+  };
+}
+
+export async function authorizeLoginWithBiometrics(params: {
+  accountId: string;
+  credentials: WebAuthnCredentialRecord[];
+}): Promise<{
+  credentialId: string;
+  verifiedAt: number;
+  nextSignCount?: number;
+}> {
+  const cap = await detectWebAuthnCapability();
+  if (!cap.supported) {
+    throw new Error('WebAuthn biometrics is not supported on this browser.');
+  }
+  if (!params.credentials || params.credentials.length === 0) {
+    throw new Error('No biometric passkey enrolled on this account.');
+  }
+
+  const nonceBytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(nonceBytes);
+  const nonceHex = Array.from(nonceBytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  const bindingRaw = `acash-webauthn-login-v1|${params.accountId}|${nonceHex}`;
+  const challengeBytes = await sha256(new TextEncoder().encode(bindingRaw));
+  const challengeBase64Url = bytesToBase64Url(challengeBytes);
+  const rpId = getEffectiveRpId() || window.location.hostname || 'localhost';
+
+  const allowCredentials: PublicKeyCredentialDescriptor[] = params.credentials.map((c) => ({
+    type: 'public-key',
+    id: toExactArrayBuffer(base64UrlToBytes(c.credentialId)),
+    ...(c.transports && c.transports.length > 0
+      ? { transports: c.transports as AuthenticatorTransport[] }
+      : {}),
+  }));
+
+  try {
+    const assertion = (await navigator.credentials.get({
+      publicKey: {
+        challenge: toExactArrayBuffer(challengeBytes),
+        rpId,
+        allowCredentials,
+        userVerification: 'required',
+        timeout: 60_000,
+      },
+    })) as PublicKeyCredential | null;
+
+    if (!assertion) {
+      throw new Error('Biometric verification did not return a signed assertion.');
+    }
+
+    const resp = assertion.response as AuthenticatorAssertionResponse;
+    const proof: BiometricLoginProof = {
+      accountId: params.accountId,
+      credentialId: bytesToBase64Url(new Uint8Array(assertion.rawId)),
+      challengeBase64Url,
+      authenticatorDataBase64Url: bytesToBase64Url(new Uint8Array(resp.authenticatorData)),
+      clientDataJsonBase64Url: bytesToBase64Url(new Uint8Array(resp.clientDataJSON)),
+      signatureBase64Url: bytesToBase64Url(new Uint8Array(resp.signature)),
+      rpId,
+      verifiedAt: Date.now(),
+    };
+
+    const verifyRes = await verifyBiometricLoginProof({
+      proof,
+      enrolledCredentials: params.credentials,
+      expectedAccountId: params.accountId,
+      expectedOrigin: window.location.origin,
+    });
+
+    if (!verifyRes.valid) {
+      throw new Error(verifyRes.reason || 'Cryptographic biometric verification failed.');
+    }
+
+    return {
+      credentialId: verifyRes.matchedCredentialId || proof.credentialId,
+      verifiedAt: proof.verifiedAt,
+      nextSignCount: verifyRes.nextSignCount,
+    };
+  } catch (err) {
+    throw mapWebAuthnError(err);
+  }
+}
+
+export interface BiometricQuickHint {
+  accountId: string;
+  name: string;
+  role: UserRole;
+  deviceLabel: string;
+  updatedAt: number;
+}
+
+const BIO_QUICK_HINTS_KEY = 'acash_bio_quick_hints_v1';
+
+export function getBiometricQuickHints(): BiometricQuickHint[] {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
+  try {
+    const raw = window.localStorage.getItem(BIO_QUICK_HINTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (h): h is BiometricQuickHint =>
+        Boolean(h && typeof h.accountId === 'string' && typeof h.name === 'string')
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function syncBiometricQuickHint(user: Pick<AcashUser, 'accountId' | 'name' | 'businessName' | 'role' | 'webauthnCredentials' | 'biometricPrefs'>): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const creds = user.webauthnCredentials || [];
+    const prefs = normalizeBiometricPrefs(user.biometricPrefs);
+    const current = getBiometricQuickHints().filter((h) => h.accountId !== user.accountId);
+    if (creds.length > 0 && prefs.enabled && prefs.quickUnlockEnabled) {
+      current.unshift({
+        accountId: user.accountId,
+        name: user.businessName || user.name,
+        role: user.role,
+        deviceLabel: creds[0]?.deviceLabel || detectDefaultBiometricDeviceLabel(),
+        updatedAt: Date.now(),
+      });
+    }
+    window.localStorage.setItem(BIO_QUICK_HINTS_KEY, JSON.stringify(current.slice(0, 4)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function removeBiometricQuickHint(accountId: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const current = getBiometricQuickHints().filter((h) => h.accountId !== accountId);
+    window.localStorage.setItem(BIO_QUICK_HINTS_KEY, JSON.stringify(current));
+  } catch {
+    // ignore
+  }
+}
+

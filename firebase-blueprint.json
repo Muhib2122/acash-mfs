@@ -57,6 +57,10 @@
           "type": "array",
           "description": "Enrolled WebAuthn device biometric passkeys (max 5)."
         },
+        "biometricPrefs": {
+          "type": "object",
+          "description": "User biometric high-value protection preferences (threshold, replace/augment mode, quick unlock)."
+        },
         "totpSecret": {
           "type": "string",
           "maxLength": 64,
@@ -109,6 +113,20 @@
         "referredByAgentName": {
           "type": "string",
           "maxLength": 140
+        },
+        "unverifiedGraceExtendedUntil": {
+          "type": "number",
+          "description": "Epoch timestamp until which Admin extended unverified account usability."
+        },
+        "unverifiedGraceExtendedCount": {
+          "type": "number"
+        },
+        "unverifiedGraceExtendedBy": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "unverifiedGraceNotifiedAt": {
+          "type": "number"
         },
         "createdAt": {
           "type": "number"
@@ -215,7 +233,11 @@
         },
         "authMethod": {
           "type": "string",
-          "enum": ["pin", "biometric"]
+          "enum": ["pin", "biometric", "tap_hold"]
+        },
+        "biometricDeviceLabel": {
+          "type": "string",
+          "maxLength": 80
         },
         "settledOnce": {
           "type": "boolean"

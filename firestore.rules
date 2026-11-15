@@ -53,8 +53,23 @@ service cloud.firestore {
             )
           )
         ))
+        && (!('biometricPrefs' in data) || (
+          data.biometricPrefs is map
+          && data.biometricPrefs.enabled is bool
+          && data.biometricPrefs.highValueThreshold is number
+          && data.biometricPrefs.highValueThreshold >= 500
+          && data.biometricPrefs.highValueThreshold <= 500000
+          && data.biometricPrefs.highValueMode in ['replace', 'augment']
+          && data.biometricPrefs.quickUnlockEnabled is bool
+          && (!('lastVerifiedAt' in data.biometricPrefs) || data.biometricPrefs.lastVerifiedAt is number)
+          && (!('biometricTxCount' in data.biometricPrefs) || (data.biometricPrefs.biometricTxCount is number && data.biometricPrefs.biometricTxCount >= 0))
+        ))
         && (!('totpSecret' in data) || (data.totpSecret is string && data.totpSecret.size() >= 16 && data.totpSecret.size() <= 64))
         && (!('totpEnrolledAt' in data) || data.totpEnrolledAt is number)
+        && (!('unverifiedGraceExtendedUntil' in data) || data.unverifiedGraceExtendedUntil is number)
+        && (!('unverifiedGraceExtendedCount' in data) || data.unverifiedGraceExtendedCount is number)
+        && (!('unverifiedGraceExtendedBy' in data) || (data.unverifiedGraceExtendedBy is string && data.unverifiedGraceExtendedBy.size() <= 160))
+        && (!('unverifiedGraceNotifiedAt' in data) || data.unverifiedGraceNotifiedAt is number)
         && (!('profilePhotoUrl' in data) || isSafeImageString(data.profilePhotoUrl, 550000))
         && data.balance is number && data.balance >= 0 && data.balance <= 100000000
         && data.commissionBalance is number && data.commissionBalance >= 0 && data.commissionBalance <= 50000000
@@ -101,7 +116,8 @@ service cloud.firestore {
           && data.giftCard.isCustomEdited is bool
           && (!('customImageUrl' in data.giftCard) || isSafeImageString(data.giftCard.customImageUrl, 450000))
         ))
-        && (!('authMethod' in data) || data.authMethod in ['pin', 'biometric']);
+        && (!('authMethod' in data) || data.authMethod in ['pin', 'biometric', 'tap_hold'])
+        && (!('biometricDeviceLabel' in data) || (data.biometricDeviceLabel is string && data.biometricDeviceLabel.size() <= 80));
     }
 
     function isImmutableTransactionCorePreserved(inData, exData) {
