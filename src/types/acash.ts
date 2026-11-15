@@ -153,7 +153,7 @@ export interface AdminNotification {
   id: string;
   title: string;
   message: string;
-  category: 'aml_pending' | 'account_status' | 'treasury' | 'fee_update' | 'registration' | 'kyc_update';
+  category: 'aml_pending' | 'account_status' | 'treasury' | 'fee_update' | 'registration' | 'kyc_update' | 'security';
   severity: 'critical' | 'warning' | 'info';
   createdAt: number;
   read: boolean;
@@ -167,6 +167,7 @@ export interface AdminNotification {
     | 'activity'
     | 'booths'
     | 'social_engagement'
+    | 'security'
     | 'admin_profile';
 }
 
@@ -462,25 +463,32 @@ export interface AdminSession {
 
 export type SecurityEventType =
   | 'brute_force_lockout'
+  | 'admin_login_lockout'
   | 'spam_flood_blocked'
+  | 'spam_tx_blocked'
+  | 'registration_spam_blocked'
   | 'session_tamper'
+  | 'session_tamper_detected'
   | 'xss_payload_blocked'
   | 'otp_abuse'
   | 'admin_unlock'
   | 'policy_change';
 
-export type SecuritySeverity = 'low' | 'medium' | 'high' | 'critical';
+export type SecuritySeverity = 'info' | 'warning' | 'critical';
 
 export interface SecurityEventRecord {
   id: string;
-  portal: 'unified' | 'admin';
   eventType: SecurityEventType;
   severity: SecuritySeverity;
-  targetIdentifier: string;
+  title: string;
   details: string;
+  targetIdentifier: string;
+  attempts?: number;
   blockedUntil?: number;
-  resolved?: boolean;
-  timestamp: number;
+  createdAt: number;
+  resolved: boolean;
+  resolvedAt?: number;
+  resolvedBy?: string;
 }
 
 export interface SecurityPolicyConfig {

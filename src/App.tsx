@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LogOut, ShieldCheck, Globe, User as UserIcon, MapPin, Sun, Moon, Smartphone, Bell } from 'lucide-react';
+import { LogOut, ShieldCheck, Globe, User as UserIcon, MapPin, Sun, Moon, Smartphone, Bell, Volume2, X } from 'lucide-react';
 import {
   AcashBooth,
   AcashMapLocation,
@@ -17,6 +17,8 @@ import {
   MainTreasuryVault,
   PortalThemeConfig,
   SecondAdminProfile,
+  SecurityEventRecord,
+  SecurityPolicyConfig,
   ThemeMode,
 } from './types/acash';
 import {
@@ -29,6 +31,7 @@ import {
   markAllAccountNotificationsRead,
   markGiftCardState,
   purgeExpiredUserGiftCards,
+  recordSessionTamperEvent,
   subscribeToAccountNotifications,
   subscribeToAdminActivityLogs,
   subscribeToAdminNotifications,
@@ -41,11 +44,24 @@ import {
   subscribeToMapLocations,
   subscribeToPortalTheme,
   subscribeToSecondAdmins,
+  subscribeToSecurityEvents,
+  subscribeToSecurityPolicy,
   subscribeToTreasuryVault,
   subscribeToUser,
   subscribeToUserTransactions,
   syncAutoIpMapLocation,
 } from './lib/acashService';
+import {
+  DEFAULT_SECURITY_POLICY,
+  signSessionPayload,
+  verifySessionPayload,
+} from './lib/securityGuard';
+import {
+  dispatchSystemNotification,
+  getDeviceAlertStatus,
+  requestNativeAlertGestureAccess,
+  triggerHapticGesture,
+} from './lib/deviceAlerts';
 import {
   DEFAULT_PORTAL_THEME_CONFIG,
   PortalThemeProvider,
@@ -81,7 +97,7 @@ import { MobileBottomNav } from './components/common/MobileBottomNav';
 import { TransactionReceiptModal } from './components/common/TransactionReceiptModal';
 import { GiftCardReceiverOverlay } from './components/common/GiftCardExperience';
 import { useOnlineStatus } from './hooks/usePWAInstall';
-import { initSoundboxAudioUnlock } from './lib/soundbox';
+import { initSoundboxAudioUnlock, playNotificationChime } from './lib/soundbox';
 
 const USER_SESSION_KEY = 'acash_user_session_v1';
 const USER_SNAPSHOT_KEY = 'acash_user_snapshot_v1';
@@ -209,7 +225,15 @@ export default function App() {
   const [giftCardPolicy, setGiftCardPolicy] = useState<GiftCardCatalogPolicy>(
     DEFAULT_GIFT_CARD_POLICY
   );
+  const [securityPolicy, setSecurityPolicy] = useState<SecurityPolicyConfig>(
+    DEFAULT_SECURITY_POLICY
+  );
+  const [securityEvents, setSecurityEvents] = useState<SecurityEventRecord[]>([]);
+  const [deviceAlertStatus, setDeviceAlertStatus] = useState(() => getDeviceAlertStatus());
+  const [alertBannerDismissed, setAlertBannerDismissed] = useState(false);
+  const [securityNoticeMsg, setSecurityNoticeMsg] = useState('');
   const ipSyncedAccountRef = useRef<string | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
 
   const [paymentIntent, setPaymentIntent] = useState<{
     to: string;
@@ -295,6 +319,7 @@ export default function App() {
     const unsubPortalTheme = subscribeToPortalTheme(setPortalThemeConfig);
     const unsubCustomGiftCards = subscribeToCustomGiftCards(setCustomGiftCards);
     const unsubGiftCardPolicy = subscribeToGiftCardPolicy(setGiftCardPolicy);
+    const unsubSecurityPolicy = subscribeToSecurityPolicy(setSecurityPolicy);
     void purgeExpiredUserGiftCards();
     const purgeTimer = window.setInterval(() => {
       void purgeExpiredUserGiftCards();
@@ -309,13 +334,106 @@ export default function App() {
       unsubPortalTheme();
       unsubCustomGiftCards();
       unsubGiftCardPolicy();
+      unsubSecurityPolicy();
     };
   }, []);
 
-  // Unlock Web Audio & Voice Speech synthesis on first user gesture
+  // Unlock Web Audio & Voice Speech synthesis on first user gesture + sync alert status
   useEffect(() => {
     initSoundboxAudioUnlock();
+    const onGesture = () => {
+      lastActivityRef.current = Date.now();
+      window.setTimeout(() => {
+        setDeviceAlertStatus(getDeviceAlertStatus());
+      }, 150);
+    };
+    window.addEventListener('pointerdown', onGesture, { passive: true });
+    window.addEventListener('keydown', onGesture, { passive: true });
+    window.addEventListener('touchstart', onGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', onGesture);
+      window.removeEventListener('keydown', onGesture);
+      window.removeEventListener('touchstart', onGesture);
+    };
   }, []);
+
+  // Cryptographic integrity check on local user & admin sessions (rejects tampered tokens)
+  useEffect(() => {
+    let cancelled = false;
+    if (userSession) {
+      void verifySessionPayload({
+        id: userSession.accountId,
+        role: userSession.role,
+        email: userSession.email,
+        loggedInAt: userSession.loggedInAt,
+        integritySig: userSession.integritySig,
+      }).then((valid) => {
+        if (!cancelled && !valid) {
+          if (userSession.integritySig) {
+            recordSessionTamperEvent(userSession.accountId, 'account');
+          }
+          handleUserLogout();
+        }
+      });
+    }
+    if (adminSession) {
+      void verifySessionPayload({
+        id: adminSession.adminEmail,
+        role: adminSession.adminRole,
+        email: adminSession.adminEmail,
+        loggedInAt: adminSession.loggedInAt,
+        integritySig: adminSession.integritySig,
+      }).then((valid) => {
+        if (!cancelled && !valid) {
+          if (adminSession.integritySig) {
+            recordSessionTamperEvent(adminSession.adminEmail, 'admin');
+          }
+          handleAdminLogout();
+        }
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    userSession?.accountId,
+    userSession?.loggedInAt,
+    userSession?.integritySig,
+    adminSession?.adminEmail,
+    adminSession?.loggedInAt,
+    adminSession?.integritySig,
+  ]);
+
+  // Automatic security idle session lock based on live Admin Security Policy
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const idleMs = Date.now() - lastActivityRef.current;
+      if (appMode === 'admin' && adminSession) {
+        const limitMs = (securityPolicy.adminIdleTimeoutMinutes || 15) * 60 * 1000;
+        if (idleMs > limitMs) {
+          handleAdminLogout();
+        }
+      } else if (appMode === 'unified' && userSession) {
+        const limitMs = (securityPolicy.accountIdleTimeoutMinutes || 30) * 60 * 1000;
+        if (idleMs > limitMs) {
+          handleUserLogout();
+          setSecurityNoticeMsg(
+            lang === 'bn'
+              ? 'নিরাপত্তার স্বার্থে নিষ্ক্রিয় থাকার কারণে সেশন লক করা হয়েছে। আবার লগইন করুন।'
+              : 'Session auto-locked after inactivity for 10x account security. Please sign in again.'
+          );
+        }
+      }
+    }, 15000);
+    return () => window.clearInterval(id);
+  }, [
+    appMode,
+    adminSession,
+    userSession,
+    securityPolicy.adminIdleTimeoutMinutes,
+    securityPolicy.accountIdleTimeoutMinutes,
+    lang,
+  ]);
 
   // Real-time subscription for logged-in Unified App user (never auto-logout on refresh)
   useEffect(() => {
@@ -367,6 +485,24 @@ export default function App() {
         }
       }
       if (newlyArrived.length > 0) {
+        const lead = newlyArrived[0];
+        playNotificationChime(
+          lead.severity === 'critical' || lead.severity === 'warning' ? 'alert' : 'credit'
+        );
+        triggerHapticGesture(
+          lead.severity === 'critical'
+            ? 'alert'
+            : lead.severity === 'warning'
+              ? 'warning'
+              : 'success'
+        );
+        void dispatchSystemNotification({
+          title: lead.title,
+          body: lead.message,
+          tag: `acash-acct-${lead.id}`,
+          severity: lead.severity,
+        });
+
         const items: LiveToastItem[] = newlyArrived.slice(0, 3).map((n) => ({
           id: `toast-${n.id}`,
           notifId: n.id,
@@ -438,9 +574,20 @@ export default function App() {
         !openedGiftIdsRef.current.has(tx.txId)
     );
     if (nextUnopened) {
+      playNotificationChime('credit');
+      triggerHapticGesture('success');
+      void dispatchSystemNotification({
+        title:
+          lang === 'bn'
+            ? 'নতুন উৎসব গিফট কার্ড এসেছে!'
+            : 'New Festive Gift Card Received!',
+        body: `${nextUnopened.senderName} sent ৳${nextUnopened.amount.toLocaleString()} with a gift card`,
+        tag: `acash-gift-${nextUnopened.txId}`,
+        severity: 'success',
+      });
       setActiveGiftOverlayTx({ tx: nextUnopened, initialOpened: false });
     }
-  }, [currentUser, userTransactions, dismissedGiftIds, activeGiftOverlayTx]);
+  }, [currentUser, userTransactions, dismissedGiftIds, activeGiftOverlayTx, lang]);
 
   // Real-time subscriptions for Separate Admin App
   useEffect(() => {
@@ -450,12 +597,14 @@ export default function App() {
     const unsubNotifs = subscribeToAdminNotifications(setAdminNotifications);
     const unsubActivity = subscribeToAdminActivityLogs(setActivityLogs);
     const unsubVault = subscribeToTreasuryVault(setTreasuryVault);
+    const unsubSecEvents = subscribeToSecurityEvents(setSecurityEvents);
     return () => {
       unsubUsers();
       unsubTxs();
       unsubNotifs();
       unsubActivity();
       unsubVault();
+      unsubSecEvents();
     };
   }, [appMode, adminSession]);
 
@@ -482,13 +631,23 @@ export default function App() {
     }
   };
 
-  const handleUserAuthenticated = (user: AcashUser) => {
+  const handleUserAuthenticated = async (user: AcashUser) => {
+    lastActivityRef.current = Date.now();
+    setSecurityNoticeMsg('');
+    const loggedInAt = Date.now();
+    const integritySig = await signSessionPayload({
+      id: user.accountId,
+      role: user.role,
+      email: user.email,
+      loggedInAt,
+    });
     const session: AcashSession = {
       accountId: user.accountId,
       role: user.role,
       email: user.email,
       ...(user.firebaseUid ? { firebaseUid: user.firebaseUid } : {}),
-      loggedInAt: Date.now(),
+      loggedInAt,
+      integritySig,
     };
     try {
       localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
@@ -499,6 +658,7 @@ export default function App() {
     setUserSession(session);
     setCurrentUser(user);
     setUserBootLoading(false);
+    triggerHapticGesture('success');
   };
 
   const handleUserLogout = () => {
@@ -517,13 +677,25 @@ export default function App() {
     setCurrentUser(null);
   };
 
-  const handleAdminLogin = (session: AdminSession) => {
+  const handleAdminLogin = async (session: AdminSession) => {
+    lastActivityRef.current = Date.now();
+    const integritySig = await signSessionPayload({
+      id: session.adminEmail,
+      role: session.adminRole,
+      email: session.adminEmail,
+      loggedInAt: session.loggedInAt,
+    });
+    const signedSession: AdminSession = {
+      ...session,
+      integritySig,
+    };
     try {
-      localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
+      localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(signedSession));
     } catch {
       // ignore
     }
-    setAdminSession(session);
+    setAdminSession(signedSession);
+    triggerHapticGesture('success');
   };
 
   const handleAdminLogout = () => {
@@ -561,6 +733,8 @@ export default function App() {
         customGiftCards={customGiftCards}
         giftCardPolicy={giftCardPolicy}
         portalTheme={portalThemeConfig}
+        securityEvents={securityEvents}
+        securityPolicy={securityPolicy}
       />
     );
   }
@@ -739,6 +913,60 @@ export default function App() {
             {lang === 'bn'
               ? portalThemeConfig.customBannerBn || portalThemeConfig.customBannerEn
               : portalThemeConfig.customBannerEn || portalThemeConfig.customBannerBn}
+          </div>
+        )}
+
+      {securityNoticeMsg && (
+        <div className="bg-amber-50 dark:bg-amber-500/15 border-b border-amber-200 dark:border-amber-500/30 px-4 py-2.5 text-center text-xs font-semibold text-amber-800 dark:text-amber-200 flex items-center justify-center gap-3">
+          <span>{securityNoticeMsg}</span>
+          <button
+            type="button"
+            onClick={() => setSecurityNoticeMsg('')}
+            className="text-amber-700 dark:text-amber-300 hover:opacity-80"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {currentUser &&
+        !alertBannerDismissed &&
+        (deviceAlertStatus.notificationPermission === 'default' ||
+          !deviceAlertStatus.audioUnlocked) && (
+          <div className="bg-indigo-50/95 dark:bg-indigo-950/60 border-b border-indigo-200 dark:border-indigo-500/30 px-4 py-2">
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-100">
+                <Volume2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span>
+                  {lang === 'bn'
+                    ? 'ফোন ও পিসিতে লাইভ নোটিফিকেশন ও সাউন্ড জেসচার অ্যাক্সেস চালু করুন'
+                    : 'Enable live Phone/PC OS notifications, sound chimes & haptic alerts'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await requestNativeAlertGestureAccess(lang);
+                    setDeviceAlertStatus(getDeviceAlertStatus());
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[11px] font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Bell className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {lang === 'bn' ? 'অ্যালার্ট ও সাউন্ড চালু করুন' : 'Enable Alerts & Sound'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAlertBannerDismissed(true)}
+                  aria-label="Dismiss"
+                  className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -955,11 +1183,24 @@ export default function App() {
           role={currentUser.role}
           lang={lang}
           unreadNotifications={unreadNotifCount}
-          onHome={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-          onOpenBoothMap={() => setBoothMapOpen(true)}
-          onPrimaryQr={() => setQrTriggerCount((c) => c + 1)}
-          onOpenNotifications={() => setNotifModalOpen(true)}
+          onHome={() => {
+            triggerHapticGesture('tap');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          onOpenBoothMap={() => {
+            triggerHapticGesture('tap');
+            setBoothMapOpen(true);
+          }}
+          onPrimaryQr={() => {
+            triggerHapticGesture('tap');
+            setQrTriggerCount((c) => c + 1);
+          }}
+          onOpenNotifications={() => {
+            triggerHapticGesture('tap');
+            setNotifModalOpen(true);
+          }}
           onOpenProfile={() => {
+            triggerHapticGesture('tap');
             setProfileInitialTab('photo');
             setProfileOpen(true);
           }}

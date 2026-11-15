@@ -1,15 +1,22 @@
 import React, { useState } from 'react';
 import {
+  BellRing,
   CheckCircle2,
   Download,
   ExternalLink,
   Share,
   Smartphone,
+  Volume2,
   X,
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { Language } from '../../types/acash';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
+import {
+  getDeviceAlertStatus,
+  requestNativeAlertGestureAccess,
+  sendTestDeviceAlert,
+} from '../../lib/deviceAlerts';
 
 interface GetAppModalProps {
   lang: Language;
@@ -20,6 +27,8 @@ export const GetAppModal: React.FC<GetAppModalProps> = ({ lang, onClose }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [installing, setInstalling] = useState(false);
   const [installNote, setInstallNote] = useState('');
+  const [alertStatus, setAlertStatus] = useState(() => getDeviceAlertStatus());
+  const [alertMsg, setAlertMsg] = useState('');
 
   const apkUrl = (import.meta.env.VITE_MOBILE_APK_URL || '').trim();
   const appOrigin =
@@ -228,6 +237,78 @@ export const GetAppModal: React.FC<GetAppModalProps> = ({ lang, onClose }) => {
                 </li>
               </ol>
             </div>
+          </div>
+
+          {/* Phone / PC Notification & Sound Gesture Setup */}
+          <div className="rounded-2xl bg-indigo-50/70 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <BellRing className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-bold text-slate-900 dark:text-white">
+                    {lang === 'bn'
+                      ? 'ফোন / পিসি নোটিফিকেশন ও সাউন্ড অ্যাক্সেস'
+                      : 'Phone & PC Notification, Sound & Vibration Access'}
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                    {lang === 'bn'
+                      ? 'টাকা আসা-যাওয়া, সাউন্ডবক্স ও গিফট কার্ডের অ্যালার্ট সাথে সাথে ফোন বা পিসিতে পেতে অনুমতি সক্রিয় করুন।'
+                      : 'Grant OS notification, audio chime, and vibration gesture permissions for real-time payment & security alerts.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await requestNativeAlertGestureAccess(lang);
+                  setAlertStatus(getDeviceAlertStatus());
+                  setAlertMsg(
+                    res.permission === 'granted'
+                      ? lang === 'bn'
+                        ? 'নোটিফিকেশন, সাউন্ড ও ভাইব্রেশন সক্রিয় হয়েছে!'
+                        : 'Notifications, sound & haptics enabled!'
+                      : lang === 'bn'
+                        ? 'সাউন্ড ও জেসচার চালু হয়েছে।'
+                        : `Audio unlocked (Notification: ${res.permission}).`
+                  );
+                }}
+                className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+              >
+                <BellRing className="w-3.5 h-3.5" />
+                <span>
+                  {alertStatus.notificationPermission === 'granted'
+                    ? lang === 'bn'
+                      ? 'নোটিফিকেশন সক্রিয় ✓'
+                      : 'Notifications Enabled ✓'
+                    : lang === 'bn'
+                      ? 'নোটিফিকেশন ও সাউন্ড চালু করুন'
+                      : 'Enable Notifications & Sound'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await sendTestDeviceAlert(lang);
+                  setAlertStatus(getDeviceAlertStatus());
+                  setAlertMsg(
+                    lang === 'bn'
+                      ? 'টেস্ট অ্যালার্ট ও সাউন্ড পাঠানো হয়েছে।'
+                      : 'Test alert & chime triggered.'
+                  );
+                }}
+                className="px-3 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Volume2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span>{lang === 'bn' ? 'টেস্ট সাউন্ড' : 'Test Sound'}</span>
+              </button>
+            </div>
+            {alertMsg && (
+              <div className="text-[11px] font-medium text-indigo-700 dark:text-indigo-300">
+                {alertMsg}
+              </div>
+            )}
           </div>
 
           <button

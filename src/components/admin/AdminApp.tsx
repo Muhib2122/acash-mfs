@@ -45,6 +45,7 @@ import {
   Sparkles,
   Globe,
   Crosshair,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -64,6 +65,8 @@ import {
   MainTreasuryVault,
   PortalThemeConfig,
   SecondAdminProfile,
+  SecurityEventRecord,
+  SecurityPolicyConfig,
   SendMoneyChargeMode,
   ThemeMode,
   TransactionStatus,
@@ -78,6 +81,16 @@ import {
   playTransactionVoiceAlert,
   setVoiceMuted,
 } from '../../lib/soundbox';
+import {
+  DEFAULT_SECURITY_POLICY,
+  createSecurityChallenge,
+} from '../../lib/securityGuard';
+import {
+  dispatchSystemNotification,
+  getDeviceAlertStatus,
+  requestNativeAlertGestureAccess,
+  triggerHapticGesture,
+} from '../../lib/deviceAlerts';
 import {
   DEFAULT_ADMIN_ALERT_EMAIL,
   DEFAULT_FEE_CONFIG,
@@ -134,6 +147,7 @@ import {
   exportUsersToCsv,
 } from './AdminExecutiveWidgets';
 import { AdminSocialEngagementPanel } from './AdminSocialEngagementPanel';
+import { AdminSecurityFortressPanel } from './AdminSecurityFortressPanel';
 
 interface AdminAppProps {
   lang: Language;
@@ -158,6 +172,8 @@ interface AdminAppProps {
   customGiftCards: CustomGiftCardRecord[];
   giftCardPolicy: GiftCardCatalogPolicy;
   portalTheme: PortalThemeConfig;
+  securityEvents?: SecurityEventRecord[];
+  securityPolicy?: SecurityPolicyConfig;
 }
 
 type AdminSection =
@@ -167,6 +183,7 @@ type AdminSection =
   | 'approvals'
   | 'kyc_queue'
   | 'social_engagement'
+  | 'security'
   | 'fees'
   | 'ledger'
   | 'activity'
@@ -231,10 +248,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   customGiftCards,
   giftCardPolicy,
   portalTheme,
+  securityEvents = [],
+  securityPolicy = DEFAULT_SECURITY_POLICY,
 }) => {
   const [adminEmail, setAdminEmail] = useState(DEFAULT_ADMIN_ALERT_EMAIL);
   const [adminPasscode, setAdminPasscode] = useState('');
   const [authError, setAuthError] = useState('');
+  const [adminFailedCount, setAdminFailedCount] = useState(0);
+  const [adminChallenge, setAdminChallenge] = useState(() => createSecurityChallenge(lang));
+  const [adminChallengeAns, setAdminChallengeAns] = useState('');
+  const [deviceAlertStatus, setDeviceAlertStatus] = useState(() => getDeviceAlertStatus());
 
   const [section, setSection] = useState<AdminSection>('overview');
   const [userSearch, setUserSearch] = useState('');
@@ -285,6 +308,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
     txHash: string;
   } | null>(null);
   const seenAdminTxIdsRef = useRef<Set<string> | null>(null);
+  const seenAdminNotifIdsRef = useRef<Set<string> | null>(null);
   const adminIpSyncedRef = useRef<string | null>(null);
   const [syncingAdminIp, setSyncingAdminIp] = useState(false);
 
@@ -295,6 +319,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
   useEffect(() => {
     seenAdminTxIdsRef.current = null;
+    seenAdminNotifIdsRef.current = null;
   }, [adminSession?.adminEmail]);
 
   useEffect(() => {
@@ -338,6 +363,15 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           details: `${tx.type.replace(/_/g, ' ').toUpperCase()} · ${tx.senderName} → ${tx.receiverName}`,
           txHash: tx.txHash,
         });
+        triggerHapticGesture(
+          tx.status === 'pending_admin_approval' ? 'warning' : 'success'
+        );
+        void dispatchSystemNotification({
+          title: `${tx.type.replace(/_/g, ' ').toUpperCase()} · ৳${tx.amount.toLocaleString()}`,
+          body: `${tx.senderName} → ${tx.receiverName} (${tx.txHash})`,
+          tag: `acash-admin-tx-${tx.txId}`,
+          severity: tx.status === 'pending_admin_approval' ? 'warning' : 'info',
+        });
         playTransactionVoiceAlert({
           listenerGender: adminGender,
           amount: tx.amount,
@@ -352,6 +386,35 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       }
     }
   }, [transactions, adminSession, adminGender, lang, voiceMuted]);
+
+  useEffect(() => {
+    if (!adminSession) return;
+    if (seenAdminNotifIdsRef.current === null) {
+      seenAdminNotifIdsRef.current = new Set(notifications.map((n) => n.id));
+      return;
+    }
+    for (const n of notifications) {
+      if (!seenAdminNotifIdsRef.current.has(n.id)) {
+        seenAdminNotifIdsRef.current.add(n.id);
+        if (!n.read) {
+          triggerHapticGesture(
+            n.severity === 'critical'
+              ? 'alert'
+              : n.severity === 'warning'
+                ? 'warning'
+                : 'success'
+          );
+          void dispatchSystemNotification({
+            title: n.title,
+            body: n.message,
+            tag: `acash-admin-ntf-${n.id}`,
+            severity: n.severity,
+          });
+        }
+        break;
+      }
+    }
+  }, [notifications, adminSession]);
 
   const toggleAdminVoiceMute = () => {
     setVoiceMutedState((prev) => {
@@ -909,8 +972,22 @@ export const AdminApp: React.FC<AdminAppProps> = ({
       setAuthError('Enter valid Admin email and password.');
       return;
     }
+    if (adminFailedCount >= 2 && securityPolicy.requireChallengeOnAdminFail) {
+      if (Number(adminChallengeAns.trim()) !== adminChallenge.expectedAnswer) {
+        setAuthError(
+          lang === 'bn'
+            ? 'অ্যান্টি-বট নিরাপত্তা প্রশ্নটি সঠিক নয়। আবার চেষ্টা করুন।'
+            : 'Anti-bot human challenge answer is incorrect.'
+        );
+        setAdminChallenge(createSecurityChallenge(lang));
+        setAdminChallengeAns('');
+        return;
+      }
+    }
     try {
       const verified = await verifyAdminPasswordLogin(adminEmail, adminPasscode);
+      setAdminFailedCount(0);
+      setAdminChallengeAns('');
       onAdminLogin({
         adminEmail: verified.adminEmail,
         adminName: verified.adminName,
@@ -927,6 +1004,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
         setSection('overview');
       }
     } catch (err) {
+      setAdminFailedCount((c) => c + 1);
+      setAdminChallenge(createSecurityChallenge(lang));
+      setAdminChallengeAns('');
       setAuthError(err instanceof Error ? err.message : 'Admin login failed.');
     }
   };
@@ -1834,6 +1914,22 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               />
             </div>
 
+            {adminFailedCount >= 2 && securityPolicy.requireChallengeOnAdminFail && (
+              <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 space-y-2">
+                <label className="block text-xs font-bold text-amber-800 dark:text-amber-200">
+                  {adminChallenge.question}
+                </label>
+                <input
+                  type="number"
+                  required
+                  value={adminChallengeAns}
+                  onChange={(e) => setAdminChallengeAns(e.target.value)}
+                  placeholder={lang === 'bn' ? 'সঠিক উত্তর লিখুন' : 'Enter exact number'}
+                  className="w-full px-3.5 py-2 rounded-lg bg-white dark:bg-[#0B0D14] border border-amber-300 dark:border-amber-500/40 text-sm font-mono-tabular text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            )}
+
             {authError && (
               <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 text-xs text-rose-700 dark:text-rose-300">
                 {authError}
@@ -1892,6 +1988,16 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     ? 'সোশ্যাল এনগেজমেন্ট'
                     : 'Social Engagement',
                 icon: Sparkles,
+              },
+              {
+                id: 'security',
+                label: (() => {
+                  const openInc = securityEvents.filter((ev) => !ev.resolved).length;
+                  return lang === 'bn'
+                    ? `সিকিউরিটি ফোর্ট্রেস${openInc ? ` (${openInc})` : ''}`
+                    : `Security Fortress${openInc ? ` (${openInc})` : ''}`;
+                })(),
+                icon: ShieldAlert,
               },
               ...(!isCurrentMainAdmin
                 ? [
@@ -2037,6 +2143,50 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 {adminGender === 'female' ? 'F→M Voice' : 'M→F Voice'}
               </button>
             </div>
+
+            {/* Device OS Notification & Sound Gesture Access */}
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await requestNativeAlertGestureAccess(lang);
+                setDeviceAlertStatus(getDeviceAlertStatus());
+                setFeedbackMsg(
+                  res.permission === 'granted'
+                    ? 'OS Phone/PC Notification & Sound Gesture enabled.'
+                    : `Sound & Haptics unlocked (OS Notification permission: ${res.permission}).`
+                );
+              }}
+              className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                deviceAlertStatus.notificationPermission === 'granted' &&
+                deviceAlertStatus.audioUnlocked
+                  ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/35 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-200 dark:border-indigo-500/35 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100'
+              }`}
+              title="Enable Phone/PC OS Notifications, Sound & Haptic Gesture"
+            >
+              <Bell className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden xl:inline">
+                {deviceAlertStatus.notificationPermission === 'granted' &&
+                deviceAlertStatus.audioUnlocked
+                  ? lang === 'bn'
+                    ? 'অ্যালার্ট চালু'
+                    : 'Alerts On'
+                  : lang === 'bn'
+                    ? 'অ্যালার্ট চালু করুন'
+                    : 'Enable Alerts'}
+              </span>
+            </button>
+
+            {/* Instant Admin Console Security Lock */}
+            <button
+              type="button"
+              onClick={onAdminLogout}
+              title={lang === 'bn' ? 'কনসোল লক করুন' : 'Lock Admin Console'}
+              className="min-h-[38px] px-2.5 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            >
+              <Lock className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden 2xl:inline">{lang === 'bn' ? 'লক করুন' : 'Lock'}</span>
+            </button>
 
             {/* Light / Dark Mode Switch */}
             <button
@@ -3695,6 +3845,17 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               giftCardPolicy={giftCardPolicy}
               portalTheme={portalTheme}
               onInspectAccount={(accId) => setViewedAccountId(accId)}
+              onFeedback={(msg) => setFeedbackMsg(msg)}
+            />
+          )}
+
+          {/* SECTION: 10x Security & Anti-Spam Fortress */}
+          {section === 'security' && (
+            <AdminSecurityFortressPanel
+              lang={lang}
+              adminEmail={adminSession.adminEmail}
+              securityEvents={securityEvents}
+              securityPolicy={securityPolicy}
               onFeedback={(msg) => setFeedbackMsg(msg)}
             />
           )}
@@ -6329,6 +6490,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
           { id: 'kyc_queue', label: `KYC Queue (${metrics.pendingKycCount})` },
           { id: 'booths', label: 'Live Map & Booths' },
           { id: 'social_engagement', label: 'Social Engagement Management' },
+          { id: 'security', label: '10x Security & Anti-Spam Fortress' },
           { id: 'fees', label: t('feeEngine', lang) },
           { id: 'ledger', label: t('globalLedger', lang) },
           { id: 'activity', label: `Activity Log (${activityLogs.length})` },

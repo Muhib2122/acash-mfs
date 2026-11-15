@@ -175,7 +175,7 @@ export async function hashSecretStrong(
   const clean = secret.trim();
   const salt = existingSalt || secureRandomHex(8);
   const encoder = new TextEncoder();
-  let current = encoder.encode(`${APP_SIGNING_PEPPER}:${salt}:${clean}`);
+  let current: Uint8Array = encoder.encode(`${APP_SIGNING_PEPPER}:${salt}:${clean}`);
   // 512 rounds of SHA-256 stretching keeps browser login instant (<8ms) while strongly slowing brute force
   for (let round = 0; round < 512; round++) {
     current = await sha256Bytes(current);

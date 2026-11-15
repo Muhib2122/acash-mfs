@@ -2,12 +2,16 @@ import React, { useMemo, useState } from 'react';
 import {
   ArrowDownLeft,
   Bell,
+  BellRing,
   Check,
   CheckCheck,
   FileText,
   Megaphone,
   ShieldAlert,
   Sparkles,
+  Vibrate,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import {
@@ -16,6 +20,16 @@ import {
   Language,
 } from '../../types/acash';
 import { isAccountNotificationRead } from '../../lib/acashService';
+import {
+  DeviceAlertStatus,
+  getDeviceAlertStatus,
+  requestNativeAlertGestureAccess,
+  sendTestDeviceAlert,
+  setHapticsEnabled,
+  setOsNotificationEnabled,
+  triggerHapticGesture,
+} from '../../lib/deviceAlerts';
+import { setVoiceMuted } from '../../lib/soundbox';
 
 export interface LiveToastItem {
   id: string;
@@ -134,6 +148,30 @@ export const AccountNotificationModal: React.FC<AccountNotificationModalProps> =
   onOpenReceipt,
 }) => {
   const [filter, setFilter] = useState<'all' | 'transaction' | 'admin_alert'>('all');
+  const [deviceStatus, setDeviceStatus] = useState<DeviceAlertStatus>(() =>
+    getDeviceAlertStatus()
+  );
+  const [testNotice, setTestNotice] = useState('');
+
+  const refreshDeviceStatus = () => setDeviceStatus(getDeviceAlertStatus());
+
+  const handleEnableDeviceGesture = async () => {
+    const res = await requestNativeAlertGestureAccess(lang);
+    refreshDeviceStatus();
+    setTestNotice(
+      res.permission === 'granted'
+        ? lang === 'bn'
+          ? 'ফোন/পিসি নোটিফিকেশন, সাউন্ড ও ভাইব্রেশন চালু হয়েছে!'
+          : 'Phone/PC Notification, Sound & Vibration gestures enabled!'
+        : res.permission === 'denied'
+          ? lang === 'bn'
+            ? 'সাউন্ড চালু হয়েছে। ব্রাউজার সেটিংস থেকে Notifications Allow করুন।'
+            : 'Sound & haptics enabled. Allow Notifications in browser settings for OS banners.'
+          : lang === 'bn'
+            ? 'অ্যাপ সাউন্ড ও জেসচার চালু হয়েছে।'
+            : 'In-app sound & haptic alerts unlocked.'
+    );
+  };
 
   const unreadCount = useMemo(
     () => notifications.filter((n) => !isAccountNotificationRead(n, accountId)).length,
@@ -200,6 +238,132 @@ export const AccountNotificationModal: React.FC<AccountNotificationModalProps> =
               <X className="w-4 h-4" />
             </button>
           </div>
+        </div>
+
+        {/* Device Notification, Sound & Haptic Gesture Control Bar */}
+        <div className="px-5 py-3 bg-indigo-50/70 dark:bg-indigo-500/10 border-b border-slate-200 dark:border-slate-800 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <BellRing className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[11px] font-bold text-slate-900 dark:text-white truncate">
+                  {lang === 'bn'
+                    ? 'ডিভাইস নোটিফিকেশন ও সাউন্ড জেসচার'
+                    : 'Phone / PC Alert & Sound Gestures'}
+                </div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                  {deviceStatus.notificationPermission === 'granted'
+                    ? lang === 'bn'
+                      ? 'OS নোটিফিকেশন অনুমতি সক্রিয়'
+                      : 'OS notifications granted · Sound ready'
+                    : lang === 'bn'
+                      ? 'লাইভ ব্যানার ও সাউন্ডের জন্য অনুমতি দিন'
+                      : 'Tap Enable to unlock native OS alerts & audio'}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleEnableDeviceGesture}
+                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[11px] font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+              >
+                {deviceStatus.notificationPermission === 'granted' && deviceStatus.audioUnlocked
+                  ? lang === 'bn'
+                    ? 'সক্রিয় ✓'
+                    : 'Enabled ✓'
+                  : lang === 'bn'
+                    ? 'অনুমতি দিন'
+                    : 'Enable Alerts'}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await sendTestDeviceAlert(lang);
+                  refreshDeviceStatus();
+                  setTestNotice(
+                    ok
+                      ? lang === 'bn'
+                        ? 'টেস্ট সাউন্ড ও নোটিফিকেশন পাঠানো হয়েছে!'
+                        : 'Test sound & OS notification sent!'
+                      : lang === 'bn'
+                        ? 'টেস্ট সাউন্ড বাজানো হয়েছে।'
+                        : 'Test sound played. Tap Enable Alerts for OS banner.'
+                  );
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-[11px] font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 transition-colors"
+              >
+                {lang === 'bn' ? 'টেস্ট সাউন্ড' : 'Test Sound'}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const nextMuted = !deviceStatus.voiceMuted;
+                setVoiceMuted(nextMuted);
+                if (!nextMuted) void requestNativeAlertGestureAccess(lang);
+                refreshDeviceStatus();
+              }}
+              className={`px-2.5 py-1 rounded-lg border text-[10px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                !deviceStatus.voiceMuted
+                  ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+              }`}
+            >
+              {deviceStatus.voiceMuted ? (
+                <VolumeX className="w-3 h-3" />
+              ) : (
+                <Volume2 className="w-3 h-3" />
+              )}
+              <span>{deviceStatus.voiceMuted ? 'Voice Muted' : 'Sound & Voice ON'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const next = !deviceStatus.osNotifEnabled;
+                setOsNotificationEnabled(next);
+                refreshDeviceStatus();
+              }}
+              className={`px-2.5 py-1 rounded-lg border text-[10px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                deviceStatus.osNotifEnabled
+                  ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+              }`}
+            >
+              <Bell className="w-3 h-3" />
+              <span>{deviceStatus.osNotifEnabled ? 'OS Push ON' : 'OS Push OFF'}</span>
+            </button>
+
+            {deviceStatus.hapticsSupported && (
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !deviceStatus.hapticsEnabled;
+                  setHapticsEnabled(next);
+                  if (next) triggerHapticGesture('tap');
+                  refreshDeviceStatus();
+                }}
+                className={`px-2.5 py-1 rounded-lg border text-[10px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                  deviceStatus.hapticsEnabled
+                    ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Vibrate className="w-3 h-3" />
+                <span>{deviceStatus.hapticsEnabled ? 'Vibration ON' : 'Vibration OFF'}</span>
+              </button>
+            )}
+          </div>
+
+          {testNotice && (
+            <div className="text-[10px] font-medium text-indigo-700 dark:text-indigo-300">
+              {testNotice}
+            </div>
+          )}
         </div>
 
         {/* Interactive Filter Segmented Tabs */}

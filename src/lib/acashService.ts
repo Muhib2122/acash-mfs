@@ -1914,7 +1914,6 @@ export async function registerAcashUser(params: {
   const phone = normalizeBdPhone(params.phone);
   const email = params.email.trim().toLowerCase();
 
-  const cleanName = params.name.trim();
   const rawNameCheck = params.name.trim();
   const rawBizCheck = (params.businessName || '').trim();
   if (containsDangerousMarkup(rawNameCheck) || containsDangerousMarkup(rawBizCheck)) {
