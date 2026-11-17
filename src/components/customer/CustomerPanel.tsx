@@ -54,6 +54,7 @@ import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { Wallet3DCard } from '../common/Wallet3DCard';
 import { ComplianceAlertBanner } from '../common/ComplianceAlertBanner';
 import { TransactionRowItem } from '../common/TransactionRowItem';
+import { ServiceCircleGrid, ServiceCircleItem } from '../common/ServiceCircleGrid';
 import {
   GiftCardDraftState,
   GiftCardFlightOverlay,
@@ -734,9 +735,9 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
 
           {/* Right column on desktop: Clean Services Grid + Minimized Recent Activity */}
           <div className="lg:col-span-7 space-y-5">
-            {/* Clean Services Hub Card */}
+            {/* Clean bKash-Style Circular Pastel Services Sheet */}
             <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <div className="flex items-center justify-between gap-2 mb-3.5">
+              <div className="flex items-center justify-between gap-2 mb-4">
                 <div>
                   <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
                     {lang === 'bn' ? 'আক্যাশ সার্ভিস সমূহ' : 'Acash Services'}
@@ -758,67 +759,72 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 </button>
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5 sm:gap-3">
-                {services.map((srv) => {
-                  const Icon = srv.icon;
-                  return (
-                    <button
-                      key={srv.id}
-                      type="button"
-                      onClick={() => openServiceView(srv.id, false)}
-                      className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-500/60 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                    >
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${srv.colorClass}`}>
-                        <Icon className="w-5 h-5" />
-                      </div>
-                      <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                        {srv.label}
-                      </span>
-                    </button>
-                  );
-                })}
-
-                <button
-                  type="button"
-                  onClick={() => openServiceView('send_money', true)}
-                  className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-rose-50/70 dark:bg-rose-950/25 border border-rose-200/80 dark:border-rose-900/50 hover:border-rose-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                >
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300">
-                    <Gift className="w-5 h-5" />
-                  </div>
-                  <span className="text-[11px] sm:text-xs font-semibold text-rose-900 dark:text-rose-200 leading-tight break-words">
-                    {lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money'}
-                  </span>
-                </button>
-
-                {onOpenBoothMap && (
-                  <button
-                    type="button"
-                    onClick={onOpenBoothMap}
-                    className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-emerald-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
-                      <MapPin className="w-5 h-5" />
-                    </div>
-                    <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                      {lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
-                    </span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setViewMode('history')}
-                  className="acash-3d-tile min-h-[84px] px-2 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/90 dark:border-slate-800 hover:border-indigo-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                >
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-violet-50 dark:bg-violet-950/60 text-violet-600 dark:text-violet-400">
-                    <History className="w-5 h-5" />
-                  </div>
-                  <span className="text-[11px] sm:text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                    {lang === 'bn' ? 'ইতিহাস' : 'History'}
-                  </span>
-                </button>
-              </div>
+              <ServiceCircleGrid
+                items={
+                  [
+                    {
+                      id: 'send_money',
+                      label: t('sendMoney', lang),
+                      icon: Send,
+                      tone: 'rose',
+                      onClick: () => openServiceView('send_money', false),
+                    },
+                    {
+                      id: 'mobile_recharge',
+                      label: lang === 'bn' ? 'রিচার্জ' : 'Recharge',
+                      icon: Smartphone,
+                      tone: 'emerald',
+                      onClick: () => openServiceView('mobile_recharge', false),
+                    },
+                    {
+                      id: 'cash_out',
+                      label: t('cashOut', lang),
+                      icon: ArrowUpRight,
+                      tone: 'cyan',
+                      onClick: () => openServiceView('cash_out', false),
+                    },
+                    {
+                      id: 'merchant_payment',
+                      label: t('merchantPay', lang),
+                      icon: Store,
+                      tone: 'amber',
+                      onClick: () => openServiceView('merchant_payment', false),
+                    },
+                    {
+                      id: 'bill_pay',
+                      label: t('billPay', lang),
+                      icon: Zap,
+                      tone: 'violet',
+                      onClick: () => openServiceView('bill_pay', false),
+                    },
+                    {
+                      id: 'gift_card',
+                      label: lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money',
+                      icon: Gift,
+                      tone: 'pink',
+                      onClick: () => openServiceView('send_money', true),
+                    },
+                    ...(onOpenBoothMap
+                      ? [
+                          {
+                            id: 'booth_map',
+                            label: lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map',
+                            icon: MapPin,
+                            tone: 'emerald',
+                            onClick: onOpenBoothMap,
+                          } satisfies ServiceCircleItem,
+                        ]
+                      : []),
+                    {
+                      id: 'history',
+                      label: lang === 'bn' ? 'ইতিহাস' : 'History',
+                      icon: History,
+                      tone: 'indigo',
+                      onClick: () => setViewMode('history'),
+                    },
+                  ] satisfies ServiceCircleItem[]
+                }
+              />
             </div>
 
             {/* Minimized Recent Activity (Latest 3 Transactions Only) */}

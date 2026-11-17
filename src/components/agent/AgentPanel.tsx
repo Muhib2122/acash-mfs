@@ -41,6 +41,7 @@ import { TransactionReceiptModal } from '../common/TransactionReceiptModal';
 import { Wallet3DCard } from '../common/Wallet3DCard';
 import { ComplianceAlertBanner } from '../common/ComplianceAlertBanner';
 import { TransactionRowItem } from '../common/TransactionRowItem';
+import { ServiceCircleGrid, ServiceCircleItem } from '../common/ServiceCircleGrid';
 import { usePortalTheme } from '../../lib/portalThemes';
 
 interface AgentPanelProps {
@@ -520,9 +521,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           </div>
 
           <div className="lg:col-span-7 space-y-5">
-            {/* Organized Agent Counter Services Grid */}
+            {/* Clean 4-Col Pastel Circular Agent Counter Services Grid */}
             <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <div className="flex items-center justify-between gap-2 mb-3.5">
+              <div className="flex items-center justify-between gap-2 mb-4">
                 <div>
                   <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
                     {lang === 'bn' ? 'এজেন্ট কাউন্টার সেবা' : 'Agent Counter Services'}
@@ -539,64 +540,83 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
                 >
                   <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                  <span>PDF</span>
+                  <span className="hidden sm:inline">{t('downloadStatement', lang)}</span>
+                  <span className="sm:hidden">PDF</span>
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3">
-                {agentTabs.map((tab) => {
-                  const Icon = tab.icon;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => openCounterService(tab.id)}
-                      className="acash-3d-tile min-h-[84px] px-3 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                    >
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${tab.colorClass}`}>
-                        <Icon className="w-5 h-5" />
-                      </div>
-                      <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                        {tab.label}
-                      </span>
-                    </button>
-                  );
-                })}
-
-                {onOpenMapLocationPicker && (
-                  <button
-                    type="button"
-                    onClick={onOpenMapLocationPicker}
-                    className="acash-3d-tile min-h-[84px] px-3 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-emerald-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
-                      <MapPin className="w-5 h-5" />
-                    </div>
-                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                      {user.mapLocation
-                        ? lang === 'bn'
-                          ? 'ম্যাপ পিন আপডেট'
-                          : 'Update Map Pin'
-                        : lang === 'bn'
-                          ? 'ম্যাপ লোকেশন'
-                          : 'Set Map Pin'}
-                    </span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setViewMode('history')}
-                  className="acash-3d-tile min-h-[84px] px-3 py-3 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
-                >
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-violet-50 dark:bg-violet-950/60 text-violet-600 dark:text-violet-400">
-                    <History className="w-5 h-5" />
-                  </div>
-                  <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 leading-tight break-words">
-                    {lang === 'bn' ? 'কাউন্টার ইতিহাস' : 'Counter History'}
-                  </span>
-                </button>
-              </div>
+              <ServiceCircleGrid
+                items={
+                  [
+                    {
+                      id: 'cash_in',
+                      label: t('cashIn', lang),
+                      icon: UserPlus,
+                      tone: 'emerald',
+                      onClick: () => openCounterService('cash_in'),
+                    },
+                    {
+                      id: 'send_money',
+                      label: t('sendMoney', lang),
+                      icon: Send,
+                      tone: 'rose',
+                      onClick: () => openCounterService('send_money'),
+                    },
+                    {
+                      id: 'cash_out',
+                      label: t('cashOut', lang),
+                      icon: ArrowUpRight,
+                      tone: 'amber',
+                      onClick: () => openCounterService('cash_out'),
+                    },
+                    {
+                      id: 'agent_cash_out',
+                      label: lang === 'bn' ? 'অ্যাডমিনে ক্যাশ-আউট' : 'To Admin',
+                      icon: Building2,
+                      tone: 'sky',
+                      onClick: () => openCounterService('agent_cash_out'),
+                    },
+                    {
+                      id: 'my_qr',
+                      label: t('myQr', lang),
+                      icon: QrCode,
+                      tone: 'cyan',
+                      onClick: () => setShowQr(true),
+                    },
+                    ...(onOpenMapLocationPicker
+                      ? [
+                          {
+                            id: 'map_pin',
+                            label: user.mapLocation
+                              ? lang === 'bn'
+                                ? 'ম্যাপ আপডেট'
+                                : 'Update Pin'
+                              : lang === 'bn'
+                                ? 'ম্যাপ পিন'
+                                : 'Map Pin',
+                            icon: MapPin,
+                            tone: 'emerald',
+                            onClick: onOpenMapLocationPicker,
+                          } satisfies ServiceCircleItem,
+                        ]
+                      : []),
+                    {
+                      id: 'history',
+                      label: lang === 'bn' ? 'ইতিহাস' : 'History',
+                      icon: History,
+                      tone: 'violet',
+                      onClick: () => setViewMode('history'),
+                    },
+                    {
+                      id: 'pdf_statement',
+                      label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement',
+                      icon: FileText,
+                      tone: 'indigo',
+                      onClick: () => downloadAccountStatementPdf(user, transactions, feeConfig),
+                    },
+                  ] satisfies ServiceCircleItem[]
+                }
+              />
             </div>
 
             {/* Minimized Recent Counter Activity (Latest 3) */}

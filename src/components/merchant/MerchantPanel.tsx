@@ -21,6 +21,7 @@ import {
   Bell,
   Fingerprint,
   Loader2,
+  QrCode,
 } from 'lucide-react';
 import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
@@ -49,6 +50,7 @@ import { ACASH_MAIN_LOGO_SRC } from '../common/BrandLogo';
 import { Wallet3DCard } from '../common/Wallet3DCard';
 import { ComplianceAlertBanner } from '../common/ComplianceAlertBanner';
 import { TransactionRowItem } from '../common/TransactionRowItem';
+import { ServiceCircleGrid, ServiceCircleItem } from '../common/ServiceCircleGrid';
 import { usePortalTheme } from '../../lib/portalThemes';
 
 interface MerchantPanelProps {
@@ -645,8 +647,87 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
         }
       />
 
-      {/* Tactile 3D Merchant Sub-Navigation Tabs — wrap-safe mobile grid */}
-      <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+      {/* Mobile bKash-Style 4-Col Pastel Circular Navigation Sheet */}
+      {!cashierMode && (
+        <div className="sm:hidden acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
+          <ServiceCircleGrid
+            compact
+            items={
+              [
+                {
+                  id: 'checkout',
+                  label: lang === 'bn' ? 'চেকআউট' : 'Checkout',
+                  icon: QrCode,
+                  tone: 'indigo',
+                  active: activeTab === 'checkout',
+                  onClick: () => setActiveTab('checkout'),
+                },
+                {
+                  id: 'cashout',
+                  label: lang === 'bn' ? 'ক্যাশ-আউট' : 'Cash Out',
+                  icon: ArrowUpRight,
+                  tone: 'cyan',
+                  active: activeTab === 'cashout',
+                  onClick: () => setActiveTab('cashout'),
+                },
+                {
+                  id: 'refunds',
+                  label: lang === 'bn' ? 'রিফান্ড' : 'Refunds',
+                  icon: RotateCcw,
+                  tone: 'rose',
+                  active: activeTab === 'refunds',
+                  onClick: () => setActiveTab('refunds'),
+                },
+                {
+                  id: 'b2b',
+                  label: lang === 'bn' ? 'বিটুবি পে' : 'B2B Pay',
+                  icon: Building2,
+                  tone: 'amber',
+                  active: activeTab === 'b2b',
+                  onClick: () => setActiveTab('b2b'),
+                },
+                {
+                  id: 'analytics',
+                  label: lang === 'bn' ? 'বিশ্লেষণ' : 'Analytics',
+                  icon: BarChart3,
+                  tone: 'emerald',
+                  active: activeTab === 'analytics',
+                  onClick: () => setActiveTab('analytics'),
+                },
+                {
+                  id: 'statement',
+                  label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement',
+                  icon: FileText,
+                  tone: 'violet',
+                  active: activeTab === 'statement',
+                  onClick: () => setActiveTab('statement'),
+                },
+                {
+                  id: 'soundbox',
+                  label: lang === 'bn' ? 'সাউন্ডবক্স' : 'Soundbox',
+                  icon: Volume2,
+                  tone: 'pink',
+                  onClick: handleTestSoundbox,
+                },
+                ...(onOpenMapLocationPicker
+                  ? [
+                      {
+                        id: 'map_pin',
+                        label: lang === 'bn' ? 'ম্যাপ পিন' : 'Map Pin',
+                        icon: MapPin,
+                        tone: 'emerald',
+                        onClick: onOpenMapLocationPicker,
+                      } satisfies ServiceCircleItem,
+                    ]
+                  : []),
+              ] satisfies ServiceCircleItem[]
+            }
+          />
+        </div>
+      )}
+
+      {/* Tactile 3D Merchant Sub-Navigation Tabs (Desktop / Tablet & Cashier Mode) */}
+      <div className={`${cashierMode ? 'flex' : 'hidden sm:flex'} flex-wrap gap-2`}>
         <button
           type="button"
           onClick={() => setActiveTab('checkout')}

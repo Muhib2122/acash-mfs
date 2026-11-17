@@ -17,11 +17,21 @@ import {
   Fingerprint,
   Smartphone,
   X,
+  Send,
+  ArrowUpRight,
+  Zap,
+  Gift,
+  QrCode,
+  FileText,
+  ArrowLeft,
+  Shield,
 } from 'lucide-react';
 import { User as FirebaseUser } from 'firebase/auth';
 import { AcashUser, Language, ReferralSource, UserGender, UserRole } from '../../types/acash';
 import { t } from '../../lib/i18n';
 import { sendOtpEmail } from '../../lib/emailjs';
+import { usePortalTheme } from '../../lib/portalThemes';
+import { ServiceCircleGrid, ServiceCircleItem } from '../common/ServiceCircleGrid';
 import {
   auth,
   consumeGoogleRedirectResult,
@@ -122,7 +132,16 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     displayName: string;
     photoURL?: string;
   } | null>(null);
+  const { preset } = usePortalTheme();
+  const [mobileShowAuth, setMobileShowAuth] = useState(false);
+  const [showcaseNotice, setShowcaseNotice] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (otpStep || googleIdentity) {
+      setMobileShowAuth(true);
+    }
+  }, [otpStep, googleIdentity]);
 
   useEffect(() => {
     setQuickHints(getBiometricQuickHints());
@@ -779,48 +798,285 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
     );
   }
 
-  return (
-    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-5 sm:py-8 lg:py-12">
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 lg:gap-10 items-stretch">
-        {/* Left Calm Welcome Panel */}
-        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl sm:rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-5 sm:p-8 lg:p-9 shadow-sm dark:shadow-none">
-          <div className="space-y-6">
-            <BrandLogo size="lg" subtitle={t('tagline', lang)} />
+  const promptSignInForService = (serviceLabel: string, targetMode: 'login' | 'register' = 'login') => {
+    setMode(targetMode);
+    setOtpStep(false);
+    setError('');
+    setShowcaseNotice(
+      lang === 'bn'
+        ? `${serviceLabel} ব্যবহার করতে অনুগ্রহ করে সাইন ইন বা অ্যাকাউন্ট খুলুন।`
+        : `Sign in or create an account to access ${serviceLabel}.`
+    );
+    setMobileShowAuth(true);
+  };
 
-            <div className="space-y-3 pt-2">
-              <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight [text-wrap:balance]">
-                {lang === 'bn'
-                  ? 'নিরাপদ, দ্রুত এবং সহজ ডিজিটাল লেনদেন'
-                  : 'Simple, Calm & Secure Digital Wallet'}
-              </h1>
-              <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                {lang === 'bn'
-                  ? 'আপনার আক্যাশ অ্যাকাউন্টে প্রবেশ করুন অথবা নতুন অ্যাকাউন্ট তৈরি করে সেন্ড মানি, ক্যাশ-আউট, মোবাইল রিচার্জ ও মার্চেন্ট পেমেন্ট শুরু করুন।'
-                  : 'Sign in to your Acash account or register to send money, cash out, pay merchants, and recharge any mobile operator.'}
-              </p>
-            </div>
+  const showcaseServices: ServiceCircleItem[] = [
+    {
+      id: 'send_money',
+      label: t('sendMoney', lang),
+      icon: Send,
+      tone: 'rose',
+      onClick: () => promptSignInForService(t('sendMoney', lang)),
+    },
+    {
+      id: 'recharge',
+      label: lang === 'bn' ? 'রিচার্জ' : 'Recharge',
+      icon: Smartphone,
+      tone: 'emerald',
+      onClick: () => promptSignInForService(t('mobileRecharge', lang)),
+    },
+    {
+      id: 'cash_out',
+      label: t('cashOut', lang),
+      icon: ArrowUpRight,
+      tone: 'cyan',
+      onClick: () => promptSignInForService(t('cashOut', lang)),
+    },
+    {
+      id: 'merchant_pay',
+      label: lang === 'bn' ? 'পেমেন্ট' : 'Payment',
+      icon: Store,
+      tone: 'amber',
+      onClick: () => promptSignInForService(t('merchantPay', lang)),
+    },
+    {
+      id: 'cash_in',
+      label: lang === 'bn' ? 'অ্যাড / ক্যাশ-ইন' : 'Cash In',
+      icon: Briefcase,
+      tone: 'violet',
+      onClick: () => promptSignInForService(t('cashIn', lang)),
+    },
+    {
+      id: 'pay_bill',
+      label: lang === 'bn' ? 'পে বিল' : 'Pay Bill',
+      icon: Zap,
+      tone: 'emerald',
+      onClick: () => promptSignInForService(t('billPay', lang)),
+    },
+    {
+      id: 'gift_card',
+      label: lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money',
+      icon: Gift,
+      tone: 'pink',
+      onClick: () => promptSignInForService(lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money'),
+    },
+    {
+      id: 'qr_pay',
+      label: lang === 'bn' ? 'কিউআর পে' : 'QR Pay',
+      icon: QrCode,
+      tone: 'sky',
+      onClick: () => promptSignInForService('QR Pay'),
+    },
+    {
+      id: 'biometric',
+      label: lang === 'bn' ? 'বায়োমেট্রিক' : 'Biometrics',
+      icon: Fingerprint,
+      tone: 'indigo',
+      onClick: () => promptSignInForService(lang === 'bn' ? 'বায়োমেট্রিক' : 'Biometrics'),
+    },
+    {
+      id: 'two_factor',
+      label: lang === 'bn' ? '২FA সুরক্ষা' : '2FA Shield',
+      icon: Shield,
+      tone: 'sky',
+      onClick: () => promptSignInForService('2FA Guard'),
+    },
+    {
+      id: 'booth_map',
+      label: lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map',
+      icon: MapPin,
+      tone: 'emerald',
+      onClick: () => {
+        if (onOpenBoothMap) {
+          onOpenBoothMap();
+        } else {
+          promptSignInForService('Booth Map');
+        }
+      },
+    },
+    {
+      id: 'statement',
+      label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statements',
+      icon: FileText,
+      tone: 'rose',
+      onClick: () => promptSignInForService(t('downloadStatement', lang)),
+    },
+  ];
+
+  const renderShowcaseCard = (isMobileFullscreen: boolean) => (
+    <div className="flex flex-col justify-between h-full rounded-3xl overflow-hidden bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-sm dark:shadow-none">
+      {/* Top Tinted Welcome Banner */}
+      <div className="relative px-5 pt-5 pb-8 bg-gradient-to-br from-rose-50 via-pink-50/75 to-indigo-50/50 dark:from-rose-950/45 dark:via-[#191124] dark:to-[#121622]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1.5 min-w-0">
+            <BrandLogo size="sm" subtitle={t('tagline', lang)} />
+            <h1 className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-snug pt-2 [text-wrap:balance]">
+              {lang === 'bn' ? (
+                <>
+                  আক্যাশ অ্যাপে{' '}
+                  <span className={preset.accentTextClass}>নিরাপদ লেনদেন</span>
+                </>
+              ) : (
+                <>
+                  Calm &amp; Secure{' '}
+                  <span className={preset.accentTextClass}>Acash Wallet</span>
+                </>
+              )}
+            </h1>
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-w-[260px]">
+              {lang === 'bn'
+                ? 'কাস্টমার, এজেন্ট ও মার্চেন্ট — সব সেবা এক পরিচ্ছন্ন অ্যাপে।'
+                : 'Customer, Agent & Merchant services unified in one clean experience.'}
+            </p>
           </div>
 
           {onOpenBoothMap && (
-            <div className="mt-8 pt-6 border-t border-slate-200 dark:border-slate-800">
+            <button
+              type="button"
+              onClick={onOpenBoothMap}
+              title={lang === 'bn' ? 'নিকটস্থ বুথ ম্যাপ' : 'Nearby Booth Map'}
+              className="w-11 h-11 rounded-full bg-white dark:bg-[#121622] border border-rose-200/80 dark:border-slate-700 shadow-sm flex items-center justify-center shrink-0 hover:scale-105 transition-transform cursor-pointer"
+            >
+              <MapPin className={`w-5 h-5 ${preset.accentTextClass}`} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Overlapping Curved White Service Sheet with 4-Col Pastel Circular Icons */}
+      <div className="-mt-4 rounded-t-[26px] bg-white dark:bg-[#121622] px-3.5 sm:px-5 pt-5 pb-5 flex-1">
+        <ServiceCircleGrid items={showcaseServices} compact={isMobileFullscreen} />
+      </div>
+
+      {/* Curved Branded Bottom CTA Sheet (bKash Welcome Footer Style) */}
+      <div
+        className={`rounded-t-[28px] bg-gradient-to-br ${preset.bannerGradientClass} px-5 pt-5 pb-6 text-white text-center space-y-3.5`}
+      >
+        <p className="font-display text-base sm:text-lg font-bold tracking-tight">
+          {lang === 'bn'
+            ? 'দারুণ সব সার্ভিস আপনার অপেক্ষায়'
+            : 'All Acash Services Ready for You'}
+        </p>
+
+        {isMobileFullscreen ? (
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login');
+                setShowcaseNotice('');
+                setMobileShowAuth(true);
+              }}
+              className="w-full min-h-[48px] py-3 px-4 rounded-2xl bg-white text-slate-900 hover:bg-slate-50 text-sm font-bold shadow-md active:scale-[0.99] transition-all cursor-pointer"
+            >
+              {lang === 'bn' ? 'লগ ইন / রেজিস্ট্রেশন' : 'Login / Registration'}
+            </button>
+            <div className="flex items-center justify-center gap-4 text-xs font-semibold text-white/95 pt-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('register');
+                  setShowcaseNotice('');
+                  setMobileShowAuth(true);
+                }}
+                className="underline underline-offset-4 hover:text-white cursor-pointer"
+              >
+                {lang === 'bn' ? 'নতুন অ্যাকাউন্ট খুলুন' : 'Create New Account'}
+              </button>
+              {onOpenBoothMap && (
+                <>
+                  <span aria-hidden="true" className="text-white/40">·</span>
+                  <button
+                    type="button"
+                    onClick={onOpenBoothMap}
+                    className="underline underline-offset-4 hover:text-white cursor-pointer"
+                  >
+                    {lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {onOpenBoothMap && (
               <button
                 type="button"
                 onClick={onOpenBoothMap}
-                className="w-full py-3 px-4 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-xs font-semibold text-emerald-700 dark:text-emerald-300 inline-flex items-center justify-center gap-2 transition-colors"
+                className="w-full min-h-[44px] py-2.5 px-4 rounded-2xl bg-white text-slate-900 hover:bg-slate-50 text-xs font-bold inline-flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer"
               >
-                <MapPin className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span>
                   {lang === 'bn'
-                    ? 'নিকটস্থ এজেন্ট বুথ ও কাস্টমার সাপোর্ট ম্যাপ দেখুন'
-                    : 'Explore Agent Booth & Customer Support Map'}
+                    ? 'নিকটস্থ এজেন্ট বুথ ও সাপোর্ট ম্যাপ দেখুন'
+                    : 'Explore Agent Booth & Support Map'}
                 </span>
               </button>
+            )}
+            <div className="text-[11px] text-white/85">
+              {lang === 'bn'
+                ? '২FA + বায়োমেট্রিক + লাইভ সাউন্ডবক্স সুরক্ষিত'
+                : 'Protected with 2FA, WebAuthn Biometrics & Voice Alerts'}
             </div>
-          )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 lg:py-10">
+      {/* Mobile-First Showcase View (visible below lg when user hasn't tapped Login/Register yet) */}
+      {!mobileShowAuth && (
+        <div className="lg:hidden max-w-md mx-auto">
+          {renderShowcaseCard(true)}
+        </div>
+      )}
+
+      <div
+        className={`${
+          mobileShowAuth ? 'grid' : 'hidden lg:grid'
+        } grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 lg:gap-8 items-stretch`}
+      >
+        {/* Left bKash-Inspired Showcase Panel (Desktop) */}
+        <div className="hidden lg:block lg:col-span-5">
+          {renderShowcaseCard(false)}
         </div>
 
         {/* Right Interactive Auth Card */}
         <div className="lg:col-span-7 rounded-2xl sm:rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-7 lg:p-8 flex flex-col justify-center shadow-sm dark:shadow-none">
+          {mobileShowAuth && (
+            <div className="lg:hidden flex items-center justify-between gap-2 pb-3 mb-4 border-b border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileShowAuth(false);
+                  setShowcaseNotice('');
+                }}
+                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>{lang === 'bn' ? 'সার্ভিস মেনু' : 'Services'}</span>
+              </button>
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                {mode === 'login' ? t('login', lang) : t('register', lang)}
+              </span>
+            </div>
+          )}
+
+          {showcaseNotice && (
+            <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-medium text-indigo-800 dark:text-indigo-200 flex items-center justify-between gap-2">
+              <span>{showcaseNotice}</span>
+              <button
+                type="button"
+                onClick={() => setShowcaseNotice('')}
+                aria-label="Close"
+                className="text-indigo-500 hover:text-indigo-800 dark:hover:text-white shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           {/* Google Sign-In with Firebase Auth */}
           <div className="mb-5">
             {googleIdentity ? (
