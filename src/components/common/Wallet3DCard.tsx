@@ -4,7 +4,6 @@ import {
   EyeOff,
   Lock,
   ShieldCheck,
-  Sparkles,
   User as UserIcon,
 } from 'lucide-react';
 import { AcashUser, Language } from '../../types/acash';
@@ -53,8 +52,8 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
     const rect = el.getBoundingClientRect();
     const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-    const ry = (x - 0.5) * 9;
-    const rx = (0.5 - y) * 7;
+    const ry = (x - 0.5) * 6;
+    const rx = (0.5 - y) * 5;
     setTilt({ rx, ry, gx: x * 100, gy: y * 100, active: true });
   };
 
@@ -84,65 +83,65 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
         onPointerLeave={resetTilt}
         style={{
           transform: tilt.active
-            ? `rotateX(${tilt.rx.toFixed(2)}deg) rotateY(${tilt.ry.toFixed(2)}deg) scale3d(1.008, 1.008, 1)`
-            : 'rotateX(0deg) rotateY(0deg) scale3d(1, 1, 1)',
+            ? `rotateX(${tilt.rx.toFixed(2)}deg) rotateY(${tilt.ry.toFixed(2)}deg)`
+            : 'rotateX(0deg) rotateY(0deg)',
         }}
-        className={`acash-3d-card relative h-full rounded-3xl bg-gradient-to-br ${gradientClasses} border border-white/15 p-5 sm:p-6 text-white overflow-hidden flex flex-col justify-between transition-colors duration-300`}
+        className={`acash-3d-card relative h-full rounded-3xl bg-gradient-to-br ${gradientClasses} border border-white/15 p-4 sm:p-5 text-white overflow-hidden flex flex-col justify-between transition-colors duration-200`}
       >
-        {/* Dynamic radial specular glare following pointer */}
+        {/* Subtle specular highlight */}
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 transition-opacity duration-200"
           style={{
-            opacity: tilt.active ? 0.5 : 0.22,
-            background: `radial-gradient(circle at ${tilt.gx}% ${tilt.gy}%, ${preset.glareRgba} 0%, ${preset.glareSecondaryRgba} 32%, transparent 65%)`,
+            opacity: tilt.active ? 0.45 : 0.2,
+            background: `radial-gradient(circle at ${tilt.gx}% ${tilt.gy}%, ${preset.glareRgba} 0%, ${preset.glareSecondaryRgba} 35%, transparent 68%)`,
           }}
         />
-        {/* Crisp architectural edge rings for hardware depth */}
+        {/* Soft architectural rings */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -right-14 -top-14 w-52 h-52 rounded-full border border-white/15 bg-white/5"
+          className="pointer-events-none absolute -right-14 -top-14 w-48 h-48 rounded-full border border-white/12 bg-white/5"
         />
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -left-16 -bottom-16 w-48 h-48 rounded-full border border-white/10 bg-white/5"
+          className="pointer-events-none absolute -left-16 -bottom-16 w-44 h-44 rounded-full border border-white/10 bg-white/5"
         />
 
-        {/* Top Identity Row */}
-        <div className="relative z-10 acash-3d-layer-1 flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-center gap-3.5 min-w-0">
+        {/* Identity Row */}
+        <div className="relative z-10 acash-3d-layer-1 flex flex-wrap items-start justify-between gap-2.5">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             {user.profilePhotoUrl ? (
               <img
                 src={user.profilePhotoUrl}
                 alt={user.name}
                 referrerPolicy="no-referrer"
-                className="w-12 h-12 rounded-2xl object-cover border-2 border-white/25 shadow-lg shrink-0"
+                className="w-11 h-11 sm:w-12 sm:h-12 rounded-full object-cover border-2 border-white/35 shadow-sm shrink-0"
               />
             ) : (
-              <div className="w-12 h-12 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center shrink-0 shadow-inner">
-                <UserIcon className="w-5 h-5 text-indigo-200" />
+              <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
+                <UserIcon className="w-5 h-5 text-white" />
               </div>
             )}
 
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-200">
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-white/80">
                 <span>{roleTitle}</span>
                 <span aria-hidden="true" className="text-white/35">·</span>
-                <span className="font-mono-tabular text-white/95">{user.accountId}</span>
+                <span className="font-mono-tabular text-white">{user.accountId}</span>
                 {user.kyc?.status === 'verified' && (
                   <>
                     <span aria-hidden="true" className="text-white/35">·</span>
-                    <span className="inline-flex items-center gap-0.5 text-emerald-300">
+                    <span className="inline-flex items-center gap-0.5 text-emerald-200 font-semibold">
                       <ShieldCheck className="w-3.5 h-3.5" />
                       <span>KYC</span>
                     </span>
                   </>
                 )}
               </div>
-              <h2 className="font-display text-lg sm:text-xl font-bold text-white truncate mt-0.5">
+              <h2 className="font-display text-base sm:text-lg font-bold text-white truncate mt-0.5">
                 {user.businessName || user.name}
               </h2>
-              <div className="text-[11px] font-mono-tabular text-slate-300/90 truncate">
+              <div className="text-[11px] font-mono-tabular text-white/75 truncate">
                 {user.businessName ? `${user.name} · ${user.phone}` : user.phone}
               </div>
             </div>
@@ -153,22 +152,19 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
           )}
         </div>
 
-        {/* 3D Embossed Chip + Tactile Balance Vault */}
-        <div className="relative z-10 acash-3d-layer-2 mt-5 space-y-2.5">
-          <div className="flex items-center justify-between text-xs text-indigo-200/90 px-0.5">
-            <span className="inline-flex items-center gap-1.5 font-medium">
-              <span className="inline-flex w-6 h-4 rounded-sm bg-gradient-to-br from-amber-200 via-amber-400 to-amber-500 border border-amber-100/60 shadow-inner" />
-              <span>{balanceLabel}</span>
-            </span>
+        {/* bKash-Inspired Tap-for-Balance Capsule */}
+        <div className="relative z-10 acash-3d-layer-2 mt-4 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-white/85 px-0.5">
+            <span className="font-medium">{balanceLabel}</span>
             {secondaryBalanceLabel && typeof secondaryBalanceValue === 'number' && !cashierMode && (
-              <span className="font-mono-tabular text-[11px] text-emerald-300 font-semibold">
+              <span className="font-mono-tabular text-emerald-200 font-semibold">
                 {secondaryBalanceLabel}: {formatBdt(secondaryBalanceValue, lang)}
               </span>
             )}
           </div>
 
           {cashierMode ? (
-            <div className="w-full px-4 py-3.5 rounded-2xl bg-slate-950/65 border border-amber-400/35 flex items-center gap-2.5 text-xs text-amber-200 shadow-inner">
+            <div className="w-full px-4 py-3 rounded-2xl bg-black/25 border border-amber-300/35 flex items-center gap-2.5 text-xs text-amber-100">
               <Lock className="w-4 h-4 text-amber-300 shrink-0" />
               <span>
                 {lang === 'bn'
@@ -177,22 +173,25 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
               </span>
             </div>
           ) : alwaysVisibleBalance || !onToggleBalance ? (
-            <div className="w-full px-4 py-3.5 rounded-2xl bg-slate-950/55 border border-white/15 flex items-center justify-between shadow-inner">
-              <span className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight">
+            <div className="w-full px-4 py-3 rounded-2xl bg-black/20 border border-white/15 flex items-center justify-between gap-2">
+              <span className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight truncate">
                 {formatBdt(user.balance, lang)}
               </span>
-              <Sparkles className="w-4 h-4 text-indigo-300/80 shrink-0" />
             </div>
           ) : (
             <button
               type="button"
               onClick={onToggleBalance}
-              className="w-full flex items-center justify-between px-4 py-3.5 rounded-2xl bg-slate-950/60 border border-white/15 hover:border-indigo-300/60 active:scale-[0.99] transition-all text-left group shadow-inner"
+              className="w-full min-h-[52px] flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-white/15 hover:bg-white/20 border border-white/20 active:scale-[0.99] transition-all text-left group cursor-pointer"
             >
-              <span className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight">
-                {showBalance ? formatBdt(user.balance, lang) : '৳ ••••••'}
+              <span className="font-mono-tabular text-xl sm:text-2xl font-bold text-white tracking-tight truncate">
+                {showBalance
+                  ? formatBdt(user.balance, lang)
+                  : lang === 'bn'
+                    ? '৳ ব্যালেন্স দেখুন'
+                    : '৳ Tap for Balance'}
               </span>
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-200 group-hover:text-white px-2.5 py-1 rounded-xl bg-white/10 border border-white/10">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white bg-black/20 group-hover:bg-black/30 px-2.5 py-1.5 rounded-full shrink-0">
                 {showBalance ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 <span>
                   {showBalance
@@ -200,7 +199,7 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
                       ? 'লুকান'
                       : 'Hide'
                     : lang === 'bn'
-                      ? 'ট্যাপ করুন'
+                      ? 'দেখুন'
                       : 'Tap'}
                 </span>
               </span>
@@ -210,9 +209,9 @@ export const Wallet3DCard: React.FC<Wallet3DCardProps> = ({
 
         {/* Footer Metadata + Quick Actions */}
         {(footerMeta || footerActions) && (
-          <div className="relative z-10 acash-3d-layer-1 mt-5 pt-4 border-t border-white/10 space-y-3">
+          <div className="relative z-10 acash-3d-layer-1 mt-4 pt-3 border-t border-white/15 space-y-2.5">
             {footerMeta && (
-              <div className="text-xs text-slate-200/90 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <div className="text-[11px] text-white/85 flex flex-wrap items-center gap-x-2.5 gap-y-1">
                 {footerMeta}
               </div>
             )}

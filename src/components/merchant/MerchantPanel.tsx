@@ -4,32 +4,44 @@ import {
   Volume2,
   Copy,
   Check,
+  CheckCheck,
   Printer,
   RotateCcw,
   Building2,
   BarChart3,
   Shield,
+  ShieldCheck,
   Lock,
   Unlock,
   CheckCircle2,
   AlertTriangle,
   FileText,
   Sparkles,
+  ArrowLeft,
   ArrowUpRight,
   Search,
   MapPin,
   Bell,
+  Mail,
   Fingerprint,
   Loader2,
   QrCode,
+  User as UserIcon,
 } from 'lucide-react';
-import { AcashTransaction, AcashUser, FeeConfig, Language } from '../../types/acash';
+import {
+  AccountNotification,
+  AcashTransaction,
+  AcashUser,
+  FeeConfig,
+  Language,
+} from '../../types/acash';
 import { formatBdt, t } from '../../lib/i18n';
 import {
   authorizeMerchantOwnerUnlock,
   calculateFeeBreakdown,
   executeFinancialTransaction,
   executeMerchantRefund,
+  isAccountNotificationRead,
   UserComplianceState,
 } from '../../lib/acashService';
 import {
@@ -60,10 +72,16 @@ interface MerchantPanelProps {
   lang: Language;
   onOpenMapLocationPicker?: () => void;
   onOpenNotifications?: () => void;
+  onOpenProfile?: () => void;
   onOpenBiometricSettings?: () => void;
   unreadNotifications?: number;
+  accountNotifications?: AccountNotification[];
+  onMarkNotifRead?: (notifId: string) => void;
+  onMarkAllNotifRead?: () => void;
   externalQrSignal?: number;
   homeNavSignal?: number;
+  statementNavSignal?: number;
+  inboxNavSignal?: number;
   compliance?: UserComplianceState;
   complianceBannerDismissed?: boolean;
   onDismissComplianceBanner?: () => void;
@@ -71,7 +89,16 @@ interface MerchantPanelProps {
   onOpen2fa?: () => void;
 }
 
-type MerchantTab = 'checkout' | 'cashout' | 'refunds' | 'b2b' | 'analytics' | 'statement';
+type MerchantTab =
+  | 'home'
+  | 'checkout'
+  | 'cashout'
+  | 'refunds'
+  | 'b2b'
+  | 'analytics'
+  | 'statement'
+  | 'inbox'
+  | 'soundbox';
 
 export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   user,
@@ -80,10 +107,16 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   lang,
   onOpenMapLocationPicker,
   onOpenNotifications,
+  onOpenProfile,
   onOpenBiometricSettings,
   unreadNotifications = 0,
+  accountNotifications = [],
+  onMarkNotifRead,
+  onMarkAllNotifRead,
   externalQrSignal = 0,
   homeNavSignal = 0,
+  statementNavSignal = 0,
+  inboxNavSignal = 0,
   compliance,
   complianceBannerDismissed = false,
   onDismissComplianceBanner,
@@ -91,8 +124,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
   onOpen2fa,
 }) => {
   const { preset } = usePortalTheme();
-  const [activeTab, setActiveTab] = useState<MerchantTab>('checkout');
+  const [activeTab, setActiveTab] = useState<MerchantTab>('home');
   const [statementQuery, setStatementQuery] = useState('');
+  const [inboxTab, setInboxTab] = useState<'alerts' | 'transactions'>('alerts');
   const [cashierMode, setCashierMode] = useState(false);
   const [unlockModalOpen, setUnlockModalOpen] = useState(false);
   const [unlockPin, setUnlockPin] = useState('');
@@ -159,10 +193,22 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
     enrolledBiometrics.length > 0 && Boolean(webauthnCap?.supported);
 
   useEffect(() => {
-    if (homeNavSignal > 0) {
-      setActiveTab('checkout');
+    if (homeNavSignal > 0 && !cashierMode) {
+      setActiveTab('home');
     }
-  }, [homeNavSignal]);
+  }, [homeNavSignal, cashierMode]);
+
+  useEffect(() => {
+    if (statementNavSignal > 0 && !cashierMode) {
+      setActiveTab('statement');
+    }
+  }, [statementNavSignal, cashierMode]);
+
+  useEffect(() => {
+    if (inboxNavSignal > 0 && !cashierMode) {
+      setActiveTab('inbox');
+    }
+  }, [inboxNavSignal, cashierMode]);
 
   const numericCashOutAmt = Number(cashOutAmount) || 0;
   const { fee: cashOutFee } = useMemo(
@@ -254,6 +300,14 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
       ),
     [transactions, user.accountId]
   );
+
+  const txMap = useMemo(() => {
+    const map = new Map<string, AcashTransaction>();
+    for (const tx of transactions) map.set(tx.txId, tx);
+    return map;
+  }, [transactions]);
+
+  const latestStoreActivity = incomingPayments[0] || transactions[0] || null;
 
   const matchedTxForRefund = useMemo(() => {
     const clean = refundHash.trim().toUpperCase();
@@ -558,253 +612,349 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
         </div>
       )}
 
-      {/* 3D Merchant Header Card & Quick Controls */}
-      <Wallet3DCard
-        user={user}
-        lang={lang}
-        balanceLabel={cashierMode ? t('cashierMode', lang) : t('ownerMode', lang)}
-        alwaysVisibleBalance
-        cashierMode={cashierMode}
-        accentVariant="merchant"
-        topRightActions={
-          <button
-            type="button"
-            onClick={() => {
-              if (cashierMode) {
-                setUnlockModalOpen(true);
-              } else {
-                setActiveTab('checkout');
-                setCashierMode(true);
-              }
-            }}
-            className={`min-h-[38px] px-3.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              cashierMode
-                ? 'bg-amber-500/20 border-amber-400/50 text-amber-200 hover:bg-amber-500/30'
-                : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-400/50 text-white shadow-sm'
-            }`}
-          >
-            {cashierMode ? <Unlock className="w-3.5 h-3.5" /> : <Shield className="w-3.5 h-3.5" />}
-            <span>{cashierMode ? 'Unlock Owner' : 'Cashier View'}</span>
-          </button>
-        }
-        footerActions={
-          <>
+      {/* Dedicated Cashier Mode Header Card (shown only when Cashier Staff lock is engaged) */}
+      {cashierMode && (
+        <Wallet3DCard
+          user={user}
+          lang={lang}
+          balanceLabel={t('cashierMode', lang)}
+          alwaysVisibleBalance
+          cashierMode={true}
+          accentVariant="merchant"
+          topRightActions={
+            <button
+              type="button"
+              onClick={() => setUnlockModalOpen(true)}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl border bg-amber-500/20 border-amber-400/50 text-amber-200 hover:bg-amber-500/30 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              <span>Unlock Owner</span>
+            </button>
+          }
+          footerActions={
             <button
               type="button"
               onClick={handleTestSoundbox}
-              className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
-              <Volume2 className="w-3.5 h-3.5 text-indigo-300" />
+              <Volume2 className="w-3.5 h-3.5 text-emerald-200" />
               <span>{t('soundboxTest', lang)}</span>
             </button>
+          }
+        />
+      )}
 
-            {onOpenNotifications && (
-              <button
-                type="button"
-                onClick={onOpenNotifications}
-                className="px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <Bell className="w-3.5 h-3.5 text-indigo-300" />
-                <span>{lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Alerts'}</span>
-                {unreadNotifications > 0 && (
-                  <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
-                    {unreadNotifications}
+      {/* VIEW 0: Peaceful bKash-Style Merchant Home Hub */}
+      {activeTab === 'home' && !cashierMode && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Left column: Store Balance Hero Card + Single-Row Latest Payment Teaser */}
+          <div className="lg:col-span-5 space-y-4">
+            <Wallet3DCard
+              user={user}
+              lang={lang}
+              balanceLabel={t('ownerMode', lang)}
+              alwaysVisibleBalance
+              accentVariant="merchant"
+              topRightActions={
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('checkout');
+                    setCashierMode(true);
+                  }}
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-white/15 border border-white/25 hover:bg-white/25 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <Shield className="w-3.5 h-3.5" />
+                  <span>{lang === 'bn' ? 'ক্যাশিয়ার মোড' : 'Cashier View'}</span>
+                </button>
+              }
+              footerMeta={
+                <>
+                  <span>
+                    Agent CO:{' '}
+                    <strong className="font-mono-tabular text-white">
+                      ৳{feeConfig.merchantCashOutFeePer1000}/1k
+                    </strong>
                   </span>
-                )}
-              </button>
-            )}
+                  <span aria-hidden="true" className="text-white/35">·</span>
+                  <span>
+                    Admin CO:{' '}
+                    <strong className="font-mono-tabular text-emerald-200">
+                      ৳{feeConfig.merchantCashOutToAdminFeePer1000}/1k
+                    </strong>
+                  </span>
+                </>
+              }
+              footerActions={
+                <>
+                  <button
+                    type="button"
+                    onClick={handleTestSoundbox}
+                    className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-200" />
+                    <span>{t('soundboxTest', lang)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('soundbox')}
+                    className={`px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer ${
+                      enrolledBiometrics.length > 0
+                        ? 'bg-emerald-500/20 border-emerald-300/40 text-emerald-100'
+                        : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
+                    }`}
+                  >
+                    <Fingerprint className="w-3.5 h-3.5" />
+                    <span>
+                      {enrolledBiometrics.length > 0
+                        ? lang === 'bn'
+                          ? 'বায়োমেট্রিক চালু'
+                          : 'Biometrics On'
+                        : lang === 'bn'
+                          ? 'নিরাপত্তা'
+                          : 'Security'}
+                    </span>
+                  </button>
+                </>
+              }
+            />
 
-            {!cashierMode && onOpenMapLocationPicker && (
-              <button
-                type="button"
-                onClick={onOpenMapLocationPicker}
-                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/35 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-                <span>
-                  {user.mapLocation
-                    ? lang === 'bn'
-                      ? 'ম্যাপ লোকেশন আপডেট'
-                      : 'Update Map Pin'
-                    : lang === 'bn'
-                      ? 'ম্যাপে লোকেশন দিন'
-                      : 'Set Map Location'}
+            {/* Single-Line Latest Store Activity Teaser */}
+            <div className="acash-3d-surface rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  {lang === 'bn' ? 'সর্বশেষ স্টোর পেমেন্ট' : 'Latest Store Activity'}
                 </span>
-              </button>
-            )}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('statement')}
+                  className={`text-xs font-semibold ${preset.accentTextClass} hover:underline whitespace-nowrap cursor-pointer`}
+                >
+                  {lang === 'bn' ? 'সব স্টেটমেন্ট →' : `Statements (${transactions.length}) →`}
+                </button>
+              </div>
+              {latestStoreActivity ? (
+                <div
+                  onClick={() => setSelectedReceipt(latestStoreActivity)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedReceipt(latestStoreActivity);
+                    }
+                  }}
+                  className="cursor-pointer"
+                >
+                  <TransactionRowItem
+                    tx={latestStoreActivity}
+                    viewerAccountId={user.accountId}
+                    lang={lang}
+                  />
+                </div>
+              ) : (
+                <div className="px-4 py-5 text-center text-xs text-slate-500 dark:text-slate-400">
+                  {t('noTransactions', lang)}
+                </div>
+              )}
+            </div>
+          </div>
 
-            {!cashierMode && (
-              <button
-                type="button"
-                onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-slate-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <FileText className="w-3.5 h-3.5 text-indigo-300" />
-                <span>{t('downloadStatement', lang)}</span>
-              </button>
-            )}
-          </>
-        }
-      />
+          {/* Right column: Categorized Merchant Menu Sheets */}
+          <div className="lg:col-span-7 space-y-4">
+            {/* Sheet 1: Store & Settlement */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'স্টোর পেমেন্ট ও সেটেলমেন্ট' : 'Store & Settlement'}
+                </h2>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn' ? 'তাৎক্ষণিক সেবা' : 'Merchant Desk'}
+                </span>
+              </div>
 
-      {/* Mobile bKash-Style 4-Col Pastel Circular Navigation Sheet */}
-      {!cashierMode && (
-        <div className="sm:hidden acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4">
-          <ServiceCircleGrid
-            compact
-            items={
-              [
-                {
-                  id: 'checkout',
-                  label: lang === 'bn' ? 'চেকআউট' : 'Checkout',
-                  icon: QrCode,
-                  tone: 'indigo',
-                  active: activeTab === 'checkout',
-                  onClick: () => setActiveTab('checkout'),
-                },
-                {
-                  id: 'cashout',
-                  label: lang === 'bn' ? 'ক্যাশ-আউট' : 'Cash Out',
-                  icon: ArrowUpRight,
-                  tone: 'cyan',
-                  active: activeTab === 'cashout',
-                  onClick: () => setActiveTab('cashout'),
-                },
-                {
-                  id: 'refunds',
-                  label: lang === 'bn' ? 'রিফান্ড' : 'Refunds',
-                  icon: RotateCcw,
-                  tone: 'rose',
-                  active: activeTab === 'refunds',
-                  onClick: () => setActiveTab('refunds'),
-                },
-                {
-                  id: 'b2b',
-                  label: lang === 'bn' ? 'বিটুবি পে' : 'B2B Pay',
-                  icon: Building2,
-                  tone: 'amber',
-                  active: activeTab === 'b2b',
-                  onClick: () => setActiveTab('b2b'),
-                },
-                {
-                  id: 'analytics',
-                  label: lang === 'bn' ? 'বিশ্লেষণ' : 'Analytics',
-                  icon: BarChart3,
-                  tone: 'emerald',
-                  active: activeTab === 'analytics',
-                  onClick: () => setActiveTab('analytics'),
-                },
-                {
-                  id: 'statement',
-                  label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement',
-                  icon: FileText,
-                  tone: 'violet',
-                  active: activeTab === 'statement',
-                  onClick: () => setActiveTab('statement'),
-                },
-                {
-                  id: 'soundbox',
-                  label: lang === 'bn' ? 'সাউন্ডবক্স' : 'Soundbox',
-                  icon: Volume2,
-                  tone: 'pink',
-                  onClick: handleTestSoundbox,
-                },
-                ...(onOpenMapLocationPicker
-                  ? [
-                      {
-                        id: 'map_pin',
-                        label: lang === 'bn' ? 'ম্যাপ পিন' : 'Map Pin',
-                        icon: MapPin,
-                        tone: 'emerald',
-                        onClick: onOpenMapLocationPicker,
-                      } satisfies ServiceCircleItem,
-                    ]
-                  : []),
-              ] satisfies ServiceCircleItem[]
-            }
-          />
+              <ServiceCircleGrid
+                cols="4"
+                items={
+                  [
+                    {
+                      id: 'checkout',
+                      label: lang === 'bn' ? 'চেকআউট QR' : 'Checkout',
+                      icon: QrCode,
+                      tone: 'rose',
+                      onClick: () => setActiveTab('checkout'),
+                    },
+                    {
+                      id: 'cashout',
+                      label: lang === 'bn' ? 'ক্যাশ-আউট' : 'Cash Out',
+                      icon: ArrowUpRight,
+                      tone: 'cyan',
+                      onClick: () => setActiveTab('cashout'),
+                    },
+                    {
+                      id: 'refunds',
+                      label: lang === 'bn' ? 'রিফান্ড' : 'Refunds',
+                      icon: RotateCcw,
+                      tone: 'amber',
+                      onClick: () => setActiveTab('refunds'),
+                    },
+                    {
+                      id: 'b2b',
+                      label: lang === 'bn' ? 'বিটুবি পে' : 'B2B Pay',
+                      icon: Building2,
+                      tone: 'violet',
+                      onClick: () => setActiveTab('b2b'),
+                    },
+                  ] satisfies ServiceCircleItem[]
+                }
+              />
+            </div>
+
+            {/* Sheet 2: Merchant Menus & Tools */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'মার্চেন্ট মেনু ও টুলস' : 'Merchant Menus & Tools'}
+                </h2>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn' ? 'আলাদা পেজ' : 'Dedicated Pages'}
+                </span>
+              </div>
+
+              <ServiceCircleGrid
+                cols="4"
+                items={
+                  [
+                    {
+                      id: 'analytics',
+                      label: lang === 'bn' ? 'বিশ্লেষণ' : 'Analytics',
+                      icon: BarChart3,
+                      tone: 'emerald',
+                      onClick: () => setActiveTab('analytics'),
+                    },
+                    {
+                      id: 'statement',
+                      label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statements',
+                      icon: FileText,
+                      tone: 'indigo',
+                      onClick: () => setActiveTab('statement'),
+                    },
+                    {
+                      id: 'inbox',
+                      label: lang === 'bn' ? 'ইনবক্স' : 'Inbox',
+                      icon: Mail,
+                      tone: 'rose',
+                      badge:
+                        unreadNotifications > 0
+                          ? unreadNotifications > 9
+                            ? '9+'
+                            : String(unreadNotifications)
+                          : undefined,
+                      onClick: () => setActiveTab('inbox'),
+                    },
+                    {
+                      id: 'soundbox',
+                      label: lang === 'bn' ? 'সাউন্ডবক্স ও নিরাপত্তা' : 'Soundbox',
+                      icon: Volume2,
+                      tone: 'pink',
+                      onClick: () => setActiveTab('soundbox'),
+                    },
+                    {
+                      id: 'cashier_lock',
+                      label: lang === 'bn' ? 'ক্যাশিয়ার লক' : 'Cashier Lock',
+                      icon: Lock,
+                      tone: 'amber',
+                      onClick: () => {
+                        setActiveTab('checkout');
+                        setCashierMode(true);
+                      },
+                    },
+                    ...(onOpenMapLocationPicker
+                      ? [
+                          {
+                            id: 'map_pin',
+                            label: user.mapLocation
+                              ? lang === 'bn'
+                                ? 'ম্যাপ আপডেট'
+                                : 'Update Pin'
+                              : lang === 'bn'
+                                ? 'ম্যাপ পিন'
+                                : 'Map Pin',
+                            icon: MapPin,
+                            tone: 'emerald' as const,
+                            onClick: onOpenMapLocationPicker,
+                          },
+                        ]
+                      : ([] as ServiceCircleItem[])),
+                    ...(onOpenProfile
+                      ? [
+                          {
+                            id: 'profile',
+                            label: lang === 'bn' ? 'প্রোফাইল' : 'Profile',
+                            icon: UserIcon,
+                            tone: 'sky' as const,
+                            onClick: onOpenProfile,
+                          },
+                        ]
+                      : ([] as ServiceCircleItem[])),
+                    {
+                      id: 'pdf_export',
+                      label: lang === 'bn' ? 'পিডিএফ' : 'PDF Export',
+                      icon: FileText,
+                      tone: 'cyan',
+                      onClick: () => downloadAccountStatementPdf(user, transactions, feeConfig),
+                    },
+                  ] satisfies ServiceCircleItem[]
+                }
+              />
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Tactile 3D Merchant Sub-Navigation Tabs (Desktop / Tablet & Cashier Mode) */}
-      <div className={`${cashierMode ? 'flex' : 'hidden sm:flex'} flex-wrap gap-2`}>
-        <button
-          type="button"
-          onClick={() => setActiveTab('checkout')}
-          className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border truncate cursor-pointer ${
-            activeTab === 'checkout'
-              ? preset.activeTabClass
-              : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          {t('smartCheckout', lang)}
-        </button>
-
-        {!cashierMode && (
-          <>
+      {/* Sub-Page Top Bar with Back-to-Home & Quick Switcher */}
+      {activeTab !== 'home' && !cashierMode && (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 rounded-2xl px-3.5 py-2.5">
+          <div className="flex items-center gap-2 min-w-0 overflow-x-auto no-scrollbar">
             <button
               type="button"
-              onClick={() => setActiveTab('cashout')}
-              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
-                activeTab === 'cashout'
-                  ? preset.activeTabClass
-                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-              }`}
+              onClick={() => setActiveTab('home')}
+              className={`min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} shrink-0 cursor-pointer`}
             >
-              <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{t('merchantCashOut', lang)}</span>
+              <ArrowLeft className="w-4 h-4" />
+              <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('refunds')}
-              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
-                activeTab === 'refunds'
-                  ? preset.activeTabClass
-                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <RotateCcw className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{t('refundEngine', lang)}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('b2b')}
-              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
-                activeTab === 'b2b'
-                  ? preset.activeTabClass
-                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Building2 className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{t('b2bTransfer', lang)}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('analytics')}
-              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
-                activeTab === 'analytics'
-                  ? preset.activeTabClass
-                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{t('salesAnalytics', lang)}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('statement')}
-              className={`acash-3d-tile min-h-[42px] px-3 sm:px-4 py-2 rounded-xl text-xs font-semibold border inline-flex items-center justify-center gap-1.5 truncate cursor-pointer ${
-                activeTab === 'statement'
-                  ? preset.activeTabClass
-                  : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{lang === 'bn' ? 'স্টেটমেন্ট' : 'Statement'}</span>
-            </button>
-          </>
-        )}
-      </div>
+            {(
+              [
+                { id: 'checkout', label: lang === 'bn' ? 'চেকআউট' : 'Checkout' },
+                { id: 'cashout', label: lang === 'bn' ? 'ক্যাশ-আউট' : 'Cash Out' },
+                { id: 'refunds', label: lang === 'bn' ? 'রিফান্ড' : 'Refunds' },
+                { id: 'b2b', label: lang === 'bn' ? 'বিটুবি' : 'B2B' },
+                { id: 'analytics', label: lang === 'bn' ? 'বিশ্লেষণ' : 'Analytics' },
+                { id: 'statement', label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statements' },
+                { id: 'inbox', label: lang === 'bn' ? 'ইনবক্স' : 'Inbox' },
+                { id: 'soundbox', label: lang === 'bn' ? 'সাউন্ডবক্স' : 'Soundbox' },
+              ] as const
+            ).map((tabItem) => (
+              <button
+                key={tabItem.id}
+                type="button"
+                onClick={() => setActiveTab(tabItem.id)}
+                className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
+                  activeTab === tabItem.id
+                    ? preset.activeTabClass
+                    : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {tabItem.label}
+              </button>
+            ))}
+          </div>
+          <div className={`text-xs font-mono-tabular font-bold ${preset.accentTextClass} shrink-0`}>
+            Bal: {formatBdt(user.balance, lang)}
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: Smart Checkout & Dynamic QR */}
       {activeTab === 'checkout' && (
@@ -889,7 +1039,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                     setCopiedLink(true);
                     setTimeout(() => setCopiedLink(false), 1800);
                   }}
-                  className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 shrink-0"
+                  className={`px-3.5 py-2 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center gap-1.5 shrink-0 cursor-pointer`}
                 >
                   {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedLink ? t('copied', lang) : 'Copy'}</span>
@@ -902,7 +1052,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               onClick={() =>
                 downloadMerchantQrStandeePdf(user, qrCanvasRef.current, numericCheckoutAmt)
               }
-              className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 shadow-sm"
+              className={`w-full min-h-[44px] py-3 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center justify-center gap-2 shadow-sm cursor-pointer`}
             >
               <Printer className="w-4 h-4" />
               <span>{t('downloadStandee', lang)}</span>
@@ -924,7 +1074,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setActiveTab('statement')}
-                    className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                    className={`text-xs font-semibold ${preset.accentTextClass} hover:underline cursor-pointer`}
                   >
                     {lang === 'bn' ? 'সব দেখুন →' : `All (${incomingPayments.length}) →`}
                   </button>
@@ -997,9 +1147,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   setCashOutStep('form');
                   setCashOutError('');
                 }}
-                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors ${
+                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                   cashOutMode === 'agent'
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                    ? preset.activeTabClass
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
@@ -1012,9 +1162,9 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                   setCashOutStep('form');
                   setCashOutError('');
                 }}
-                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors ${
+                className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                   cashOutMode === 'admin'
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                    ? preset.activeTabClass
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
@@ -1747,7 +1897,7 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
               <button
                 type="button"
                 onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                className="px-3.5 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5"
+                className={`px-3.5 py-2 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer`}
               >
                 <FileText className="w-3.5 h-3.5" />
                 <span>{t('downloadStatement', lang)}</span>
@@ -1803,6 +1953,261 @@ export const MerchantPanel: React.FC<MerchantPanelProps> = ({
                 ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* TAB 6: Dedicated Merchant Inbox & Notifications Page */}
+      {activeTab === 'inbox' && !cashierMode && (
+        <div className="max-w-3xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 overflow-hidden">
+          <div className="px-4 sm:px-6 py-4 border-b border-slate-200/80 dark:border-slate-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'মার্চেন্ট ইনবক্স ও অ্যালার্ট' : 'Merchant Inbox & Alerts'}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {unreadNotifications} {lang === 'bn' ? 'টি অপঠিত বার্তা' : 'unread messages'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {unreadNotifications > 0 && onMarkAllNotifRead && (
+                  <button
+                    type="button"
+                    onClick={onMarkAllNotifRead}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckCheck className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'সব পড়া হয়েছে' : 'Mark all read'}</span>
+                  </button>
+                )}
+                {onOpenNotifications && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotifications}
+                    className={`min-h-[38px] px-3 py-1.5 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer`}
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'ডিভাইস সাউন্ড' : 'Alert Settings'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setInboxTab('alerts')}
+                className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  inboxTab === 'alerts' ? preset.activeTabClass : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn'
+                  ? `অ্যালার্ট (${accountNotifications.length})`
+                  : `Notifications (${accountNotifications.length})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setInboxTab('transactions')}
+                className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  inboxTab === 'transactions' ? preset.activeTabClass : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn'
+                  ? `লেনদেন (${incomingPayments.length})`
+                  : `Store Payments (${incomingPayments.length})`}
+              </button>
+            </div>
+          </div>
+
+          {inboxTab === 'alerts' ? (
+            accountNotifications.length === 0 ? (
+              <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                {lang === 'bn' ? 'এখনো কোনো ইনবক্স অ্যালার্ট নেই।' : 'Your Merchant Inbox is clean.'}
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {accountNotifications.map((notif) => {
+                  const read = isAccountNotificationRead(notif, user.accountId);
+                  const linkedTx = notif.txId ? txMap.get(notif.txId) : undefined;
+                  return (
+                    <div
+                      key={notif.id}
+                      className={`p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        read ? 'opacity-70' : 'bg-rose-50/40 dark:bg-rose-500/5'
+                      }`}
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-white">
+                          <span>{notif.title}</span>
+                          {!read && (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-600 text-[10px] text-white font-semibold">
+                              NEW
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                          {notif.message}
+                        </p>
+                        <div className="text-[11px] font-mono-tabular text-slate-400">
+                          {new Date(notif.createdAt).toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {linkedTx && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedReceipt(linkedTx)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                          >
+                            {lang === 'bn' ? 'রসিদ' : 'Receipt'}
+                          </button>
+                        )}
+                        {!read && onMarkNotifRead && (
+                          <button
+                            type="button"
+                            onClick={() => onMarkNotifRead(notif.id)}
+                            className={`min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold ${preset.accentTextClass} cursor-pointer`}
+                          >
+                            {lang === 'bn' ? 'পড়া হয়েছে' : 'Mark Read'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {incomingPayments.slice(0, 20).map((tx) => (
+                <div
+                  key={tx.txId}
+                  onClick={() => setSelectedReceipt(tx)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedReceipt(tx);
+                    }
+                  }}
+                  className="cursor-pointer"
+                >
+                  <TransactionRowItem
+                    tx={tx}
+                    viewerAccountId={user.accountId}
+                    lang={lang}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 7: Dedicated Merchant Soundbox & Security Hub */}
+      {activeTab === 'soundbox' && !cashierMode && (
+        <div className="max-w-2xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-4 sm:p-6 space-y-5">
+          <div>
+            <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+              {lang === 'bn' ? 'সাউন্ডবক্স ও মার্চেন্ট নিরাপত্তা' : 'Soundbox & Merchant Security'}
+            </h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              {lang === 'bn'
+                ? 'পেমেন্ট গ্রহণ করার সাথে সাথে বাংলা ও ইংরেজি ভয়েস অ্যালার্ট ও বায়োমেট্রিক লক'
+                : 'Instant transaction voice alerts, passkey approvals & cashier staff lock'}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Volume2 className={`w-4 h-4 ${preset.accentTextClass}`} />
+                  <span>{lang === 'bn' ? 'লাইভ সাউন্ডবক্স' : 'Live Voice Soundbox'}</span>
+                </span>
+                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  {t('soundboxActive', lang)}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                {user.gender === 'female'
+                  ? lang === 'bn'
+                    ? 'মহিলা মার্চেন্ট → পুরুষ কণ্ঠে প্রতিটি পেমেন্ট ঘোষণা করে।'
+                    : 'Female profile → Announces every customer payment in a Male voice.'
+                  : lang === 'bn'
+                    ? 'পুরুষ মার্চেন্ট → নারী কণ্ঠে প্রতিটি পেমেন্ট ঘোষণা করে।'
+                    : 'Male profile → Announces every customer payment in a Female voice.'}
+              </p>
+              <button
+                type="button"
+                onClick={handleTestSoundbox}
+                className={`w-full min-h-[42px] py-2 px-3 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white cursor-pointer`}
+              >
+                {t('soundboxTest', lang)}
+              </button>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Fingerprint className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>{lang === 'bn' ? 'বায়োমেট্রিক ও ওনার লক' : 'Passkeys & Owner Lock'}</span>
+                </span>
+                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  {enrolledBiometrics.length > 0 ? `${enrolledBiometrics.length} Active` : 'PIN Only'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                {lang === 'bn'
+                  ? 'ক্যাশিয়ার মোড আনলক, রিফান্ড ও B2B ট্রান্সফার বায়োমেট্রিক দিয়ে অনুমোদন করুন।'
+                  : 'Approve refunds, cash-outs, B2B settlements & owner unlock with Biometrics.'}
+              </p>
+              {onOpenBiometricSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenBiometricSettings}
+                  className="w-full min-h-[42px] py-2 px-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer"
+                >
+                  {lang === 'bn' ? 'বায়োমেট্রিক ম্যানেজ করুন' : 'Manage Passkeys & PIN'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                <ShieldCheck className={`w-4 h-4 ${preset.accentTextClass}`} />
+                <span>{lang === 'bn' ? 'কেওয়াইসি ও ২FA স্ট্যাটাস' : 'Merchant KYC & 2FA'}</span>
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                KYC: <strong className="text-slate-800 dark:text-slate-200">{(user.kyc?.status || 'unverified').toUpperCase()}</strong>
+                {' · '}
+                2FA: <strong className="text-slate-800 dark:text-slate-200">{user.totpSecret ? 'Google Auth ON' : 'EmailJS Guard'}</strong>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {onOpenKyc && (
+                <button
+                  type="button"
+                  onClick={onOpenKyc}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer"
+                >
+                  {lang === 'bn' ? 'কেওয়াইসি আপডেট' : 'Update KYC'}
+                </button>
+              )}
+              {onOpen2fa && (
+                <button
+                  type="button"
+                  onClick={onOpen2fa}
+                  className={`min-h-[40px] px-3.5 py-2 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white cursor-pointer`}
+                >
+                  {lang === 'bn' ? '২FA ও পিন' : '2FA & PIN'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

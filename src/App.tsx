@@ -108,7 +108,7 @@ import {
   LiveAccountToastStack,
   LiveToastItem,
 } from './components/common/AccountNotificationCenter';
-import { MobileBottomNav } from './components/common/MobileBottomNav';
+import { MobileBottomNav, MobileNavTab } from './components/common/MobileBottomNav';
 import { TransactionReceiptModal } from './components/common/TransactionReceiptModal';
 import { GiftCardReceiverOverlay } from './components/common/GiftCardExperience';
 import { useOnlineStatus } from './hooks/usePWAInstall';
@@ -270,6 +270,9 @@ export default function App() {
   const openedGiftIdsRef = useRef<Set<string>>(new Set());
   const [qrTriggerCount, setQrTriggerCount] = useState(0);
   const [homeNavSignal, setHomeNavSignal] = useState(0);
+  const [statementNavSignal, setStatementNavSignal] = useState(0);
+  const [inboxNavSignal, setInboxNavSignal] = useState(0);
+  const [mobileNavTab, setMobileNavTab] = useState<MobileNavTab>('home');
   const [complianceBannerDismissed, setComplianceBannerDismissed] = useState(false);
   const graceNotifiedRef = useRef<string | null>(null);
   const seenNotifsRef = useRef<Set<string> | null>(null);
@@ -688,6 +691,7 @@ export default function App() {
     setCurrentUser(user);
     setUserBootLoading(false);
     setComplianceBannerDismissed(false);
+    setMobileNavTab('home');
     setHomeNavSignal((c) => c + 1);
     triggerHapticGesture('success');
   };
@@ -706,6 +710,7 @@ export default function App() {
     setDismissedGiftIds(new Set());
     openedGiftIdsRef.current = new Set();
     setComplianceBannerDismissed(false);
+    setMobileNavTab('home');
     setUserSession(null);
     setCurrentUser(null);
   };
@@ -781,6 +786,7 @@ export default function App() {
               className={`min-w-0 flex-1 ${currentUser ? 'cursor-pointer' : ''}`}
               onClick={() => {
                 if (currentUser) {
+                  setMobileNavTab('home');
                   setHomeNavSignal((c) => c + 1);
                   window.scrollTo({ top: 0, behavior: 'smooth' });
                 }
@@ -837,12 +843,12 @@ export default function App() {
                 onClick={toggleTheme}
                 aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
                 title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-                className="min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                className="min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 {theme === 'dark' ? (
                   <Sun className="w-4 h-4 text-amber-400" />
                 ) : (
-                  <Moon className="w-4 h-4 text-indigo-600" />
+                  <Moon className={`w-4 h-4 ${activePortalTheme.accentTextClass}`} />
                 )}
                 <span className="hidden xl:inline">
                   {theme === 'dark'
@@ -859,10 +865,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={toggleLanguage}
-                className="min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                className="min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 title="Switch Language (English / বাংলা)"
               >
-                <Globe className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0 hidden sm:inline" />
+                <Globe className={`w-3.5 h-3.5 ${activePortalTheme.accentTextClass} shrink-0 hidden sm:inline`} />
                 <span className="sm:hidden">{lang === 'en' ? 'বাং' : 'EN'}</span>
                 <span className="hidden sm:inline">{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
               </button>
@@ -875,7 +881,7 @@ export default function App() {
                   rel="noopener noreferrer"
                   className={`${
                     currentUser ? 'hidden md:inline-flex' : 'inline-flex'
-                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0`}
+                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 ${activePortalTheme.accentBorderHoverClass} text-xs font-semibold ${activePortalTheme.accentTextClass} items-center gap-1.5 transition-colors whitespace-nowrap shrink-0`}
                 >
                   <ShieldCheck className="w-4 h-4 shrink-0" />
                   <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
@@ -887,7 +893,7 @@ export default function App() {
                   onClick={() => switchAppMode('admin')}
                   className={`${
                     currentUser ? 'hidden md:inline-flex' : 'inline-flex'
-                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-semibold text-indigo-700 dark:text-indigo-300 items-center gap-1.5 transition-colors whitespace-nowrap shrink-0`}
+                  } min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 ${activePortalTheme.accentBorderHoverClass} text-xs font-semibold ${activePortalTheme.accentTextClass} items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                 >
                   <ShieldCheck className="w-4 h-4 shrink-0" />
                   <span className="hidden sm:inline">{t('switchToAdmin', lang)}</span>
@@ -986,9 +992,9 @@ export default function App() {
                     onClick={() => setNotifModalOpen(true)}
                     aria-label={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
                     title={lang === 'bn' ? 'লাইভ অ্যালার্ট' : 'Live Notifications'}
-                    className="relative min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                    className={`relative min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 ${activePortalTheme.accentBorderHoverClass} text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                   >
-                    <Bell className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                    <Bell className={`w-4 h-4 ${activePortalTheme.accentTextClass}`} />
                     <span className="hidden lg:inline">
                       {lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}
                     </span>
@@ -1005,7 +1011,7 @@ export default function App() {
                       setProfileInitialTab('photo');
                       setProfileOpen(true);
                     }}
-                    className="hidden sm:inline-flex min-h-[40px] pl-1.5 pr-2.5 sm:pr-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+                    className={`hidden sm:inline-flex min-h-[40px] pl-1.5 pr-2.5 sm:pr-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 ${activePortalTheme.accentBorderHoverClass} text-xs font-semibold text-slate-800 dark:text-slate-100 items-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                   >
                     {currentUser.profilePhotoUrl ? (
                       <img
@@ -1015,8 +1021,8 @@ export default function App() {
                         className="w-7 h-7 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
                       />
                     ) : (
-                      <span className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 flex items-center justify-center">
-                        <UserIcon className="w-3.5 h-3.5 text-indigo-700 dark:text-indigo-300" />
+                      <span className={`w-7 h-7 rounded-lg ${activePortalTheme.accentIconBgClass} flex items-center justify-center`}>
+                        <UserIcon className="w-3.5 h-3.5" />
                       </span>
                     )}
                     <span className="hidden md:inline">
@@ -1027,7 +1033,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleUserLogout}
-                    className="min-h-[38px] sm:min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                    className="min-h-[38px] sm:min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-rose-50 dark:bg-rose-500/15 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-semibold text-rose-700 dark:text-rose-300 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     title={t('logout', lang)}
                   >
                     <LogOut className="w-4 h-4 shrink-0" />
@@ -1054,10 +1060,10 @@ export default function App() {
         !alertBannerDismissed &&
         (deviceAlertStatus.notificationPermission === 'default' ||
           !deviceAlertStatus.audioUnlocked) && (
-          <div className="bg-indigo-50/95 dark:bg-indigo-950/60 border-b border-indigo-200 dark:border-indigo-500/30 px-4 py-2">
+          <div className="bg-white/90 dark:bg-[#121622]/90 border-b border-slate-200/80 dark:border-slate-800 px-4 py-2">
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-100">
-                <Volume2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                <Volume2 className={`w-4 h-4 ${activePortalTheme.accentTextClass} shrink-0`} />
                 <span>
                   {lang === 'bn'
                     ? 'ফোন ও পিসিতে লাইভ নোটিফিকেশন ও সাউন্ড জেসচার অ্যাক্সেস চালু করুন'
@@ -1071,7 +1077,7 @@ export default function App() {
                     await requestNativeAlertGestureAccess(lang);
                     setDeviceAlertStatus(getDeviceAlertStatus());
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[11px] font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className={`px-3 py-1.5 rounded-lg ${activePortalTheme.headerBtnBg} text-[11px] font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer`}
                 >
                   <Bell className="w-3.5 h-3.5 shrink-0" />
                   <span>
@@ -1082,7 +1088,7 @@ export default function App() {
                   type="button"
                   onClick={() => setAlertBannerDismissed(true)}
                   aria-label="Dismiss"
-                  className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                  className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -1243,7 +1249,7 @@ export default function App() {
       <main className="flex-1">
         {userBootLoading ? (
           <div className="max-w-7xl mx-auto px-6 py-24 text-center space-y-3">
-            <div className="w-10 h-10 rounded-full border-2 border-indigo-600 dark:border-indigo-400 border-t-transparent animate-spin mx-auto" />
+            <div className="w-10 h-10 rounded-full border-2 border-rose-600 dark:border-rose-400 border-t-transparent animate-spin mx-auto" />
             <p className="text-sm text-slate-500 dark:text-slate-400">
               {lang === 'bn' ? 'সেশন পুনরুদ্ধার করা হচ্ছে...' : 'Restoring persistent Acash session...'}
             </p>
@@ -1264,13 +1270,26 @@ export default function App() {
             onClearPaymentIntent={() => setPaymentIntent(null)}
             onOpenBoothMap={() => setBoothMapOpen(true)}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenProfile={() => {
+              setProfileInitialTab('photo');
+              setProfileOpen(true);
+            }}
             onOpenBiometricSettings={() => {
               setProfileInitialTab('pin');
               setProfileOpen(true);
             }}
             unreadNotifications={unreadNotifCount}
+            accountNotifications={accountNotifications}
+            onMarkNotifRead={(notifId) => {
+              void markAccountNotificationRead(notifId, currentUser.accountId);
+            }}
+            onMarkAllNotifRead={() => {
+              void markAllAccountNotificationsRead(currentUser.accountId);
+            }}
             externalQrSignal={qrTriggerCount}
             homeNavSignal={homeNavSignal}
+            statementNavSignal={statementNavSignal}
+            inboxNavSignal={inboxNavSignal}
             customGiftCards={customGiftCards}
             giftCardPolicy={giftCardPolicy}
             compliance={userCompliance}
@@ -1296,13 +1315,26 @@ export default function App() {
               setProfileOpen(true);
             }}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenProfile={() => {
+              setProfileInitialTab('photo');
+              setProfileOpen(true);
+            }}
             onOpenBiometricSettings={() => {
               setProfileInitialTab('pin');
               setProfileOpen(true);
             }}
             unreadNotifications={unreadNotifCount}
+            accountNotifications={accountNotifications}
+            onMarkNotifRead={(notifId) => {
+              void markAccountNotificationRead(notifId, currentUser.accountId);
+            }}
+            onMarkAllNotifRead={() => {
+              void markAllAccountNotificationsRead(currentUser.accountId);
+            }}
             externalQrSignal={qrTriggerCount}
             homeNavSignal={homeNavSignal}
+            statementNavSignal={statementNavSignal}
+            inboxNavSignal={inboxNavSignal}
             compliance={userCompliance}
             complianceBannerDismissed={complianceBannerDismissed}
             onDismissComplianceBanner={() => setComplianceBannerDismissed(true)}
@@ -1326,13 +1358,26 @@ export default function App() {
               setProfileOpen(true);
             }}
             onOpenNotifications={() => setNotifModalOpen(true)}
+            onOpenProfile={() => {
+              setProfileInitialTab('photo');
+              setProfileOpen(true);
+            }}
             onOpenBiometricSettings={() => {
               setProfileInitialTab('pin');
               setProfileOpen(true);
             }}
             unreadNotifications={unreadNotifCount}
+            accountNotifications={accountNotifications}
+            onMarkNotifRead={(notifId) => {
+              void markAccountNotificationRead(notifId, currentUser.accountId);
+            }}
+            onMarkAllNotifRead={() => {
+              void markAllAccountNotificationsRead(currentUser.accountId);
+            }}
             externalQrSignal={qrTriggerCount}
             homeNavSignal={homeNavSignal}
+            statementNavSignal={statementNavSignal}
+            inboxNavSignal={inboxNavSignal}
             compliance={userCompliance}
             complianceBannerDismissed={complianceBannerDismissed}
             onDismissComplianceBanner={() => setComplianceBannerDismissed(true)}
@@ -1352,26 +1397,33 @@ export default function App() {
         <MobileBottomNav
           role={currentUser.role}
           lang={lang}
+          activeTab={mobileNavTab}
           unreadNotifications={unreadNotifCount}
           onHome={() => {
             triggerHapticGesture('tap');
+            setMobileNavTab('home');
             setHomeNavSignal((c) => c + 1);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
-          onOpenBoothMap={() => {
+          onOpenStatements={() => {
             triggerHapticGesture('tap');
-            setBoothMapOpen(true);
+            setMobileNavTab('statements');
+            setStatementNavSignal((c) => c + 1);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           onPrimaryQr={() => {
             triggerHapticGesture('tap');
             setQrTriggerCount((c) => c + 1);
           }}
-          onOpenNotifications={() => {
+          onOpenInbox={() => {
             triggerHapticGesture('tap');
-            setNotifModalOpen(true);
+            setMobileNavTab('inbox');
+            setInboxNavSignal((c) => c + 1);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           onOpenProfile={() => {
             triggerHapticGesture('tap');
+            setMobileNavTab('profile');
             setProfileInitialTab('photo');
             setProfileOpen(true);
           }}

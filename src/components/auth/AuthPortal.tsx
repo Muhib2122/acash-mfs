@@ -722,7 +722,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
             </p>
           </div>
           <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-4 space-y-1.5">
-            <div className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
+            <div className={`text-xs font-medium ${preset.accentTextClass}`}>
               {newlyCreatedUser.role === 'U'
                 ? t('roleCustomer', lang)
                 : newlyCreatedUser.role === 'A'
@@ -740,7 +740,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               </div>
               <div>
                 <span className="text-slate-400">Referred By:</span>{' '}
-                <span className="text-indigo-600 dark:text-indigo-300 font-medium">
+                <span className={`${preset.accentTextClass} font-medium`}>
                   {formatUserReferralSource(newlyCreatedUser)}
                 </span>
               </div>
@@ -789,7 +789,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           <button
             type="button"
             onClick={() => onAuthenticated(newlyCreatedUser)}
-            className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white transition-colors"
+            className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-colors cursor-pointer ${preset.primaryButtonClass}`}
           >
             {lang === 'bn' ? 'ড্যাশবোর্ডে প্রবেশ করুন' : 'Enter Dashboard'}
           </button>
@@ -1065,13 +1065,13 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           )}
 
           {showcaseNotice && (
-            <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-medium text-indigo-800 dark:text-indigo-200 flex items-center justify-between gap-2">
+            <div className={`mb-4 px-3.5 py-2.5 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 ${preset.accentIconBgClass} border-slate-200 dark:border-slate-700`}>
               <span>{showcaseNotice}</span>
               <button
                 type="button"
                 onClick={() => setShowcaseNotice('')}
                 aria-label="Close"
-                className="text-indigo-500 hover:text-indigo-800 dark:hover:text-white shrink-0"
+                className="opacity-75 hover:opacity-100 shrink-0 cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -1121,10 +1121,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   type="button"
                   disabled={googleBusy || loading}
                   onClick={handleGoogleSignIn}
-                  className="w-full py-3 px-4 rounded-xl bg-slate-50 dark:bg-[#0B0D14] hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60"
+                  className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-slate-50 dark:bg-[#0B0D14] hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60 cursor-pointer"
                 >
                   {googleBusy ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
+                    <Loader2 className={`w-4 h-4 animate-spin ${preset.accentTextClass}`} />
                   ) : (
                     <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
                       <path
@@ -1167,7 +1167,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       type="button"
                       disabled={googleBusy}
                       onClick={handleGoogleRedirectRetry}
-                      className="font-semibold text-indigo-700 dark:text-indigo-300 underline"
+                      className={`font-semibold underline ${preset.accentTextClass}`}
                     >
                       {lang === 'bn' ? 'Redirect Sign-In' : 'Use Redirect Sign-In'}
                     </button>
@@ -1194,9 +1194,9 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 setOtpStep(false);
                 setError('');
               }}
-              className={`py-2.5 text-sm font-semibold rounded-lg transition-colors ${
+              className={`min-h-[44px] py-2.5 text-sm font-semibold rounded-lg transition-colors cursor-pointer ${
                 mode === 'login'
-                  ? 'bg-indigo-600 text-white shadow-sm'
+                  ? preset.activeTabClass
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -1210,9 +1210,9 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 setError('');
                 setPin('');
               }}
-              className={`py-2.5 text-sm font-semibold rounded-lg transition-colors ${
+              className={`min-h-[44px] py-2.5 text-sm font-semibold rounded-lg transition-colors cursor-pointer ${
                 mode === 'register'
-                  ? 'bg-indigo-600 text-white shadow-sm'
+                  ? preset.activeTabClass
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
@@ -1227,7 +1227,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-2">
                   {t('selectRole', lang)}
                 </label>
-                <div className="grid grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-3 gap-2 sm:gap-2.5">
                   {roleOptions.map((item) => {
                     const Icon = item.icon;
                     const active = role === item.id;
@@ -1236,23 +1236,23 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         key={item.id}
                         type="button"
                         onClick={() => handleRoleSwitch(item.id)}
-                        className={`p-3 rounded-xl border text-left transition-colors ${
+                        className={`min-h-[56px] p-2.5 sm:p-3 rounded-xl border text-left transition-colors cursor-pointer ${
                           active
-                            ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-500 text-indigo-900 dark:text-white'
-                            : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-700'
+                            ? `${preset.activeTabClass}`
+                            : `bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white ${preset.accentBorderHoverClass}`
                         }`}
                       >
-                        <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center justify-between mb-1">
                           <Icon
                             className={`w-4 h-4 ${
-                              active ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'
+                              active ? 'text-white' : 'text-slate-400'
                             }`}
                           />
-                          <span className="font-mono-tabular text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                          <span className={`font-mono-tabular text-[11px] font-semibold ${active ? 'text-white/95' : preset.accentTextClass}`}>
                             {item.prefix}
                           </span>
                         </div>
-                        <div className="text-xs font-semibold">{item.label}</div>
+                        <div className="text-xs font-semibold truncate">{item.label}</div>
                       </button>
                     );
                   })}
@@ -1366,8 +1366,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     </div>
                   </div>
 
-                  <div className="p-3 rounded-xl bg-indigo-50/80 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 flex items-start gap-2.5 text-xs text-indigo-800 dark:text-indigo-200">
-                    <ShieldCheck className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300">
+                    <ShieldCheck className={`w-4 h-4 ${preset.accentTextClass} shrink-0 mt-0.5`} />
                     <span className="leading-relaxed">
                       {lang === 'bn'
                         ? 'নিরাপত্তা নীতি: প্রতিটি নতুন লগইনে EmailJS ভেরিফিকেশন কোড অথবা Google Authenticator কোড দেওয়া বাধ্যতামূলক।'
@@ -1384,7 +1384,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                    className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer ${preset.primaryButtonClass}`}
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
                     <span>{t('login', lang)}</span>
@@ -1469,7 +1469,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         className={`text-[10px] font-semibold ${
                           isDirectGoogleVerified
                             ? 'text-emerald-600 dark:text-emerald-400'
-                            : 'text-indigo-600 dark:text-indigo-400'
+                            : preset.accentTextClass
                         }`}
                       >
                         {isDirectGoogleVerified
@@ -1510,7 +1510,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                       <span>
                         {lang === 'bn' ? 'লিঙ্গ / সেক্স নির্বাচন করুন *' : 'Sex / Gender *'}
                       </span>
-                      <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium">
+                      <span className={`text-[10px] font-medium ${preset.accentTextClass}`}>
                         {lang === 'bn' ? 'ভয়েস নোটিফিকেশন সেটআপ' : 'Voice Alert Profile'}
                       </span>
                     </div>
@@ -1521,10 +1521,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                           setGender('male');
                           setError('');
                         }}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        className={`min-h-[44px] py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                           gender === 'male'
-                            ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
-                            : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
+                            ? preset.activeTabClass
+                            : `bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 ${preset.accentBorderHoverClass}`
                         }`}
                       >
                         {lang === 'bn' ? 'পুরুষ (Male)' : 'Male'}
@@ -1535,10 +1535,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                           setGender('female');
                           setError('');
                         }}
-                        className={`py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        className={`min-h-[44px] py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                           gender === 'female'
-                            ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
-                            : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
+                            ? preset.activeTabClass
+                            : `bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 ${preset.accentBorderHoverClass}`
                         }`}
                       >
                         {lang === 'bn' ? 'মহিলা (Female)' : 'Female'}
@@ -1568,10 +1568,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                           setReferredByType('own_app');
                           setError('');
                         }}
-                        className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                           referredByType === 'own_app'
-                            ? 'bg-indigo-600 border-indigo-600 text-white'
-                            : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                            ? preset.activeTabClass
+                            : `bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white ${preset.accentBorderHoverClass}`
                         }`}
                       >
                         {lang === 'bn' ? 'নিজস্ব অ্যাপ (Self)' : 'Own App (Self)'}
@@ -1582,10 +1582,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                           setReferredByType('agent');
                           setError('');
                         }}
-                        className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                           referredByType === 'agent'
-                            ? 'bg-indigo-600 border-indigo-600 text-white'
-                            : 'bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                            ? preset.activeTabClass
+                            : `bg-white dark:bg-[#121622] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white ${preset.accentBorderHoverClass}`
                         }`}
                       >
                         {lang === 'bn' ? 'এজেন্ট রেফারেল' : 'By Agent Number / ID'}
@@ -1611,7 +1611,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   </div>
 
                   {/* Required Terms & Conditions Agreement (TCA) */}
-                  <div className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 space-y-2">
+                  <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-2">
                     <label className="flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-200 cursor-pointer select-none">
                       <input
                         type="checkbox"
@@ -1620,7 +1620,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                           setTcaAccepted(e.target.checked);
                           if (e.target.checked) setError('');
                         }}
-                        className="mt-0.5 rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500"
+                        className="mt-0.5 rounded border-slate-300 dark:border-slate-700 text-rose-600 focus:ring-rose-500"
                       />
                       <span className="leading-relaxed">
                         {lang === 'bn'
@@ -1631,7 +1631,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     <button
                       type="button"
                       onClick={() => setTcaModalOpen(true)}
-                      className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline pl-6"
+                      className={`inline-flex items-center gap-1.5 text-[11px] font-semibold hover:underline pl-6 cursor-pointer ${preset.accentTextClass}`}
                     >
                       <FileCheck2 className="w-3.5 h-3.5" />
                       <span>{lang === 'bn' ? 'সম্পূর্ণ TCA শর্তাবলী পড়ুন' : 'View Full Terms & Conditions (TCA)'}</span>
@@ -1670,7 +1670,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                    className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer ${preset.primaryButtonClass}`}
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
                     <span>
@@ -1735,9 +1735,9 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         }
                       }
                     }}
-                    className={`min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                    className={`min-h-[44px] px-2.5 py-2 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer ${
                       login2faChannel === 'email'
-                        ? 'bg-indigo-600 text-white shadow-sm'
+                        ? preset.activeTabClass
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
@@ -1747,8 +1747,8 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                 </div>
               )}
 
-              <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 space-y-1.5">
-                <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700 dark:text-indigo-200">
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 space-y-1.5">
+                <div className={`flex items-center gap-2 text-xs font-semibold ${preset.accentTextClass}`}>
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                   <span>
                     {mode === 'login' && pendingLoginUser && login2faChannel === 'authenticator' && pendingLoginUser.totpSecret
@@ -1798,7 +1798,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
               <button
                 type="submit"
                 disabled={loading || otpInput.trim().length !== 6}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer ${preset.primaryButtonClass}`}
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                 <span>{t('verifyAndContinue', lang)}</span>
@@ -1813,7 +1813,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                     setOtpInput('');
                     setError('');
                   }}
-                  className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                  className="min-h-[38px] px-2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
                 >
                   {t('back', lang)}
                 </button>
@@ -1835,7 +1835,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                         setLoading(false);
                       }
                     }}
-                    className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 font-medium disabled:opacity-60 whitespace-nowrap shrink-0"
+                    className={`min-h-[38px] px-2 inline-flex items-center gap-1.5 font-medium disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer ${preset.accentTextClass}`}
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                     <span>
@@ -1856,7 +1856,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
           <div className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 shadow-2xl p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2">
-                <FileCheck2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                <FileCheck2 className={`w-5 h-5 ${preset.accentTextClass}`} />
                 <h3 className="font-display font-bold text-slate-900 dark:text-white text-base">
                   {lang === 'bn'
                     ? 'আক্যাশ শর্তাবলী ও গ্রাহক চুক্তি (TCA)'
@@ -1893,7 +1893,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({
                   setTcaModalOpen(false);
                   setError('');
                 }}
-                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
+                className={`min-h-[44px] px-4 py-2.5 rounded-xl text-xs font-semibold text-white cursor-pointer ${preset.primaryButtonClass}`}
               >
                 {lang === 'bn' ? 'সম্মতি দিন ও বন্ধ করুন' : 'Accept TCA & Close'}
               </button>

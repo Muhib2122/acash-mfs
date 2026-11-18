@@ -8,7 +8,8 @@ export type ServiceCircleTone =
   | 'violet'
   | 'indigo'
   | 'sky'
-  | 'pink';
+  | 'pink'
+  | 'teal';
 
 export interface ServiceCircleItem {
   id: string;
@@ -18,6 +19,7 @@ export interface ServiceCircleItem {
   onClick: () => void;
   active?: boolean;
   highlightTag?: string;
+  badge?: string;
 }
 
 const TONE_CLASSES: Record<ServiceCircleTone, { circle: string; icon: string; ring: string }> = {
@@ -61,21 +63,35 @@ const TONE_CLASSES: Record<ServiceCircleTone, { circle: string; icon: string; ri
     icon: 'text-pink-600 dark:text-pink-400',
     ring: 'ring-pink-500/35 border-pink-400',
   },
+  teal: {
+    circle: 'bg-teal-50/90 dark:bg-teal-950/55 border-teal-200/80 dark:border-teal-800/60',
+    icon: 'text-teal-600 dark:text-teal-400',
+    ring: 'ring-teal-500/35 border-teal-400',
+  },
 };
 
 interface ServiceCircleGridProps {
   items: ServiceCircleItem[];
   compact?: boolean;
+  cols?: '4' | '4_5' | '4_6';
 }
 
 export const ServiceCircleGrid: React.FC<ServiceCircleGridProps> = ({
   items,
   compact = false,
+  cols = '4',
 }) => {
+  const gridColsClass =
+    cols === '4_6'
+      ? 'grid-cols-4 sm:grid-cols-6'
+      : cols === '4_5'
+        ? 'grid-cols-4 sm:grid-cols-5'
+        : 'grid-cols-4';
+
   return (
     <div
-      className={`grid grid-cols-4 ${
-        compact ? 'gap-x-1.5 gap-y-3.5 sm:gap-x-3 sm:gap-y-4' : 'gap-x-2 gap-y-4 sm:gap-x-4 sm:gap-y-5'
+      className={`grid ${gridColsClass} ${
+        compact ? 'gap-x-1.5 gap-y-3 sm:gap-x-3 sm:gap-y-4' : 'gap-x-2 gap-y-4 sm:gap-x-4 sm:gap-y-5'
       }`}
     >
       {items.map((item) => {
@@ -86,7 +102,7 @@ export const ServiceCircleGrid: React.FC<ServiceCircleGridProps> = ({
             key={item.id}
             type="button"
             onClick={item.onClick}
-            className="group min-h-[44px] flex flex-col items-center justify-start text-center gap-1.5 sm:gap-2 px-0.5 py-1 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 transition-transform duration-150 active:scale-95 cursor-pointer"
+            className="group min-h-[48px] flex flex-col items-center justify-start text-center gap-1.5 px-1 py-1 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 transition-transform duration-150 active:scale-95 cursor-pointer"
           >
             <div
               className={`relative ${
@@ -95,15 +111,15 @@ export const ServiceCircleGrid: React.FC<ServiceCircleGridProps> = ({
                 palette.circle
               } ${item.active ? `ring-2 ${palette.ring}` : ''}`}
             >
-              <Icon className={`${compact ? 'w-5 h-5 sm:w-6 sm:h-6' : 'w-5.5 h-5.5 sm:w-6 sm:h-6'} stroke-[1.9] ${palette.icon}`} />
-              {item.highlightTag && (
-                <span className="absolute -top-1 -right-1 px-1 py-0.5 rounded-md bg-rose-600 text-white text-[8px] font-bold leading-none shadow-xs">
-                  {item.highlightTag}
+              <Icon className={`${compact ? 'w-5 h-5 sm:w-5.5 sm:h-5.5' : 'w-5.5 h-5.5 sm:w-6 sm:h-6'} stroke-[1.9] ${palette.icon}`} />
+              {(item.badge || item.highlightTag) && (
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full bg-rose-600 text-white text-[9px] font-bold leading-none shadow-xs">
+                  {item.badge || item.highlightTag}
                 </span>
               )}
             </div>
             <span
-              className={`text-[11px] sm:text-xs font-medium leading-[1.25] text-slate-700 dark:text-slate-200 group-hover:text-slate-950 dark:group-hover:text-white max-w-[78px] sm:max-w-[92px] break-words line-clamp-2 ${
+              className={`text-[11px] sm:text-xs font-medium leading-[1.25] text-slate-700 dark:text-slate-200 group-hover:text-slate-950 dark:group-hover:text-white max-w-[82px] sm:max-w-[96px] break-words line-clamp-2 ${
                 item.active ? 'font-bold text-slate-950 dark:text-white' : ''
               }`}
             >

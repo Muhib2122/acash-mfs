@@ -18,9 +18,15 @@ import {
   Gift,
   Fingerprint,
   ArrowLeft,
-  History,
+  Calculator,
+  CheckCheck,
+  Mail,
+  ShieldCheck,
+  User as UserIcon,
+  Lock,
 } from 'lucide-react';
 import {
+  AccountNotification,
   AcashTransaction,
   AcashUser,
   BillerId,
@@ -35,9 +41,15 @@ import { formatBdt, t } from '../../lib/i18n';
 import {
   calculateFeeBreakdown,
   executeFinancialTransaction,
+  isAccountNotificationRead,
+  UNVERIFIED_MAX_TX_VOLUME,
   UserComplianceState,
 } from '../../lib/acashService';
-import { formatGiftSignature, getGiftCardTemplate } from '../../lib/giftCards';
+import {
+  formatGiftSignature,
+  getAllGiftCardTemplates,
+  getGiftCardTemplate,
+} from '../../lib/giftCards';
 import { usePortalTheme } from '../../lib/portalThemes';
 import { downloadAccountStatementPdf } from '../../lib/pdfGenerator';
 import { getVoiceMuted, playTransactionVoiceAlert, setVoiceMuted } from '../../lib/soundbox';
@@ -71,10 +83,16 @@ interface CustomerPanelProps {
   onClearPaymentIntent?: () => void;
   onOpenBoothMap?: () => void;
   onOpenNotifications?: () => void;
+  onOpenProfile?: () => void;
   onOpenBiometricSettings?: () => void;
   unreadNotifications?: number;
+  accountNotifications?: AccountNotification[];
+  onMarkNotifRead?: (notifId: string) => void;
+  onMarkAllNotifRead?: () => void;
   externalQrSignal?: number;
   homeNavSignal?: number;
+  statementNavSignal?: number;
+  inboxNavSignal?: number;
   customGiftCards?: CustomGiftCardRecord[];
   giftCardPolicy?: GiftCardCatalogPolicy;
   compliance?: UserComplianceState;
@@ -85,7 +103,14 @@ interface CustomerPanelProps {
 }
 
 type ServiceTab = 'send_money' | 'cash_out' | 'mobile_recharge' | 'bill_pay' | 'merchant_payment';
-type CustomerViewMode = 'home' | 'service' | 'history';
+type CustomerViewMode =
+  | 'home'
+  | 'service'
+  | 'gift_cards'
+  | 'statements'
+  | 'inbox'
+  | 'fee_calc'
+  | 'security';
 
 const BILLERS: Array<{ id: BillerId; name: string; category: string }> = [
   { id: 'desco', name: 'DESCO (Dhaka Electric)', category: 'Electricity' },
@@ -105,10 +130,16 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   onClearPaymentIntent,
   onOpenBoothMap,
   onOpenNotifications,
+  onOpenProfile,
   onOpenBiometricSettings,
   unreadNotifications = 0,
+  accountNotifications = [],
+  onMarkNotifRead,
+  onMarkAllNotifRead,
   externalQrSignal = 0,
   homeNavSignal = 0,
+  statementNavSignal = 0,
+  inboxNavSignal = 0,
   customGiftCards,
   giftCardPolicy,
   compliance,
@@ -146,10 +177,19 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [webauthnCap, setWebauthnCap] = useState<WebAuthnCapability | null>(null);
   const [confirmAuthMode, setConfirmAuthMode] = useState<'biometric' | 'pin'>('pin');
 
-  // Modals & Ledger filters
+  // Modals & Multi-Page filters
   const [qrMode, setQrMode] = useState<'show' | 'scan' | null>(null);
   const [selectedReceipt, setSelectedReceipt] = useState<AcashTransaction | null>(null);
   const [searchTx, setSearchTx] = useState('');
+  const [statementFilter, setStatementFilter] = useState<'all' | 'sent' | 'received'>('all');
+  const [inboxTab, setInboxTab] = useState<'alerts' | 'transactions'>('alerts');
+  const [giftFilter, setGiftFilter] = useState<string>('all');
+  const [calcService, setCalcService] = useState<
+    'cash_out' | 'send_money' | 'merchant_payment' | 'mobile_recharge'
+  >('cash_out');
+  const [calcAmount, setCalcAmount] = useState('5000');
+  const [calcGiftCard, setCalcGiftCard] = useState(false);
+
   const [giftDraft, setGiftDraft] = useState<GiftCardDraftState>(() => ({
     enabled: false,
     cardId: 'eid_mubarak',
@@ -191,6 +231,20 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
       setError('');
     }
   }, [homeNavSignal]);
+
+  useEffect(() => {
+    if (statementNavSignal > 0) {
+      setViewMode('statements');
+      setError('');
+    }
+  }, [statementNavSignal]);
+
+  useEffect(() => {
+    if (inboxNavSignal > 0) {
+      setViewMode('inbox');
+      setError('');
+    }
+  }, [inboxNavSignal]);
 
   useEffect(() => {
     if (seenTxIdsRef.current === null) {
@@ -488,23 +542,48 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     };
   }, [transactions, user.accountId]);
 
-  const recentThreeTransactions = useMemo(
-    () => transactions.slice(0, 3),
-    [transactions]
-  );
+  const latestTransaction = transactions[0] || null;
 
   const filteredTransactions = useMemo(() => {
     const q = searchTx.trim().toLowerCase();
-    if (!q) return transactions;
-    return transactions.filter(
-      (tx) =>
+    return transactions.filter((tx) => {
+      if (statementFilter === 'sent' && tx.senderId !== user.accountId) return false;
+      if (statementFilter === 'received' && tx.receiverId !== user.accountId) return false;
+      if (!q) return true;
+      return (
         tx.txHash.toLowerCase().includes(q) ||
         tx.txId.toLowerCase().includes(q) ||
         tx.senderName.toLowerCase().includes(q) ||
         tx.receiverName.toLowerCase().includes(q) ||
         tx.type.toLowerCase().includes(q)
-    );
-  }, [transactions, searchTx]);
+      );
+    });
+  }, [transactions, searchTx, statementFilter, user.accountId]);
+
+  const giftCardCatalog = useMemo(
+    () => getAllGiftCardTemplates(customGiftCards, giftCardPolicy, user.accountId),
+    [customGiftCards, giftCardPolicy, user.accountId]
+  );
+
+  const filteredGiftCatalog = useMemo(() => {
+    if (giftFilter === 'all') return giftCardCatalog;
+    return giftCardCatalog.filter((c) => c.themeCategory === giftFilter);
+  }, [giftCardCatalog, giftFilter]);
+
+  const txMap = useMemo(() => {
+    const map = new Map<string, AcashTransaction>();
+    for (const tx of transactions) map.set(tx.txId, tx);
+    return map;
+  }, [transactions]);
+
+  const calcNumericAmount = Math.max(0, Number(calcAmount) || 0);
+  const calcBreakdown = useMemo(
+    () =>
+      calculateFeeBreakdown(calcService, calcNumericAmount, feeConfig, {
+        hasGiftCard: calcService === 'send_money' && calcGiftCard,
+      }),
+    [calcService, calcNumericAmount, feeConfig, calcGiftCard]
+  );
 
   const services: Array<{ id: ServiceTab; label: string; icon: React.ElementType; colorClass: string }> = [
     {
@@ -592,11 +671,11 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         </div>
       )}
 
-      {/* VIEW 1: Clean bKash-Style Home Hub */}
+      {/* VIEW 1: Peaceful bKash-Style Multi-Menu Home Hub */}
       {viewMode === 'home' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left column on desktop: 3D Wallet + Quick Insights */}
-          <div className="lg:col-span-5 space-y-3.5">
+          {/* Left column: Peaceful Balance Hero Card (no crowded metric walls) */}
+          <div className="lg:col-span-5 space-y-4">
             <Wallet3DCard
               user={user}
               lang={lang}
@@ -617,7 +696,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setQrMode('scan')}
-                    className="min-h-[38px] px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-sm cursor-pointer"
+                    className="min-h-[38px] px-2.5 rounded-xl bg-white/20 border border-white/25 hover:bg-white/30 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shadow-xs cursor-pointer"
                   >
                     <ScanLine className="w-3.5 h-3.5" />
                     <span>{t('scanQr', lang)}</span>
@@ -628,14 +707,14 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 <>
                   <span>
                     {lang === 'bn' ? 'ক্যাশ আউট' : 'Cash Out'}:{' '}
-                    <span className="font-mono-tabular font-semibold text-indigo-200">
+                    <span className="font-mono-tabular font-semibold text-white">
                       ৳{feeConfig.feePer1000}/1k
                     </span>
                   </span>
-                  <span aria-hidden="true" className="text-white/30">·</span>
+                  <span aria-hidden="true" className="text-white/35">·</span>
                   <span>
                     {lang === 'bn' ? 'সেন্ড মানি' : 'Send Money'}:{' '}
-                    <span className="font-mono-tabular font-semibold text-amber-300">
+                    <span className="font-mono-tabular font-semibold text-amber-200">
                       {feeConfig.sendMoneyChargeMode === 'per_1000'
                         ? `৳${feeConfig.sendMoneyFeeRate}/1k`
                         : feeConfig.sendMoneyFeeRate > 0
@@ -653,113 +732,93 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/10 border border-white/15 hover:bg-white/20 text-xs font-semibold text-white transition-colors whitespace-nowrap cursor-pointer"
                   >
                     {voiceMuted ? (
-                      <VolumeX className="w-3.5 h-3.5 text-rose-300" />
+                      <VolumeX className="w-3.5 h-3.5 text-rose-200" />
                     ) : (
-                      <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
+                      <Volume2 className="w-3.5 h-3.5 text-emerald-200" />
                     )}
                     <span>{voiceMuted ? 'Voice Off' : 'Voice On'}</span>
                   </button>
-                  {onOpenNotifications && (
-                    <button
-                      type="button"
-                      onClick={onOpenNotifications}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/20 border border-indigo-400/35 hover:bg-indigo-500/30 text-xs font-semibold text-indigo-100 transition-colors whitespace-nowrap cursor-pointer"
-                    >
-                      <Bell className="w-3.5 h-3.5 text-indigo-300" />
-                      <span>{lang === 'bn' ? 'অ্যালার্ট' : 'Alerts'}</span>
-                      {unreadNotifications > 0 && (
-                        <span className="font-mono-tabular px-1.5 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-bold leading-none">
-                          {unreadNotifications}
-                        </span>
-                      )}
-                    </button>
-                  )}
-                  {onOpenBiometricSettings && (
-                    <button
-                      type="button"
-                      onClick={onOpenBiometricSettings}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                        enrolledBiometrics.length > 0
-                          ? 'bg-emerald-500/20 border-emerald-400/40 hover:bg-emerald-500/30 text-emerald-100'
-                          : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
-                      }`}
-                    >
-                      <Fingerprint
-                        className={`w-3.5 h-3.5 ${
-                          enrolledBiometrics.length > 0 ? 'text-emerald-300' : 'text-indigo-200'
-                        }`}
-                      />
-                      <span>
-                        {enrolledBiometrics.length > 0
-                          ? lang === 'bn'
-                            ? 'বায়োমেট্রিক চালু'
-                            : 'Biometrics On'
-                          : lang === 'bn'
-                            ? 'বায়োমেট্রিক'
-                            : 'Biometrics'}
-                      </span>
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('security')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      enrolledBiometrics.length > 0
+                        ? 'bg-emerald-500/20 border-emerald-300/40 hover:bg-emerald-500/30 text-emerald-100'
+                        : 'bg-white/10 border-white/15 hover:bg-white/20 text-white'
+                    }`}
+                  >
+                    <Fingerprint className="w-3.5 h-3.5" />
+                    <span>
+                      {enrolledBiometrics.length > 0
+                        ? lang === 'bn'
+                          ? 'বায়োমেট্রিক চালু'
+                          : 'Biometrics On'
+                        : lang === 'bn'
+                          ? 'নিরাপত্তা'
+                          : 'Security'}
+                    </span>
+                  </button>
                 </>
               }
             />
 
-            {/* Compact 3D Quick Insights */}
-            <div className="grid grid-cols-3 gap-2.5">
-              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                  {lang === 'bn' ? 'মোট গ্রহণ' : 'Incoming'}
-                </div>
-                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 truncate">
-                  {formatBdt(walletInsights.incoming, lang)}
-                </div>
+            {/* Single-Line Latest Activity Teaser (All details reside on Statements page) */}
+            <div className="acash-3d-surface rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  {lang === 'bn' ? 'সর্বশেষ লেনদেন' : 'Latest Activity'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('statements')}
+                  className={`text-xs font-semibold ${preset.accentTextClass} hover:underline whitespace-nowrap cursor-pointer`}
+                >
+                  {lang === 'bn' ? 'সব স্টেটমেন্ট →' : `Statements (${transactions.length}) →`}
+                </button>
               </div>
-              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                  {lang === 'bn' ? 'মোট ব্যয়' : 'Outgoing'}
+              {latestTransaction ? (
+                <div
+                  onClick={() => setSelectedReceipt(latestTransaction)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedReceipt(latestTransaction);
+                    }
+                  }}
+                  className="cursor-pointer"
+                >
+                  <TransactionRowItem
+                    tx={latestTransaction}
+                    viewerAccountId={user.accountId}
+                    lang={lang}
+                    onOpenGiftCard={(giftTx) => setViewedGiftTx(giftTx)}
+                  />
                 </div>
-                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-0.5 truncate">
-                  {formatBdt(walletInsights.outgoing, lang)}
+              ) : (
+                <div className="px-4 py-5 text-center text-xs text-slate-500 dark:text-slate-400">
+                  {t('noTransactions', lang)}
                 </div>
-              </div>
-              <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-3">
-                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                  {lang === 'bn' ? 'লেনদেন' : 'Total Txs'}
-                </div>
-                <div className="font-mono-tabular text-xs sm:text-sm font-bold text-slate-900 dark:text-white mt-0.5">
-                  {walletInsights.count}
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
-          {/* Right column on desktop: Clean Services Grid + Minimized Recent Activity */}
-          <div className="lg:col-span-7 space-y-5">
-            {/* Clean bKash-Style Circular Pastel Services Sheet */}
-            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <div className="flex items-center justify-between gap-2 mb-4">
-                <div>
-                  <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    {lang === 'bn' ? 'আক্যাশ সার্ভিস সমূহ' : 'Acash Services'}
-                  </h2>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    {lang === 'bn'
-                      ? 'যেকোনো সেবায় ট্যাপ করে দ্রুত লেনদেন শুরু করুন'
-                      : 'Tap a service to start a focused transaction'}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                  className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-400 text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                  <span className="hidden sm:inline">{t('downloadStatement', lang)}</span>
-                  <span className="sm:hidden">PDF</span>
-                </button>
+          {/* Right column: Structured bKash-Style Categorized Menu Sheets */}
+          <div className="lg:col-span-7 space-y-4">
+            {/* Sheet 1: Core Financial Payments */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'লেনদেন ও পেমেন্ট' : 'Money & Payments'}
+                </h2>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn' ? 'তাৎক্ষণিক সেবা' : 'Instant Services'}
+                </span>
               </div>
 
               <ServiceCircleGrid
+                cols="4"
                 items={
                   [
                     {
@@ -798,11 +857,73 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                       onClick: () => openServiceView('bill_pay', false),
                     },
                     {
-                      id: 'gift_card',
-                      label: lang === 'bn' ? 'গিফট কার্ড' : 'Gift Money',
+                      id: 'gift_cards',
+                      label: lang === 'bn' ? 'গিফট কার্ড' : 'Gift Cards',
                       icon: Gift,
                       tone: 'pink',
-                      onClick: () => openServiceView('send_money', true),
+                      badge: '৳2',
+                      onClick: () => setViewMode('gift_cards'),
+                    },
+                    {
+                      id: 'scan_qr',
+                      label: t('scanQr', lang),
+                      icon: ScanLine,
+                      tone: 'indigo',
+                      onClick: () => setQrMode('scan'),
+                    },
+                    {
+                      id: 'my_qr',
+                      label: t('myQr', lang),
+                      icon: QrCode,
+                      tone: 'sky',
+                      onClick: () => setQrMode('show'),
+                    },
+                  ] satisfies ServiceCircleItem[]
+                }
+              />
+            </div>
+
+            {/* Sheet 2: Dedicated Feature Menus & Account Tools */}
+            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800/80 p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'অ্যাকাউন্ট ও আরও সেবা' : 'Account Menus & Tools'}
+                </h2>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn' ? 'আলাদা পেজ' : 'Dedicated Pages'}
+                </span>
+              </div>
+
+              <ServiceCircleGrid
+                cols="4"
+                items={
+                  [
+                    {
+                      id: 'statements',
+                      label: lang === 'bn' ? 'স্টেটমেন্ট' : 'Statements',
+                      icon: FileText,
+                      tone: 'indigo',
+                      onClick: () => setViewMode('statements'),
+                    },
+                    {
+                      id: 'inbox',
+                      label: lang === 'bn' ? 'ইনবক্স' : 'Inbox',
+                      icon: Mail,
+                      tone: 'rose',
+                      badge:
+                        unreadNotifications > 0
+                          ? unreadNotifications > 9
+                            ? '9+'
+                            : String(unreadNotifications)
+                          : undefined,
+                      onClick: () => setViewMode('inbox'),
+                    },
+                    {
+                      id: 'fee_calc',
+                      label: lang === 'bn' ? 'ফি ও লিমিট' : 'Fee & Limit',
+                      icon: Calculator,
+                      tone: 'amber',
+                      onClick: () => setViewMode('fee_calc'),
                     },
                     ...(onOpenBoothMap
                       ? [
@@ -810,68 +931,46 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                             id: 'booth_map',
                             label: lang === 'bn' ? 'বুথ ম্যাপ' : 'Booth Map',
                             icon: MapPin,
-                            tone: 'emerald',
+                            tone: 'emerald' as const,
                             onClick: onOpenBoothMap,
-                          } satisfies ServiceCircleItem,
+                          },
                         ]
-                      : []),
+                      : ([] as ServiceCircleItem[])),
                     {
-                      id: 'history',
-                      label: lang === 'bn' ? 'ইতিহাস' : 'History',
-                      icon: History,
-                      tone: 'indigo',
-                      onClick: () => setViewMode('history'),
+                      id: 'security_hub',
+                      label: lang === 'bn' ? 'নিরাপত্তা ও ২FA' : 'Security Hub',
+                      icon: ShieldCheck,
+                      tone: 'cyan',
+                      onClick: () => setViewMode('security'),
+                    },
+                    {
+                      id: 'voice_alerts',
+                      label: lang === 'bn' ? 'ভয়েস সাউন্ড' : 'Voice Sound',
+                      icon: Volume2,
+                      tone: 'violet',
+                      onClick: () => setViewMode('security'),
+                    },
+                    ...(onOpenProfile
+                      ? [
+                          {
+                            id: 'profile_kyc',
+                            label: lang === 'bn' ? 'প্রোফাইল' : 'Profile',
+                            icon: UserIcon,
+                            tone: 'sky' as const,
+                            onClick: onOpenProfile,
+                          },
+                        ]
+                      : ([] as ServiceCircleItem[])),
+                    {
+                      id: 'pdf_export',
+                      label: lang === 'bn' ? 'পিডিএফ' : 'PDF Export',
+                      icon: FileText,
+                      tone: 'pink',
+                      onClick: () => downloadAccountStatementPdf(user, transactions, feeConfig),
                     },
                   ] satisfies ServiceCircleItem[]
                 }
               />
-            </div>
-
-            {/* Minimized Recent Activity (Latest 3 Transactions Only) */}
-            <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
-              <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-                <h3 className="font-display text-sm sm:text-base font-semibold text-slate-900 dark:text-white">
-                  {lang === 'bn' ? 'সাম্প্রতিক ৩টি লেনদেন' : 'Recent Activity'}
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('history')}
-                  className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline whitespace-nowrap cursor-pointer"
-                >
-                  {lang === 'bn' ? 'সব দেখুন →' : `View All (${transactions.length}) →`}
-                </button>
-              </div>
-
-              {recentThreeTransactions.length === 0 ? (
-                <div className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">
-                  {t('noTransactions', lang)}
-                </div>
-              ) : (
-                <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {recentThreeTransactions.map((tx) => (
-                    <div
-                      key={tx.txId}
-                      onClick={() => setSelectedReceipt(tx)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          setSelectedReceipt(tx);
-                        }
-                      }}
-                      className="cursor-pointer"
-                    >
-                      <TransactionRowItem
-                        tx={tx}
-                        viewerAccountId={user.accountId}
-                        lang={lang}
-                        onOpenGiftCard={(giftTx) => setViewedGiftTx(giftTx)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -898,7 +997,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               <div className="text-sm font-bold text-slate-900 dark:text-white truncate">
                 {services.find((s) => s.id === activeService)?.label}
               </div>
-              <div className="text-[11px] font-mono-tabular text-indigo-600 dark:text-indigo-400">
+              <div className={`text-[11px] font-mono-tabular ${preset.accentTextClass}`}>
                 {lang === 'bn' ? 'ব্যালেন্স:' : 'Bal:'} {formatBdt(user.balance, lang)}
               </div>
             </div>
@@ -968,7 +1067,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                             onClick={() => setRechargeType(rt)}
                             className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
                               rechargeType === rt
-                                ? 'bg-indigo-600 text-white'
+                                ? preset.activeTabClass
                                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                             }`}
                           >
@@ -1143,12 +1242,12 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               )}
 
               <div className="flex flex-wrap gap-2">
-                {[100, 500, 1000, 5000, 55000].map((val) => (
+                {[100, 500, 1000, 2000, 5000].map((val) => (
                   <button
                     key={val}
                     type="button"
                     onClick={() => setAmount(String(val))}
-                    className="px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 hover:border-indigo-500 text-xs font-mono-tabular text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+                    className={`px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 ${preset.accentBorderHoverClass} text-xs font-mono-tabular text-slate-700 dark:text-slate-300 transition-colors cursor-pointer`}
                   >
                     ৳{val.toLocaleString()}
                   </button>
@@ -1160,7 +1259,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="text-slate-500 dark:text-slate-400">{t('fee', lang)}: </span>
-                      <span className="font-mono-tabular font-semibold text-indigo-600 dark:text-indigo-400">
+                      <span className={`font-mono-tabular font-semibold ${preset.accentTextClass}`}>
                         {formatBdt(fee, lang)}
                       </span>
                       {fee > 0 && (
@@ -1330,7 +1429,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                     ? t('txPendingApproval', lang)
                     : t('txSuccess', lang)}
                 </h3>
-                <p className="font-mono-tabular text-2xl font-bold text-indigo-600 dark:text-indigo-400 mt-1">
+                <p className={`font-mono-tabular text-2xl font-bold ${preset.accentTextClass} mt-1`}>
                   {formatBdt(completedTx.amount, lang)}
                 </p>
                 <p className="text-xs font-mono-tabular text-slate-500 dark:text-slate-400 mt-1">
@@ -1351,14 +1450,14 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedReceipt(completedTx)}
-                  className="px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-400 cursor-pointer"
+                  className={`px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 ${preset.accentBorderHoverClass} cursor-pointer`}
                 >
                   {lang === 'bn' ? 'রসিদ দেখুন' : 'View Receipt'}
                 </button>
                 <button
                   type="button"
                   onClick={() => resetForm()}
-                  className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white cursor-pointer"
+                  className={`px-4 py-2.5 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white cursor-pointer`}
                 >
                   {lang === 'bn' ? 'নতুন লেনদেন' : 'New Transaction'}
                 </button>
@@ -1378,54 +1477,372 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
         </div>
       )}
 
-      {/* VIEW 3: Full Searchable History Ledger (Screenshot 1 fixed with TransactionRowItem) */}
-      {viewMode === 'history' && (
-        <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-800 overflow-hidden">
-          <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 space-y-3">
+      {/* VIEW 3: Dedicated Gift Card Studio & Gallery */}
+      {viewMode === 'gift_cards' && (
+        <div className="max-w-4xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-4 sm:p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setViewMode('home')}
+                className={`min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} cursor-pointer`}
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
+              </button>
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'উৎসব গিফট কার্ড গ্যালারি' : 'Festive Gift Card Gallery'}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn'
+                    ? 'একটি কার্ড বেছে নিন — প্রেরকের জন্য ফ্ল্যাট মাত্র ৳২ ফি'
+                    : 'Choose a card design — flat ৳2 sender-only festive fee'}
+                </p>
+              </div>
+            </div>
+            <div className={`text-xs font-mono-tabular font-semibold ${preset.accentTextClass}`}>
+              {giftCardCatalog.length} {lang === 'bn' ? 'টি ডিজাইন' : 'Designs'}
+            </div>
+          </div>
+
+          <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+            {[
+              { id: 'all', en: 'All Occasions', bn: 'সব উপলক্ষ' },
+              { id: 'eid', en: 'Eid & Faith', bn: 'ঈদ ও ধর্মীয়' },
+              { id: 'boishakh', en: 'Boishakh', bn: 'বৈশাখ' },
+              { id: 'heritage', en: 'Heritage', bn: 'ঐতিহ্য' },
+              { id: 'celebration', en: 'Celebration', bn: 'উদযাপন' },
+              { id: 'love', en: 'Love', bn: 'ভালোবাসা' },
+              { id: 'wishes', en: 'Wishes', bn: 'শুভেচ্ছা' },
+            ].map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setGiftFilter(cat.id)}
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap transition-colors cursor-pointer ${
+                  giftFilter === cat.id
+                    ? preset.activeTabClass
+                    : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {lang === 'bn' ? cat.bn : cat.en}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {filteredGiftCatalog.map((card) => (
+              <div
+                key={card.id}
+                className="acash-3d-tile rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0D14] overflow-hidden flex flex-col justify-between"
+              >
+                <div className={`relative h-32 bg-gradient-to-br ${card.gradientBg} p-4 flex flex-col justify-end text-white`}>
+                  {card.imageUrl && (
+                    <img
+                      src={card.imageUrl}
+                      alt={lang === 'bn' ? card.titleBn : card.titleEn}
+                      className="absolute inset-0 w-full h-full object-cover opacity-55"
+                    />
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/25 to-transparent" />
+                  <div className="relative z-10">
+                    <div className="text-sm font-bold leading-snug">
+                      {lang === 'bn' ? card.titleBn : card.titleEn}
+                    </div>
+                    <div className="text-[11px] text-white/80 truncate">
+                      {lang === 'bn' ? card.subtitleBn : card.subtitleEn}
+                    </div>
+                  </div>
+                </div>
+                <div className="p-3.5 space-y-3 flex-1 flex flex-col justify-between">
+                  <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-2 leading-relaxed">
+                    {lang === 'bn' ? card.defaultMessageBn : card.defaultMessageEn}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGiftDraft((prev) => ({
+                        ...prev,
+                        enabled: true,
+                        cardId: card.id,
+                        signaturePrefix: lang === 'bn' ? 'bn' : 'en',
+                        senderDisplayName: prev.senderDisplayName || user.name,
+                      }));
+                      openServiceView('send_money', true);
+                    }}
+                    className={`w-full min-h-[42px] py-2 px-3 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 cursor-pointer`}
+                  >
+                    <Gift className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'এই কার্ডে সালামি/উপহার পাঠান' : 'Send Gift with Card'}</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* VIEW 4: Dedicated Full Statements & Analytics Page */}
+      {viewMode === 'statements' && (
+        <div className="space-y-4">
+          {/* Statement Financial Summary (moved cleanly off Home) */}
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-3.5">
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-3.5 sm:p-4">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'মোট গ্রহণ' : 'Total Incoming'}
+              </div>
+              <div className="font-mono-tabular text-sm sm:text-lg font-bold text-emerald-600 dark:text-emerald-400 mt-1 truncate">
+                {formatBdt(walletInsights.incoming, lang)}
+              </div>
+            </div>
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-3.5 sm:p-4">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'মোট ব্যয়' : 'Total Outgoing'}
+              </div>
+              <div className={`font-mono-tabular text-sm sm:text-lg font-bold ${preset.accentTextClass} mt-1 truncate`}>
+                {formatBdt(walletInsights.outgoing, lang)}
+              </div>
+            </div>
+            <div className="acash-3d-tile rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-3.5 sm:p-4">
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                {lang === 'bn' ? 'মোট লেনদেন' : 'Entries'}
+              </div>
+              <div className="font-mono-tabular text-sm sm:text-lg font-bold text-slate-900 dark:text-white mt-1">
+                {walletInsights.count}
+              </div>
+            </div>
+          </div>
+
+          <div className="acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 overflow-hidden">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200/80 dark:border-slate-800 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('home')}
+                    className={`min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} cursor-pointer`}
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
+                  </button>
+                  <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
+                    {lang === 'bn' ? 'অ্যাকাউন্ট স্টেটমেন্ট' : 'Account Statements'}
+                  </h3>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
+                  className={`min-h-[40px] px-3.5 py-1.5 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>{t('downloadStatement', lang)}</span>
+                </button>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <div className="inline-flex rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 p-1 shrink-0">
+                  {(
+                    [
+                      { id: 'all', en: 'All', bn: 'সব' },
+                      { id: 'sent', en: 'Sent', bn: 'প্রেরিত' },
+                      { id: 'received', en: 'Received', bn: 'প্রাপ্ত' },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setStatementFilter(f.id)}
+                      className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                        statementFilter === f.id
+                          ? preset.activeTabClass
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      {lang === 'bn' ? f.bn : f.en}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchTx}
+                    onChange={(e) => setSearchTx(e.target.value)}
+                    placeholder={t('searchPlaceholder', lang)}
+                    className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs sm:text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {filteredTransactions.length === 0 ? (
+              <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                {t('noTransactions', lang)}
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filteredTransactions.map((tx) => (
+                  <div
+                    key={tx.txId}
+                    onClick={() => setSelectedReceipt(tx)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedReceipt(tx);
+                      }
+                    }}
+                    className="cursor-pointer"
+                  >
+                    <TransactionRowItem
+                      tx={tx}
+                      viewerAccountId={user.accountId}
+                      lang={lang}
+                      onOpenGiftCard={(giftTx) => setViewedGiftTx(giftTx)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* VIEW 5: Dedicated Inbox & Notifications Page */}
+      {viewMode === 'inbox' && (
+        <div className="max-w-3xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 overflow-hidden">
+          <div className="px-4 sm:px-6 py-4 border-b border-slate-200/80 dark:border-slate-800 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex items-center gap-2.5">
                 <button
                   type="button"
                   onClick={() => setViewMode('home')}
-                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 hover:border-indigo-400 cursor-pointer"
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} cursor-pointer`}
                 >
                   <ArrowLeft className="w-4 h-4" />
                   <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
                 </button>
-                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-                  {t('recentTransactions', lang)}
-                </h3>
+                <div>
+                  <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                    {lang === 'bn' ? 'ইনবক্স ও অ্যালার্ট' : 'Inbox & Alerts'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {unreadNotifications} {lang === 'bn' ? 'টি অপঠিত বার্তা' : 'unread messages'}
+                  </p>
+                </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => downloadAccountStatementPdf(user, transactions, feeConfig)}
-                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>{t('downloadStatement', lang)}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                {unreadNotifications > 0 && onMarkAllNotifRead && (
+                  <button
+                    type="button"
+                    onClick={onMarkAllNotifRead}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckCheck className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'সব পড়া হয়েছে' : 'Mark all read'}</span>
+                  </button>
+                )}
+                {onOpenNotifications && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotifications}
+                    className={`min-h-[38px] px-3 py-1.5 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer`}
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'ডিভাইস সাউন্ড' : 'Alert Settings'}</span>
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="relative w-full">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchTx}
-                onChange={(e) => setSearchTx(e.target.value)}
-                placeholder={t('searchPlaceholder', lang)}
-                className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs sm:text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
-              />
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setInboxTab('alerts')}
+                className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  inboxTab === 'alerts' ? preset.activeTabClass : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn' ? `অ্যালার্ট (${accountNotifications.length})` : `Notifications (${accountNotifications.length})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setInboxTab('transactions')}
+                className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  inboxTab === 'transactions' ? preset.activeTabClass : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn' ? `লেনদেন (${transactions.length})` : `Transactions (${transactions.length})`}
+              </button>
             </div>
           </div>
 
-          {filteredTransactions.length === 0 ? (
-            <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-              {t('noTransactions', lang)}
-            </div>
+          {inboxTab === 'alerts' ? (
+            accountNotifications.length === 0 ? (
+              <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                {lang === 'bn' ? 'এখনো কোনো ইনবক্স অ্যালার্ট নেই।' : 'Your Inbox is clean and quiet.'}
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {accountNotifications.map((notif) => {
+                  const read = isAccountNotificationRead(notif, user.accountId);
+                  const linkedTx = notif.txId ? txMap.get(notif.txId) : undefined;
+                  return (
+                    <div
+                      key={notif.id}
+                      className={`p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        read ? 'opacity-70' : 'bg-rose-50/40 dark:bg-rose-500/5'
+                      }`}
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-white">
+                          <span>{notif.title}</span>
+                          {!read && (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-600 text-[10px] text-white font-semibold">
+                              NEW
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                          {notif.message}
+                        </p>
+                        <div className="text-[11px] font-mono-tabular text-slate-400">
+                          {new Date(notif.createdAt).toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {linkedTx && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedReceipt(linkedTx)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                          >
+                            {lang === 'bn' ? 'রসিদ' : 'Receipt'}
+                          </button>
+                        )}
+                        {!read && onMarkNotifRead && (
+                          <button
+                            type="button"
+                            onClick={() => onMarkNotifRead(notif.id)}
+                            className={`min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold ${preset.accentTextClass} cursor-pointer`}
+                          >
+                            {lang === 'bn' ? 'পড়া হয়েছে' : 'Mark Read'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
           ) : (
             <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {filteredTransactions.map((tx) => (
+              {transactions.slice(0, 20).map((tx) => (
                 <div
                   key={tx.txId}
                   onClick={() => setSelectedReceipt(tx)}
@@ -1449,6 +1866,263 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* VIEW 6: Interactive Fee & Unverified Limit Calculator */}
+      {viewMode === 'fee_calc' && (
+        <div className="max-w-2xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-4 sm:p-6 space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setViewMode('home')}
+                className={`min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} cursor-pointer`}
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
+              </button>
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                  {lang === 'bn' ? 'চার্জ ও লিমিট ক্যালকুলেটর' : 'Fee & Limit Calculator'}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {lang === 'bn'
+                    ? 'লাইভ অ্যাডমিন রেট অনুযায়ী তাৎক্ষণিক চার্জ হিসাব'
+                    : 'Live calculation from active platform fee engine'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {(
+              [
+                { id: 'cash_out', en: 'Cash Out', bn: 'ক্যাশ আউট' },
+                { id: 'send_money', en: 'Send Money', bn: 'সেন্ড মানি' },
+                { id: 'merchant_payment', en: 'Merchant Pay', bn: 'মার্চেন্ট পে' },
+                { id: 'mobile_recharge', en: 'Recharge', bn: 'রিচার্জ' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setCalcService(opt.id)}
+                className={`min-h-[42px] px-3 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer ${
+                  calcService === opt.id
+                    ? preset.activeTabClass
+                    : 'bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                {lang === 'bn' ? opt.bn : opt.en}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-3">
+            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+              {t('amount', lang)}
+            </label>
+            <input
+              type="number"
+              min="1"
+              value={calcAmount}
+              onChange={(e) => setCalcAmount(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-base font-mono-tabular font-bold text-slate-900 dark:text-white focus:outline-none focus:border-rose-500"
+            />
+            <div className="flex flex-wrap gap-2">
+              {[500, 1000, 5000, 25000, 50000].map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setCalcAmount(String(v))}
+                  className="px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-mono-tabular text-slate-700 dark:text-slate-300 cursor-pointer"
+                >
+                  ৳{v.toLocaleString()}
+                </button>
+              ))}
+            </div>
+            {calcService === 'send_money' && (
+              <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={calcGiftCard}
+                  onChange={(e) => setCalcGiftCard(e.target.checked)}
+                  className="rounded border-slate-300"
+                />
+                <span>{lang === 'bn' ? 'গিফট কার্ড যুক্ত (ফ্ল্যাট ৳২ ফি)' : 'Include Festive Gift Card (Flat ৳2 fee)'}</span>
+              </label>
+            )}
+          </div>
+
+          <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 space-y-2.5 text-xs">
+            <div className="flex justify-between">
+              <span className="text-slate-500 dark:text-slate-400">{lang === 'bn' ? 'মূল টাকা' : 'Principal'}</span>
+              <span className="font-mono-tabular font-semibold text-slate-900 dark:text-white">
+                {formatBdt(calcNumericAmount, lang)}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500 dark:text-slate-400">{lang === 'bn' ? 'সার্ভিস চার্জ' : 'Calculated Fee'}</span>
+              <span className={`font-mono-tabular font-bold ${preset.accentTextClass}`}>
+                {formatBdt(calcBreakdown.fee, lang)}
+              </span>
+            </div>
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between text-sm">
+              <span className="font-semibold text-slate-800 dark:text-slate-200">{t('totalDeduction', lang)}</span>
+              <span className="font-mono-tabular font-bold text-slate-900 dark:text-white">
+                {formatBdt(calcNumericAmount + calcBreakdown.fee, lang)}
+              </span>
+            </div>
+          </div>
+
+          {compliance && !compliance.isFullyVerified && (
+            <div className="rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-500/35 p-4 space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-amber-800 dark:text-amber-200">
+                <span>
+                  {lang === 'bn'
+                    ? 'আনভেরিফায়েড ৭-দিন / ৳১ লক্ষ লিমিট'
+                    : 'Unverified 7-Day & ৳1,00,000 Cap'}
+                </span>
+                <span className="font-mono-tabular">
+                  {compliance.daysRemaining}d {lang === 'bn' ? 'বাকি' : 'left'}
+                </span>
+              </div>
+              <div className="h-2 rounded-full bg-amber-200/60 dark:bg-amber-900/40 overflow-hidden">
+                <div
+                  className="h-full bg-amber-500"
+                  style={{
+                    width: `${Math.min(100, Math.round((compliance.totalOutgoingUsed / UNVERIFIED_MAX_TX_VOLUME) * 100))}%`,
+                  }}
+                />
+              </div>
+              <div className="text-[11px] font-mono-tabular text-amber-800 dark:text-amber-300">
+                {formatBdt(compliance.totalOutgoingUsed, lang)} / {formatBdt(UNVERIFIED_MAX_TX_VOLUME, lang)} {lang === 'bn' ? 'ব্যবহৃত' : 'used'}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* VIEW 7: Dedicated Security, Biometrics & Voice Sound Hub */}
+      {viewMode === 'security' && (
+        <div className="max-w-2xl mx-auto acash-3d-surface rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/80 dark:border-slate-800 p-4 sm:p-6 space-y-5">
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setViewMode('home')}
+              className={`min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 ${preset.accentBorderHoverClass} cursor-pointer`}
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>{lang === 'bn' ? 'হোম' : 'Home'}</span>
+            </button>
+            <div>
+              <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                {lang === 'bn' ? 'নিরাপত্তা, বায়োমেট্রিক ও ভয়েস' : 'Security, Biometrics & Voice'}
+              </h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {lang === 'bn'
+                  ? 'প্রতিটি লেনদেনে পিন বা বায়োমেট্রিক বাধ্যতামূলক'
+                  : 'Every transaction requires Biometric or Security PIN approval'}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Fingerprint className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>{lang === 'bn' ? 'ডিভাইস বায়োমেট্রিক' : 'Device Biometrics'}</span>
+                </span>
+                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                  {enrolledBiometrics.length > 0 ? `${enrolledBiometrics.length} Active` : 'Off'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                {lang === 'bn'
+                  ? 'ফিঙ্গারপ্রিন্ট বা ফেস-আইডি যুক্ত করে দ্রুত ও নিরাপদে পেমেন্ট নিশ্চিত করুন।'
+                  : 'Approve transactions and quick logins using hardware Fingerprint or FaceID.'}
+              </p>
+              {onOpenBiometricSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenBiometricSettings}
+                  className={`w-full min-h-[42px] py-2 px-3 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white cursor-pointer`}
+                >
+                  {lang === 'bn' ? 'বায়োমেট্রিক ম্যানেজ করুন' : 'Manage Passkeys & PIN'}
+                </button>
+              )}
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Volume2 className={`w-4 h-4 ${preset.accentTextClass}`} />
+                  <span>{lang === 'bn' ? 'ভয়েস নোটিফিকেশন' : 'Voice Soundbox'}</span>
+                </span>
+                <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  {voiceMuted ? 'Muted' : 'Active'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                {user.gender === 'female'
+                  ? lang === 'bn'
+                    ? 'প্রোফাইল: মহিলা → পুরুষ কণ্ঠে লেনদেন ভয়েস অ্যালার্ট।'
+                    : 'Profile: Female → Announces transactions in a Male voice.'
+                  : lang === 'bn'
+                    ? 'প্রোফাইল: পুরুষ → নারী কণ্ঠে লেনদেন ভয়েস অ্যালার্ট।'
+                    : 'Profile: Male → Announces transactions in a Female voice.'}
+              </p>
+              <button
+                type="button"
+                onClick={toggleVoiceMute}
+                className="w-full min-h-[42px] py-2 px-3 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer"
+              >
+                {voiceMuted
+                  ? lang === 'bn'
+                    ? 'ভয়েস সাউন্ড চালু করুন'
+                    : 'Unmute Voice Soundbox'
+                  : lang === 'bn'
+                    ? 'ভয়েস সাউন্ড মিউট করুন'
+                    : 'Mute Voice Soundbox'}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-slate-50 dark:bg-[#0B0D14] border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="text-xs font-bold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                <Lock className={`w-4 h-4 ${preset.accentTextClass}`} />
+                <span>{lang === 'bn' ? 'কেওয়াইসি ও ২FA স্ট্যাটাস' : 'KYC & 2FA Compliance Status'}</span>
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                KYC: <strong className="text-slate-800 dark:text-slate-200">{(user.kyc?.status || 'unverified').toUpperCase()}</strong>
+                {' · '}
+                2FA: <strong className="text-slate-800 dark:text-slate-200">{user.totpSecret ? 'Google Auth ON' : 'EmailJS Guard'}</strong>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {onOpenKyc && (
+                <button
+                  type="button"
+                  onClick={onOpenKyc}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white dark:bg-[#121622] border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer"
+                >
+                  {lang === 'bn' ? 'কেওয়াইসি আপডেট' : 'Update KYC'}
+                </button>
+              )}
+              {onOpen2fa && (
+                <button
+                  type="button"
+                  onClick={onOpen2fa}
+                  className={`min-h-[40px] px-3.5 py-2 rounded-xl ${preset.primaryButtonClass} text-xs font-semibold text-white cursor-pointer`}
+                >
+                  {lang === 'bn' ? '২FA ও পিন' : '2FA & PIN'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

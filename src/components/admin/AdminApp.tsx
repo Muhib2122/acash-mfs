@@ -49,6 +49,7 @@ import {
   KeyRound,
   Smartphone,
   Menu,
+  ArrowLeft,
 } from 'lucide-react';
 import {
   AcashBooth,
@@ -163,6 +164,8 @@ import {
 } from './AdminExecutiveWidgets';
 import { AdminSocialEngagementPanel } from './AdminSocialEngagementPanel';
 import { AdminSecurityFortressPanel } from './AdminSecurityFortressPanel';
+import { ServiceCircleGrid, ServiceCircleItem } from '../common/ServiceCircleGrid';
+import { usePortalTheme } from '../../lib/portalThemes';
 
 interface AdminAppProps {
   lang: Language;
@@ -266,6 +269,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   securityEvents = [],
   securityPolicy = DEFAULT_SECURITY_POLICY,
 }) => {
+  const { preset } = usePortalTheme();
   const [adminEmail, setAdminEmail] = useState(DEFAULT_ADMIN_ALERT_EMAIL);
   const [adminPasscode, setAdminPasscode] = useState('');
   const [authError, setAuthError] = useState('');
@@ -2254,8 +2258,8 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
   if (!adminSession) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden">
-        <header className="px-3 sm:px-6 h-14 sm:h-16 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-2">
+      <div className={`min-h-screen ${preset.pageAmbientClass} text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200 overflow-x-hidden`}>
+        <header className={`px-3 sm:px-6 h-14 sm:h-16 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md border-b ${preset.headerAccentBg} flex items-center justify-between gap-2`}>
           <div className="min-w-0 flex-1">
             <BrandLogo size="sm" subtitle="Separate Admin Command App" />
           </div>
@@ -2265,19 +2269,19 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               onClick={onToggleTheme}
               aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              className="min-h-[38px] min-w-[38px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+              className="min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {theme === 'dark' ? (
                 <Sun className="w-4 h-4 text-amber-400" />
               ) : (
-                <Moon className="w-4 h-4 text-indigo-600" />
+                <Moon className={`w-4 h-4 ${preset.accentTextClass}`} />
               )}
               <span className="hidden sm:inline">{theme === 'dark' ? 'Light' : 'Dark'}</span>
             </button>
             <button
               type="button"
               onClick={onToggleLang}
-              className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
+              className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-slate-100 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <span className="sm:hidden">{lang === 'en' ? 'বাং' : 'EN'}</span>
               <span className="hidden sm:inline">{lang === 'en' ? 'EN | বাংলা' : 'বাংলা | EN'}</span>
@@ -2287,7 +2291,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                 href={externalUserPortalUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-h-[38px] px-2.5 sm:px-3.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 whitespace-nowrap shrink-0"
+                className={`min-h-[40px] px-2.5 sm:px-3.5 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${preset.accentIconBgClass}`}
               >
                 <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
                 <span className="hidden sm:inline">{t('switchToApp', lang)}</span>
@@ -2297,7 +2301,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               <button
                 type="button"
                 onClick={onSwitchToUnifiedApp}
-                className="min-h-[38px] px-2.5 sm:px-3.5 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-200 dark:border-indigo-500/30 text-xs font-semibold text-indigo-700 dark:text-indigo-200 inline-flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 whitespace-nowrap shrink-0"
+                className={`min-h-[40px] px-2.5 sm:px-3.5 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${preset.accentIconBgClass}`}
               >
                 <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
                 <span className="hidden sm:inline">{t('switchToApp', lang)}</span>
@@ -2380,7 +2384,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               <button
                 type="submit"
                 disabled={admin2faBusy || admin2faCodeInput.length !== 6}
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
+                className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-colors disabled:opacity-50 cursor-pointer ${preset.primaryButtonClass}`}
               >
                 {admin2faBusy
                   ? 'Verifying 2FA Code...'
@@ -2397,7 +2401,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     type="button"
                     disabled={admin2faCooldownSec > 0 || admin2faResending}
                     onClick={() => void handleResendAdmin2faCode()}
-                    className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-50 disabled:no-underline"
+                    className={`text-xs font-semibold hover:underline disabled:opacity-50 disabled:no-underline cursor-pointer ${preset.accentTextClass}`}
                   >
                     {admin2faResending
                       ? 'Sending Email Code...'
@@ -2494,9 +2498,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
               <button
                 type="button"
                 onClick={() => setAdminEmail(DEFAULT_ADMIN_ALERT_EMAIL)}
-                className={`py-2 px-2 rounded-lg text-[11px] font-semibold transition-colors ${
+                className={`min-h-[42px] py-2 px-2 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
                   isMainAdminEmail(adminEmail)
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                    ? preset.activeTabClass
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
@@ -2566,7 +2570,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold text-white shadow-sm transition-colors"
+                className={`w-full min-h-[48px] py-3.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-colors cursor-pointer ${preset.primaryButtonClass}`}
               >
                 Access Admin Command Console
               </button>
@@ -2578,7 +2582,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-[#0B0D14] text-slate-900 dark:text-slate-100 flex flex-col lg:flex-row transition-colors duration-200 overflow-x-hidden">
+    <div className={`min-h-screen ${preset.pageAmbientClass} text-slate-900 dark:text-slate-100 flex flex-col lg:flex-row transition-colors duration-200 overflow-x-hidden`}>
       {/* Mobile Drawer Backdrop */}
       {adminMobileNavOpen && (
         <div
@@ -2685,9 +2689,9 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                     setSection(item.id as AdminSection);
                     setAdminMobileNavOpen(false);
                   }}
-                  className={`min-h-[42px] px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition-colors text-left ${
+                  className={`min-h-[44px] px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 transition-colors text-left cursor-pointer ${
                     active
-                      ? 'bg-indigo-600 text-white shadow-sm'
+                      ? preset.activeTabClass
                       : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/60'
                   }`}
                 >
@@ -2724,7 +2728,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
                   setBroadcastModalOpen(true);
                   setAdminMobileNavOpen(false);
                 }}
-                className="py-2 px-2.5 rounded-xl bg-indigo-600 text-[11px] font-semibold text-white inline-flex items-center justify-center gap-1"
+                className={`min-h-[40px] py-2 px-2.5 rounded-xl text-[11px] font-semibold text-white inline-flex items-center justify-center gap-1 cursor-pointer ${preset.primaryButtonClass}`}
               >
                 <Megaphone className="w-3.5 h-3.5" />
                 <span>{lang === 'bn' ? 'অ্যালার্ট পাঠান' : 'Push Alert'}</span>
@@ -2834,7 +2838,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
 
       {/* Main Admin Workspace */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="px-3 sm:px-6 py-2.5 sm:py-3.5 border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-2 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md sticky top-0 z-30">
+        <header className={`px-3 sm:px-6 py-2.5 sm:py-3.5 border-b ${preset.headerAccentBg} flex items-center justify-between gap-2 bg-white/95 dark:bg-[#0B0D14]/95 backdrop-blur-md sticky top-0 z-30`}>
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
               type="button"
@@ -3105,7 +3109,7 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             <button
               type="button"
               onClick={() => setBroadcastModalOpen(true)}
-              className="hidden sm:inline-flex min-h-[38px] px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap shrink-0"
+              className={`hidden sm:inline-flex min-h-[40px] px-3 py-2 rounded-xl text-xs font-semibold text-white items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer ${preset.primaryButtonClass}`}
               title={lang === 'bn' ? 'অ্যাকাউন্ট পোর্টালে লাইভ অ্যালার্ট পাঠান' : 'Send Live Alert to Accounts'}
             >
               <Megaphone className="w-3.5 h-3.5 shrink-0" />
@@ -3233,12 +3237,174 @@ export const AdminApp: React.FC<AdminAppProps> = ({
             </div>
           )}
 
+          {/* Clean Multi-Page Header Strip when browsing any sub-section */}
+          {section !== 'overview' && (
+            <div className="rounded-2xl bg-white dark:bg-[#121622] border border-slate-200/90 dark:border-slate-800 p-3 flex flex-wrap items-center justify-between gap-2.5 shadow-sm dark:shadow-none">
+              <button
+                type="button"
+                onClick={() => setSection('overview')}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-[#0B0D14] border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>{lang === 'bn' ? 'হোম মেনু' : 'Overview'}</span>
+              </button>
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
+                {(
+                  [
+                    { id: 'treasury', label: lang === 'bn' ? 'ক্রেডিট ও ভল্ট' : 'Treasury' },
+                    { id: 'users', label: lang === 'bn' ? 'ইউজার' : 'Users' },
+                    { id: 'approvals', label: 'AML' },
+                    { id: 'kyc_queue', label: 'KYC' },
+                    { id: 'booths', label: lang === 'bn' ? 'বুথ ম্যাপ' : 'Booths' },
+                    { id: 'social_engagement', label: lang === 'bn' ? 'গিফট কার্ড' : 'Gift & Social' },
+                    { id: 'security', label: lang === 'bn' ? 'নিরাপত্তা' : 'Security' },
+                    { id: 'fees', label: lang === 'bn' ? 'ফি ইঞ্জিন' : 'Fees' },
+                    { id: 'ledger', label: lang === 'bn' ? 'লেজার' : 'Ledger' },
+                    { id: 'activity', label: lang === 'bn' ? 'লগ' : 'Logs' },
+                  ] as const
+                ).map((pill) => {
+                  const active = section === pill.id;
+                  return (
+                    <button
+                      key={pill.id}
+                      type="button"
+                      onClick={() => setSection(pill.id)}
+                      className={`min-h-[36px] px-3 py-1.5 rounded-xl text-[11px] font-semibold whitespace-nowrap border transition-colors cursor-pointer ${
+                        active
+                          ? preset.activeTabClass
+                          : `bg-slate-50 dark:bg-[#0B0D14] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 ${preset.accentBorderHoverClass}`
+                      }`}
+                    >
+                      {pill.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* SECTION: Overview */}
           {section === 'overview' && (
-            <div className="space-y-6">
+            <div className="space-y-5 sm:space-y-6">
+              {/* Calm bKash-Style Admin Feature Menu Hub (All Sections Organized on Clean Tiles) */}
+              <div className="rounded-3xl bg-white dark:bg-[#121622] border border-slate-200/90 dark:border-slate-800 p-4 sm:p-5 shadow-sm dark:shadow-none space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                      {lang === 'bn' ? 'অ্যাডমিন কমান্ড মেনু' : 'Admin Command Menu'}
+                    </h2>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {lang === 'bn'
+                        ? 'প্রতিটি অপারেশনের জন্য আলাদা পরিচ্ছন্ন পেজ নির্বাচন করুন'
+                        : 'Select any workspace module to open its dedicated management page'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCmdPaletteOpen(true)}
+                    className={`min-h-[36px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${preset.accentIconBgClass}`}
+                  >
+                    <Command className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'দ্রুত খুঁজুন' : 'Search'}</span>
+                  </button>
+                </div>
+
+                <ServiceCircleGrid
+                  cols="4_6"
+                  compact
+                  items={
+                    [
+                      {
+                        id: 'treasury',
+                        label: lang === 'bn' ? 'ক্রেডিট ও ভল্ট' : 'Credit & Vault',
+                        icon: PlusCircle,
+                        tone: 'rose',
+                        onClick: () => setSection('treasury'),
+                      },
+                      {
+                        id: 'users',
+                        label: lang === 'bn' ? 'সকল ইউজার' : 'Global Users',
+                        icon: Users,
+                        tone: 'indigo',
+                        onClick: () => setSection('users'),
+                      },
+                      {
+                        id: 'approvals',
+                        label: lang === 'bn' ? '৫০K+ AML' : '50K+ AML',
+                        icon: AlertOctagon,
+                        tone: 'amber',
+                        badge: metrics.pendingHighValue.length > 0 ? String(metrics.pendingHighValue.length) : undefined,
+                        onClick: () => setSection('approvals'),
+                      },
+                      {
+                        id: 'kyc_queue',
+                        label: lang === 'bn' ? 'কেওয়াইসি কিউ' : 'KYC Queue',
+                        icon: FileBadge2,
+                        tone: 'emerald',
+                        badge: metrics.pendingKycCount > 0 ? String(metrics.pendingKycCount) : undefined,
+                        onClick: () => setSection('kyc_queue'),
+                      },
+                      {
+                        id: 'booths',
+                        label: lang === 'bn' ? 'বুথ ও ম্যাপ' : 'Booth Map',
+                        icon: MapPin,
+                        tone: 'teal',
+                        onClick: () => setSection('booths'),
+                      },
+                      {
+                        id: 'social_engagement',
+                        label: lang === 'bn' ? 'গিফট ও থিম' : 'Gift & Themes',
+                        icon: Sparkles,
+                        tone: 'pink',
+                        onClick: () => setSection('social_engagement'),
+                      },
+                      {
+                        id: 'security',
+                        label: lang === 'bn' ? 'সিকিউরিটি' : 'Security Guard',
+                        icon: ShieldAlert,
+                        tone: 'cyan',
+                        onClick: () => setSection('security'),
+                      },
+                      {
+                        id: 'fees',
+                        label: lang === 'bn' ? 'ফি ইঞ্জিন' : 'Fee Engine',
+                        icon: Sliders,
+                        tone: 'violet',
+                        onClick: () => setSection('fees'),
+                      },
+                      {
+                        id: 'ledger',
+                        label: lang === 'bn' ? 'গ্লোবাল লেজার' : 'Global Ledger',
+                        icon: Lock,
+                        tone: 'sky',
+                        onClick: () => setSection('ledger'),
+                      },
+                      {
+                        id: 'activity',
+                        label: lang === 'bn' ? 'অ্যাক্টিভিটি লগ' : 'Activity Log',
+                        icon: ClipboardList,
+                        tone: 'emerald',
+                        onClick: () => setSection('activity'),
+                      },
+                      ...(!isCurrentMainAdmin
+                        ? [
+                            {
+                              id: 'admin_profile',
+                              label: lang === 'bn' ? 'আমার প্রোফাইল' : 'My Profile',
+                              icon: UserIcon,
+                              tone: 'amber' as const,
+                              onClick: () => setSection('admin_profile'),
+                            },
+                          ]
+                        : []),
+                    ] as ServiceCircleItem[]
+                  }
+                />
+              </div>
+
               {/* 3D Executive KPI Strip (Overview Only for Clean Sub-Views) */}
               <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3 sm:gap-4">
-                <div className="col-span-2 sm:col-span-1 acash-3d-tile rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-4 text-white">
+                <div className={`col-span-2 sm:col-span-1 acash-3d-tile rounded-2xl bg-gradient-to-br ${preset.customerCardGradient} border border-white/10 p-4 text-white`}>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs text-slate-300">{t('totalSystemFloat', lang)}</span>
                     <button
